@@ -2,6 +2,8 @@
 
 Production-grade chat backend that replicates the Claude Desktop experience for the MCP Process Server.
 
+**Architecture**: Clean Architecture with layered structure (API → Services → Core) for scalability, testability, and maintainability.
+
 ---
 
 ## 🎯 Project Status
@@ -98,58 +100,63 @@ redis-cli ping
 
 ---
 
-### ⏳ Step 3: Backend Project Structure (PENDING)
+### ✅ Step 3: Backend Project Structure (COMPLETE)
 
-**What will be done:**
-- Create directory structure for FastAPI backend
-- Create all `__init__.py` files
-- Create `requirements.txt` with dependencies
-- Create placeholder files
+**What was done:**
+- Created complete directory structure for FastAPI backend
+- Created all `__init__.py` files with module docstrings
+- Created `pyproject.toml` with all dependencies (modern Python standard)
+- Created placeholder Python files with class/function stubs
+- Created Docker configuration files
 
-**Directory Structure to Create:**
+**Directory Structure Created:**
 ```
 backend/
 ├── app/
 │   ├── __init__.py
-│   ├── main.py
-│   ├── config.py
-│   ├── dependencies.py
+│   ├── main.py              # FastAPI app entry point (working!)
+│   ├── config.py            # Pydantic settings
+│   ├── dependencies.py      # Dependency injection stubs
 │   ├── api/
 │   │   ├── __init__.py
-│   │   ├── chat.py
-│   │   └── health.py
+│   │   ├── chat.py          # Chat endpoints (placeholder)
+│   │   └── health.py        # Health check (placeholder)
 │   ├── core/
 │   │   ├── __init__.py
-│   │   ├── redis_client.py
-│   │   ├── mongo_client.py
-│   │   ├── mcp_client.py
-│   │   └── llm_provider.py
+│   │   ├── redis_client.py  # Redis client class structure
+│   │   └── mongo_client.py  # MongoDB client class structure
 │   ├── models/
-│   │   ├── __init__.py
-│   │   ├── events.py
-│   │   ├── requests.py
-│   │   └── storage.py
+│   │   └── __init__.py
 │   ├── services/
-│   │   ├── __init__.py
-│   │   ├── tool_registry.py
-│   │   ├── intent_detector.py
-│   │   ├── policy_gates.py
-│   │   ├── event_emitter.py
-│   │   └── result_summarizer.py
+│   │   └── __init__.py
 │   ├── workers/
-│   │   ├── __init__.py
-│   │   ├── agentic_loop.py
-│   │   ├── report_generator.py
-│   │   └── integrity_guard.py
+│   │   └── __init__.py
 │   └── utils/
-│       ├── __init__.py
-│       └── helpers.py
-├── requirements.txt
-├── Dockerfile
-└── .dockerignore
+│       └── __init__.py
+├── venv/                    # Virtual environment
+├── pyproject.toml           # Modern Python config with dependencies
+├── Dockerfile               # Docker build configuration
+└── .dockerignore            # Docker ignore patterns
 ```
 
-**Status:** Not Started
+**Status:** Complete
+
+**Verification:**
+```bash
+# Virtual environment created
+ls -la venv/
+
+# All dependencies installed
+pip list
+
+# FastAPI app running on http://localhost:8001
+curl http://localhost:8001/
+```
+
+**API Running:**
+- **URL**: http://localhost:8001
+- **Docs**: http://localhost:8001/docs
+- **Status**: Online ✅
 
 ---
 
@@ -159,11 +166,21 @@ Frontend initialization is skipped in Phase 0. Frontend development will begin i
 
 ---
 
+## 🔧 Installation Process
+
+### What We Built
+1. **Created `pyproject.toml`** - Modern Python project configuration (replaces `requirements.txt`)
+2. **Set up virtual environment** - `python3 -m venv venv`
+3. **Installed dependencies** - `pip install -e .` (editable mode with all dependencies from pyproject.toml)
+4. **Started FastAPI server** - `python -m app.main`
+
+---
+
 ## 🔧 Quick Start
 
 ### Prerequisites
 - Docker and Docker Compose installed
-- Python 3.11+ installed
+- Python 3.11+ installed (you have 3.13.5 ✅)
 - Redis CLI (optional, for testing)
 - Anthropic API key
 
@@ -179,15 +196,43 @@ docker-compose up -d
 docker-compose ps
 ```
 
-### Configure Backend
+### Setup Backend Environment
 ```bash
-# Copy environment template
-cp backend/.env.example backend/.env
+# Navigate to backend directory
+cd backend
 
+# Create virtual environment
+python3 -m venv venv
+
+# Activate virtual environment
+source venv/bin/activate
+
+# Install dependencies
+pip install -e .
+
+# Configure environment
+cp .env.example .env
 # Edit .env and add your Anthropic API key
-# Get it from: https://console.anthropic.com/
-nano backend/.env  # or use any editor
+nano .env  # or use any editor
 ```
+
+### Run FastAPI Backend
+```bash
+# Make sure you're in backend directory with venv activated
+cd backend
+source venv/bin/activate
+
+# Start the server
+PYTHONPATH=/Users/akashnikam/arken/calculation_engine/backend python -m app.main
+
+# Or run in background
+PYTHONPATH=/Users/akashnikam/arken/calculation_engine/backend python -m app.main &
+```
+
+### Access the Backend
+- **API**: http://localhost:8001
+- **API Docs (Swagger)**: http://localhost:8001/docs
+- **ReDoc**: http://localhost:8001/redoc
 
 ### Verify Setup
 ```bash
@@ -221,8 +266,13 @@ docker exec -it arken-redis redis-cli ping
 
 ### FastAPI Backend (Port 8001)
 - **Purpose**: REST API and SSE endpoints for chat interface
-- **Status**: Not yet implemented (Phase 2-7)
-- **Endpoints**: `/chat`, `/chat/{id}/stream`, `/health`
+- **Status**: ✅ Running with basic structure
+- **URL**: http://localhost:8001
+- **Docs**: http://localhost:8001/docs
+- **Endpoints**: 
+  - `GET /` - Root endpoint (working)
+  - `GET /docs` - Swagger API documentation
+  - More endpoints in Phase 7
 
 ### RQ Workers
 - **Purpose**: Background job processing for agentic loop
@@ -256,21 +306,48 @@ docker exec -it arken-redis redis-cli ping
 cd mcp_process_server/docker
 docker-compose up -d
 
-# 2. Activate Python environment (when ready)
-# cd backend
-# source venv/bin/activate  # or your preferred method
+# 2. Activate Python virtual environment
+cd ../../backend
+source venv/bin/activate
 
-# 3. Start FastAPI server (Phase 7+)
-# uvicorn app.main:app --reload --port 8001
+# 3. Start FastAPI server
+PYTHONPATH=$(pwd) python -m app.main
+
+# Server will be available at http://localhost:8001
 
 # 4. Start RQ worker (Phase 5+)
 # rq worker
 ```
 
+### Development Commands
+```bash
+# Install new dependencies (add to pyproject.toml first)
+pip install -e .
+
+# Run with auto-reload (for development)
+uvicorn app.main:app --reload --port 8001
+
+# Check installed packages
+pip list
+
+# Update dependencies
+pip install --upgrade -e .
+```
+
 ### Stopping Services
 ```bash
+# Stop FastAPI (if running in foreground)
+# Press CTRL+C
+
+# Stop FastAPI (if running in background)
+pkill -f "python -m app.main"
+
+# Stop Docker services
 cd mcp_process_server/docker
 docker-compose down
+
+# Deactivate virtual environment
+deactivate
 ```
 
 ---
@@ -347,8 +424,10 @@ The following files are git-ignored for security:
 
 - [x] Step 1: Redis added to Docker Compose
 - [x] Step 2: Environment configuration created
-- [ ] Step 3: Backend project structure initialized
-- [ ] Step 4: All services verified and tested
-- [ ] Phase 0 Documentation complete
+- [x] Step 3: Backend project structure initialized
+- [x] Step 4: Virtual environment created and dependencies installed
+- [x] Step 5: FastAPI application running successfully
+
+**Phase 0 Status: ✅ COMPLETE**
 
 **Once Phase 0 is complete, proceed to Phase 1: Tool Registry & Metadata**
