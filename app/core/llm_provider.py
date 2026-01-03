@@ -1,0 +1,384 @@
+"""
+Claude API Provider
+
+Manages communication with Anthropic's Claude API.
+Handles tool conversion, message creation, streaming, and response parsing.
+
+Key Features:
+- Convert MCP tools to Anthropic format
+- Non-streaming and streaming message creation
+- Tool call extraction and parsing
+- Error handling with exponential backoff retry
+- Token counting and cost estimation
+
+Architecture:
+┌─────────────────────┐         Anthropic API         ┌──────────────────────┐
+│   Backend           │ ───────────────────────────→  │   Claude 3.5 Sonnet  │
+│  (ClaudeProvider)   │ ←─────────────────────────    │   (Anthropic)        │
+│                     │    Messages + Tools           │                      │
+└─────────────────────┘    Tool Calls + Responses     └──────────────────────┘
+"""
+
+import asyncio
+import logging
+import os
+from typing import Any, AsyncGenerator, Dict, List, Optional, Union
+from anthropic import Anthropic, AsyncAnthropic
+from anthropic.types import Message, MessageStreamEvent
+from anthropic.types.message_create_params import MessageCreateParamsNonStreaming
+
+from .mcp_client import MCPTool
+
+logger = logging.getLogger(__name__)
+
+
+# =============================================================================
+# Configuration
+# =============================================================================
+
+DEFAULT_MODEL = "claude-3-5-sonnet-20241022"
+DEFAULT_MAX_TOKENS = 4096
+DEFAULT_TEMPERATURE = 1.0
+
+
+# =============================================================================
+# Tool Conversion
+# =============================================================================
+
+def convert_mcp_tools_to_anthropic(mcp_tools: List[MCPTool]) -> List[Dict[str, Any]]:
+    """
+    Convert MCP tools to Anthropic tool format.
+    
+    MCP format:
+        MCPTool(
+            name="simulate_process",
+            description="Run a complete process simulation...",
+            input_schema={
+                "type": "object",
+                "properties": {...},
+                "required": [...]
+            }
+        )
+    
+    Anthropic format:
+        {
+            "name": "simulate_process",
+            "description": "Run a complete process simulation...",
+            "input_schema": {
+                "type": "object",
+                "properties": {...},
+                "required": [...]
+            }
+        }
+    
+    Args:
+        mcp_tools: List of MCP tool objects
+        
+    Returns:
+        List of tools in Anthropic format
+    """
+    return [
+        {
+            "name": tool.name,
+            "description": tool.description,
+            "input_schema": tool.input_schema
+        }
+        for tool in mcp_tools
+    ]
+
+
+# =============================================================================
+# Response Parsing
+# =============================================================================
+
+class ParsedResponse:
+    """Parsed Claude response with extracted content."""
+    
+    def __init__(self, message: Message):
+        self.message = message
+        self.stop_reason = message.stop_reason
+        self.model = message.model
+        self.usage = message.usage
+        
+        # Extract content blocks
+        self.text_blocks = []
+        self.tool_calls = []
+        
+        for block in message.content:
+            if block.type == "text":
+                self.text_blocks.append(block.text)
+            elif block.type == "tool_use":
+                self.tool_calls.append({
+                    "id": block.id,
+                    "name": block.name,
+                    "input": block.input
+                })
+    
+    @property
+    def text(self) -> str:
+        """Combined text from all text blocks."""
+        return "".join(self.text_blocks)
+    
+    @property
+    def has_tool_calls(self) -> bool:
+        """Check if response contains tool calls."""
+        return len(self.tool_calls) > 0
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary representation."""
+        return {
+            "text": self.text,
+            "tool_calls": self.tool_calls,
+            "stop_reason": self.stop_reason,
+            "usage": {
+                "input_tokens": self.usage.input_tokens,
+                "output_tokens": self.usage.output_tokens
+            }
+        }
+
+
+# =============================================================================
+# Claude Provider
+# =============================================================================
+
+class ClaudeProvider:
+    """
+    Claude API Provider for LLM interactions.
+    
+    Manages all communication with Anthropic's Claude API including:
+    - Message creation (streaming and non-streaming)
+    - Tool format conversion
+    - Response parsing
+    - Error handling and retries
+    
+    Usage:
+        provider = ClaudeProvider(api_key="sk-...")
+        
+        # Get tools from MCP
+        mcp_tools = await mcp_client.list_tools()
+        
+        # Create message
+        response = await provider.create_message(
+            messages=[{"role": "user", "content": "Simulate a sugar factory"}],
+            tools=mcp_tools
+        )
+        
+        # Check for tool calls
+        if response.has_tool_calls:
+            for tool_call in response.tool_calls:
+                result = await mcp_client.call_tool(
+                    tool_call["name"],
+                    tool_call["input"]
+                )
+    """
+    
+    def __init__(
+        self,
+        api_key: Optional[str] = None,
+        model: str = DEFAULT_MODEL,
+        max_tokens: int = DEFAULT_MAX_TOKENS,
+        temperature: float = DEFAULT_TEMPERATURE,
+        max_retries: int = 3,
+        timeout: float = 300.0
+    ):
+        """
+        Initialize Claude provider.
+        
+        Args:
+            api_key: Anthropic API key (defaults to ANTHROPIC_API_KEY env var)
+            model: Claude model to use
+            max_tokens: Maximum tokens in response
+            temperature: Sampling temperature (0.0 to 1.0)
+            max_retries: Maximum retry attempts on failure
+            timeout: Request timeout in seconds
+        """
+        self.api_key = api_key or os.getenv("ANTHROPIC_API_KEY")
+        if not self.api_key:
+            raise ValueError("ANTHROPIC_API_KEY not found in environment or constructor")
+        
+        self.model = model
+        self.max_tokens = max_tokens
+        self.temperature = temperature
+        self.max_retries = max_retries
+        self.timeout = timeout
+        
+        # Initialize async client
+        self.client = AsyncAnthropic(
+            api_key=self.api_key,
+            max_retries=max_retries,
+            timeout=timeout
+        )
+        
+        logger.info(f"Claude provider initialized with model: {model}")
+    
+    async def create_message(
+        self,
+        messages: List[Dict[str, str]],
+        tools: Optional[List[MCPTool]] = None,
+        system: Optional[str] = None,
+        **kwargs
+    ) -> ParsedResponse:
+        """
+        Create a non-streaming message with Claude.
+        
+        This is the standard request/response method. Use this when:
+        - You don't need real-time streaming
+        - Processing tool calls in a loop
+        - Want simpler error handling
+        
+        Args:
+            messages: Conversation history in Anthropic format
+                [{"role": "user", "content": "..."}, ...]
+            tools: Optional MCP tools to provide to Claude
+            system: Optional system prompt
+            **kwargs: Additional parameters for message creation
+            
+        Returns:
+            ParsedResponse with text, tool calls, and metadata
+            
+        Example:
+            response = await provider.create_message(
+                messages=[{"role": "user", "content": "Simulate sugar factory"}],
+                tools=mcp_tools,
+                system="You are a process engineering assistant"
+            )
+            
+            print(response.text)  # Claude's text response
+            if response.has_tool_calls:
+                for call in response.tool_calls:
+                    print(f"Tool: {call['name']}, Args: {call['input']}")
+        """
+        # Convert MCP tools to Anthropic format
+        anthropic_tools = None
+        if tools:
+            anthropic_tools = convert_mcp_tools_to_anthropic(tools)
+            logger.debug(f"Converted {len(tools)} MCP tools to Anthropic format")
+        
+        # Build request parameters
+        params: Dict[str, Any] = {
+            "model": kwargs.get("model", self.model),
+            "messages": messages,
+            "max_tokens": kwargs.get("max_tokens", self.max_tokens),
+            "temperature": kwargs.get("temperature", self.temperature),
+        }
+        
+        if system:
+            params["system"] = system
+        
+        if anthropic_tools:
+            params["tools"] = anthropic_tools
+        
+        # Make API call with retry logic
+        try:
+            logger.debug(f"Sending message to Claude ({len(messages)} messages)")
+            message = await self.client.messages.create(**params)
+            
+            # Parse response
+            parsed = ParsedResponse(message)
+            
+            logger.info(
+                f"Claude response: {parsed.usage.input_tokens} in, "
+                f"{parsed.usage.output_tokens} out, "
+                f"stop_reason={parsed.stop_reason}"
+            )
+            
+            if parsed.has_tool_calls:
+                logger.info(f"Claude requested {len(parsed.tool_calls)} tool calls")
+                for call in parsed.tool_calls:
+                    logger.debug(f"  - {call['name']}: {list(call['input'].keys())}")
+            
+            return parsed
+            
+        except Exception as e:
+            logger.error(f"Claude API error: {e}")
+            raise
+    
+    async def create_message_stream(
+        self,
+        messages: List[Dict[str, str]],
+        tools: Optional[List[MCPTool]] = None,
+        system: Optional[str] = None,
+        **kwargs
+    ) -> AsyncGenerator[MessageStreamEvent, None]:
+        """
+        Create a streaming message with Claude.
+        
+        This yields events as Claude generates the response. Use this when:
+        - You want real-time user feedback (typing effect)
+        - Building chat UIs with streaming
+        - Need to show progress for long responses
+        
+        Args:
+            messages: Conversation history in Anthropic format
+            tools: Optional MCP tools to provide to Claude
+            system: Optional system prompt
+            **kwargs: Additional parameters for message creation
+            
+        Yields:
+            MessageStreamEvent objects as they arrive
+            
+        Event types:
+            - message_start: Message begins
+            - content_block_start: New content block (text or tool_use)
+            - content_block_delta: Incremental content (text delta)
+            - content_block_stop: Content block complete
+            - message_delta: Message metadata updates
+            - message_stop: Message complete
+            
+        Example:
+            async for event in provider.create_message_stream(
+                messages=[{"role": "user", "content": "Simulate sugar factory"}],
+                tools=mcp_tools
+            ):
+                if event.type == "content_block_delta":
+                    if event.delta.type == "text_delta":
+                        print(event.delta.text, end="", flush=True)
+                elif event.type == "content_block_start":
+                    if event.content_block.type == "tool_use":
+                        print(f"\\n[Calling tool: {event.content_block.name}]")
+        """
+        # Convert MCP tools to Anthropic format
+        anthropic_tools = None
+        if tools:
+            anthropic_tools = convert_mcp_tools_to_anthropic(tools)
+            logger.debug(f"Converted {len(tools)} MCP tools for streaming")
+        
+        # Build request parameters
+        params: Dict[str, Any] = {
+            "model": kwargs.get("model", self.model),
+            "messages": messages,
+            "max_tokens": kwargs.get("max_tokens", self.max_tokens),
+            "temperature": kwargs.get("temperature", self.temperature),
+        }
+        
+        if system:
+            params["system"] = system
+        
+        if anthropic_tools:
+            params["tools"] = anthropic_tools
+        
+        try:
+            logger.debug(f"Starting streaming message to Claude")
+            
+            async with self.client.messages.stream(**params) as stream:
+                async for event in stream:
+                    yield event
+            
+            # Log final message stats
+            final_message = await stream.get_final_message()
+            logger.info(
+                f"Stream complete: {final_message.usage.input_tokens} in, "
+                f"{final_message.usage.output_tokens} out"
+            )
+            
+        except Exception as e:
+            logger.error(f"Claude streaming error: {e}")
+            raise
+    
+    async def close(self):
+        """Close the Anthropic client connection."""
+        await self.client.close()
+        logger.info("Claude provider closed")
+    
+    def __repr__(self) -> str:
+        return f"ClaudeProvider(model={self.model}, max_tokens={self.max_tokens})"
