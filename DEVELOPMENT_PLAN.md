@@ -299,33 +299,29 @@ Build foundational backend services (Redis, MongoDB, MCP, Claude)
 
 ---
 
-### **PHASE 3: Policy Layer & Intent Detection** (Day 5-6)
+### **PHASE 3: Policy Layer & Context Management** (Day 5-6)
 
 #### Goal
-Implement production-grade policy gates and intent-based tool filtering
+Implement core policy enforcement and conversation context management (simplified approach)
+
+**Note**: Intent Detection, Response Formatting, and Tool Pre-filtering are deferred to post-MVP optimization phase. Claude will receive all 13 tools and handle intent detection naturally.
 
 #### Tasks
-1. **Intent Detector**
-   - File: `backend/app/services/intent_detector.py`
-   - Implement `IntentDetector` class
-   - Detect intent types:
-     - SIMULATION: "simulate", "run", "calculate", "estimate"
-     - EXPLANATION: "explain", "summarize", "recommend", "analyze"
-     - LOOKUP: "get", "show", "previous", "compare"
-     - DISCOVERY: "list", "what", "available"
-   - Return primary and secondary intents
-   - Keyword-based matching (regex)
+1. **Context Manager Service**
+   - File: `backend/app/services/context_manager.py`
+   - Implement `ContextManager` class
+   - Methods:
+     - `create_context(conversation_id)` - Initialize new conversation
+     - `get_context(conversation_id)` - Retrieve conversation context
+     - `update_context(conversation_id, updates)` - Update context state
+     - `add_tool_execution(conversation_id, tool_name, result)` - Track tool usage
+     - `get_executed_tools(conversation_id)` - Get tool execution history
+     - `get_last_validation(conversation_id, process_id)` - Check validation status
+   - Store context in Redis with TTL
+   - Persist to MongoDB for long-term storage
+   - Track: current_industry, current_process, executed_tools, validation_status, last_run_id
 
-2. **Tool Eligibility Filter**
-   - File: `backend/app/services/intent_detector.py`
-   - Implement `filter_tools_by_intent(intent, all_tools)`:
-     - SIMULATION → validate + simulate + lookup (domain-specific)
-     - EXPLANATION → NO TOOLS (report-only mode)
-     - LOOKUP → lookup + compare only
-     - DISCOVERY → discovery tools only
-     - Default → safe tools only
-
-3. **Policy Gates Service**
+2. **Policy Gates Service**
    - File: `backend/app/services/policy_gates.py`
    - Implement `PolicyGates` class:
    
@@ -347,30 +343,38 @@ Implement production-grade policy gates and intent-based tool filtering
    **Main method:**
    - `enforce_policy(tool_name, args, context)` → (bool, str)
 
-4. **Result Summarizer**
-   - File: `backend/app/services/result_summarizer.py`
-   - Implement `ResultSummarizer` class:
-     - `summarize_simulation_result(full_result)` → summary dict
-     - `summarize_validation_result(full_result)` → summary dict
-     - `summarize_tool_result(tool_name, full_result)` → summary dict
+3. **Simple Orchestration Service**
+   - File: `backend/app/services/orchestration_service.py`
+   - Implement `OrchestrationService` class
+   - Methods:
+     - `process_message(conversation_id, message)` - Main entry point
+     - `execute_with_policy(tool_name, args, context)` - Policy-checked execution
+     - `prepare_llm_context(conversation_id)` - Build conversation history
+   - Always send ALL 13 tools to Claude (no pre-filtering)
+   - Let Claude handle intent detection and tool selection
+   - Enforce policy before each tool execution
+   - Update context after each tool execution
 
 #### Deliverables
-- ✅ Intent detection working
-- ✅ Tool filtering by intent
-- ✅ All policy gates implemented
-- ✅ Result summarization working
-- ✅ Unit tests for all logic
+- ✅ Context Manager storing conversation state in Redis/MongoDB
+- ✅ Policy Gates enforcing validate-before-simulate
+- ✅ Simple Orchestration connecting all components
+- ✅ End-to-end flow working (user message → tool execution → response)
+- ✅ Unit tests for core logic
 
 #### Testing
-- Intent detection: Test with various user messages
-- Eligibility: Test tool filtering for each intent type
-- Prerequisites: Test validate → simulate enforcement
+- Context: Store/retrieve conversation state
+- Policy: Test validate → simulate enforcement
+- Policy: Test validation age checking (< 10 minutes = valid)
 - Budget: Test max calls and timeout enforcement
-- Summarization: Test with real simulation results
+- Orchestration: Test end-to-end message flow
+- Multi-turn: Test "simulate again" uses previous validation
 
 ---
 
 ### **PHASE 4: Event System & SSE** (Day 7)
+
+**Note**: This phase may be deferred until after frontend is complete and end-to-end flow is verified working. Event system can be added incrementally for real-time UI updates.
 
 #### Goal
 Build typed SSE event protocol for real-time UI updates
@@ -926,14 +930,20 @@ date-fns==3.2.0
 
 ## 📈 Future Enhancements (Post-MVP)
 
-1. **Multi-LLM Support**: Add OpenAI GPT-4 and Google Gemini
-2. **Authentication**: JWT-based user auth
-3. **Multi-session**: Support multiple concurrent chats
-4. **Context Summarization**: Compress old messages when nearing token limit
-5. **Tool Analytics**: Track tool usage, success rates
-6. **Advanced Filtering**: Machine learning for intent detection
-7. **Caching**: Cache validation results to save API calls
-8. **Webhooks**: Notify external systems on simulation completion
+### Core Optimizations (Add After End-to-End Works)
+1. **Intent Detector** - Pre-filter tools based on user intent (save $0.02 per message)
+2. **Response Formatter** - Custom formatting for business-specific needs (unit conversions, links)
+3. **Tool Pre-filtering** - Send only relevant 3-5 tools instead of all 13
+4. **Result Summarizer** - Compress tool results to save context tokens
+
+### Advanced Features
+5. **Multi-LLM Support**: Add OpenAI GPT-4 (Gemini already configured)
+6. **Authentication**: JWT-based user auth
+7. **Multi-session**: Support multiple concurrent chats
+8. **Context Summarization**: Compress old messages when nearing token limit
+9. **Tool Analytics**: Track tool usage, success rates, costs
+10. **Caching**: Cache validation results to save API calls
+11. **Webhooks**: Notify external systems on simulation completion
 
 ---
 

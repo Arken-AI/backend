@@ -397,40 +397,28 @@ Each MCP tool includes extended metadata (stored alongside the MCP schema):
 - Makes system auditable and debuggable
 - Supports per-domain/category access control
 
-### 2. Tool Eligibility Filtering
+### 2. Tool Eligibility Filtering (OPTIONAL - Post-MVP Optimization)
 
-**Problem**: Sending all 20 tools to Claude every request:
-- Wastes context tokens (~5K tokens for tool schemas)
-- Confuses the LLM ("why do I have 20 tools for a simple question?")
-- Increases hallucination risk
+**Current Approach (MVP)**: Send all 13 tools to Claude every request.
+- Simple implementation
+- Let Claude handle intent detection naturally
+- No pre-filtering complexity
+- Get end-to-end working first
 
-**Solution**: Filter tools based on user intent **before** calling Claude.
+**Future Optimization**: After MVP is working and you have usage data showing costs are high, add intent-based filtering.
 
-#### Intent-Based Filtering Rules
+#### Intent-Based Filtering Rules (Future)
 
-| User Intent (Keywords) | Eligible Tools | Rationale |
-|------------------------|----------------|----------|
-| "simulate", "run", "estimate", "calculate" | validate + simulate + lookup (domain-specific) | User wants to execute simulation |
-| "explain", "summarize", "recommend", "analyze" | NO TOOLS (report-only mode) | User wants narrative explanation only |
-| "get previous", "show run", "compare" | lookup + compare only | User wants historical data |
-| "list", "what runs", "history" | lookup only | User wants to browse |
+| User Intent (Keywords) | Eligible Tools | Token Savings |
+|------------------------|----------------|---------------|
+| "simulate", "run", "estimate", "calculate" | validate + simulate + lookup (domain-specific) | ~60% reduction |
+| "explain", "summarize", "recommend", "analyze" | NO TOOLS (report-only mode) | ~100% reduction |
+| "get previous", "show run", "compare" | lookup + compare only | ~80% reduction |
+| "list", "what runs", "history" | lookup only | ~85% reduction |
 
-**Report-only mode requires an existing run context.** If no session last_run_id is available and the user does not provide a calc_run_id, the system must ask a clarifying question (or suggest running a simulation first).
+**When to implement**: After you have real cost data showing tool schema tokens are a significant expense (likely $50+/month).
 
-#### Implementation Strategy
-
-**Keyword-Based Intent Detection:**
-- Detect simulation intent: "simulate", "run", "estimate", "calculate", "output"
-- Detect explanation intent: "explain", "summarize", "recommend", "analyze", "why"
-- Detect lookup intent: "get", "show", "previous", "compare", "list", "history"
-
-**Filtering Logic:**
-- Explanation intent only → No tools (report-only mode)
-- Lookup intent only → Lookup + compare tools
-- Simulation intent → Validate + simulate + lookup tools (domain-specific)
-- Default → Safe tools only
-
-**Result**: Claude sees only 3-5 relevant tools instead of 20.
+**Current tool count (13)** is small enough that filtering may not provide meaningful savings. Reconsider if tool count grows to 30+.
 
 ### 3. Backend Policy Gates
 
@@ -545,60 +533,43 @@ To ensure **explain/summarize/recommend** uses only stored data (not LLM-generat
 - Provides reliable fallback when validation fails
 - Ensures all displayed numbers are from source data
 
-### 6. Tool Result Summarization
+### 6. Tool Result Summarization (OPTIONAL - Post-MVP Optimization)
 
-**Problem**: Returning full 50KB run JSON to Claude in agentic loop:
+**Current Approach (MVP)**: Return full tool results to Claude.
+- Simple implementation
+- Let Claude handle all the data
+- Get working first, optimize later
+
+**Future Optimization**: If conversations approach token limits or costs are high, add result summarization.
+
+**Problem with full results**:
+- Returning full 50KB run JSON to Claude in agentic loop
 - Wastes context tokens
-- Confuses tool selection
 - Makes conversation history bloated
+- But: Simpler to implement initially
 
-**Solution**: Store full → return summary → reference by ID.
-
-**Summarization Strategy by Tool Type:**
-
-**simulate_process:**
+**Solution (Future)**:
 - Store full result in MongoDB with calc_run_id
-- Return summary containing:
-  - Status (success/failed)
-  - calc_run_id (reference)
-  - Top KPIs only (3-5 key metrics)
-  - Warnings count (not full list)
-  - Success message with run ID reference
+- Return only summary to Claude (status, key metrics, run_id)
+- Fetch full data only for report generation
+- Reduces 50KB → 500 bytes per tool call
 
-**validate_process_inputs:**
-- Return summary containing:
-  - Status (success/failed)
-  - Error count
-  - First 3 errors only (if any)
-  - Status message
-
-**lookup/compare tools:**
-- Return as-is (already small)
-
-**Agentic Loop Integration:**
-1. Execute tool via MCP → get full result
-2. Store full result in MongoDB with calc_run_id
-3. Generate summary from full result
-4. Return summary to Claude (not full result)
-5. In Step B (report generation), fetch full result by calc_run_id
-
-**Benefits:**
-- Reduces context token usage (50KB → 500 bytes)
-- Keeps conversation history manageable
-- Full data available when needed for report generation
+**When to implement**: After MVP works and you see token usage approaching limits or costs are significant.
 
 ### Policy Layer Summary
 
-| Control | Purpose | Impact |
-|---------|---------|--------|
-| Tool registry metadata | Programmatic filtering | Reduce tools from 20 → 3-5 |
-| Eligibility filtering | Intent-based tool selection | Prevent tool confusion |
-| Hard gates | Prevent invalid operations | Stop bad tool calls before execution |
-| Order gates | Enforce workflows | Ensure validate → simulate sequence |
-| Budget gates | Resource limits | Prevent runaway loops |
-| Two-step flow | Separate tools from narrative | Prevent number hallucination |
-| Report integrity guard | Validate report accuracy | Catch invented numbers |
-| Result summarization | Reduce context bloat | Keep conversation manageable |
+| Control | Status | Purpose | Impact |
+|---------|--------|---------|--------|
+| Tool registry metadata | ✅ MVP | Programmatic tool access | Foundation for all policy |
+| Context Manager | ✅ MVP | Track conversation state | Remember validation, parameters |
+| Hard gates | ✅ MVP | Prevent invalid operations | Stop bad tool calls before execution |
+| Order gates | ✅ MVP | Enforce workflows | Ensure validate → simulate sequence |
+| Budget gates | ✅ MVP | Resource limits | Prevent runaway loops |
+| Two-step flow | ✅ MVP | Separate tools from narrative | Prevent number hallucination |
+| Report integrity guard | ✅ MVP | Validate report accuracy | Catch invented numbers |
+| **Eligibility filtering** | 🔮 Future | Intent-based tool selection | Reduce tools from 13 → 3-5 |
+| **Result summarization** | 🔮 Future | Reduce context bloat | Keep conversation manageable |
+| **Response Formatter** | 🔮 Future | Custom formatting | Business-specific output |
 
 ---
 
