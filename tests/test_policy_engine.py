@@ -10,7 +10,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 # Add backend to path
-sys.path.insert(0, str(Path(__file__).parent / "app"))
+sys.path.insert(0, str(Path(__file__).parent.parent / "app"))
 
 from core.policy_engine import PolicyEngine, PolicyDecision, PolicyResult
 
@@ -43,8 +43,30 @@ def test_prerequisite_check():
     assert result.decision == PolicyDecision.ALLOW, "Should allow simulate after validation"
     print(f"     ✅ ALLOWED: {result.reason}")
     
-    # Test 1c: Non-simulation tools don't need validation (ALLOW)
-    print("\n  1c. Non-simulation tool (no prerequisite):")
+    # Test 1c: Simulate after validate_connections (ALLOW)
+    print("\n  1c. Simulate after validate_connections:")
+    context = {
+        "executed_tools": [
+            {
+                "tool_name": "validate_connections",
+                "timestamp": datetime.now().isoformat(),
+                "status": "success"
+            }
+        ]
+    }
+    result = engine.enforce_policy("simulate_process", context)
+    assert result.decision == PolicyDecision.ALLOW, "Should allow simulate after any validation tool"
+    print(f"     ✅ ALLOWED: {result.reason}")
+    
+    # Test 1d: Simulate equipment without validation (DENY)
+    print("\n  1d. Simulate equipment without validation:")
+    context = {"executed_tools": []}
+    result = engine.enforce_policy("simulate_equipment", context)
+    assert result.decision == PolicyDecision.DENY, "Should deny simulate_equipment without validation"
+    print(f"     ✅ DENIED: {result.reason}")
+    
+    # Test 1e: Non-simulation tools don't need validation (ALLOW)
+    print("\n  1e. Non-simulation tool (no prerequisite):")
     context = {"executed_tools": []}
     result = engine.enforce_policy("get_process_schema", context)
     assert result.decision == PolicyDecision.ALLOW, "Should allow non-simulation tools"

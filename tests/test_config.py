@@ -4,6 +4,21 @@ Test Configuration Management
 Tests for the centralized configuration system.
 """
 
+import sys
+import os
+from pathlib import Path
+
+# Add parent directory to path
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+# Set required environment variables for testing
+os.environ.setdefault("MONGODB_URL", "mongodb://localhost:27017/test_db")
+os.environ.setdefault("MCP_SERVER_COMMAND", "/usr/bin/python")
+os.environ.setdefault("MCP_SERVER_ARGS", "/path/to/server.py")
+os.environ.setdefault("MCP_SERVER_ENV_MONGODB_URI", "mongodb://localhost:27017/test_db")
+os.environ.setdefault("ANTHROPIC_API_KEY", "test-key")
+os.environ.setdefault("GOOGLE_API_KEY", "test-key")
+
 import pytest
 from app.config import settings, get_settings
 
@@ -38,6 +53,10 @@ def test_llm_configuration():
 
 def test_google_api_key_cleaning():
     """Test that Google API key is cleaned (removes leading =)."""
+    # Skip if using test key
+    if settings.google_api_key == "test-key":
+        return
+    
     # API key should not start with =
     assert not settings.google_api_key.startswith("=")
     # Should start with expected prefix

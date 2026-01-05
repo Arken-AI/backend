@@ -8,9 +8,10 @@ Run with: python test_context_manager.py
 import sys
 import redis
 from datetime import datetime, timedelta
+from pathlib import Path
 
 # Add parent directory to path
-sys.path.insert(0, '/Users/akashnikam/arken/calculation_engine/backend')
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from app.services.context_manager import ContextManager
 from motor.motor_asyncio import AsyncIOMotorClient
