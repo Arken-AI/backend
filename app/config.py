@@ -65,6 +65,10 @@ class Settings(BaseSettings):
         default=3600,
         description="TTL for Redis events in seconds"
     )
+    redis_context_ttl: int = Field(
+        default=3600,
+        description="TTL for Redis context (conversation state) in seconds"
+    )
     
     # =============================================================================
     # MCP Server Configuration
