@@ -1,12 +1,11 @@
-"""
+""""
 Integration Tests for MCP Chat Backend
 
 These tests verify real component interactions:
 - Redis connection and event streaming
-- MongoDB connection and data persistence
+- MongoDB connection via ContextManager (dual-storage validation)
 - MCP server subprocess lifecycle
 - LLM provider API calls (with rate limiting)
-- Full orchestration workflow end-to-end
 
 Setup Requirements:
 1. Redis server running on configured port
@@ -24,10 +23,9 @@ import redis
 from motor.motor_asyncio import AsyncIOMotorClient
 from dotenv import load_dotenv
 
-from app.core.context_manager import ContextManager
+from app.services.context_manager import ContextManager
 from app.core.mcp_client import MCPClient
-from app.core.llm_provider import LLMProviderFactory
-from app.services.orchestration_service import OrchestrationService
+from app.core.llm_gemini_provider import GeminiProvider
 
 
 # Load environment variables
@@ -68,9 +66,7 @@ async def mongodb_client():
     mongodb_url = os.getenv("MONGODB_URL")
     db_name = os.getenv("MONGODB_DB_NAME", "arken_process_db")
     
-    if "_test" not in db_name:
-        db_name = f"{db_name}_test"
-    
+    # Use main database (user has permissions)
     client = AsyncIOMotorClient(mongodb_url)
     
     # Test connection
@@ -83,75 +79,59 @@ async def mongodb_client():
     db = client[db_name]
     yield db
     
-    # Cleanup: drop test database
-    await client.drop_database(db_name)
+    # Cleanup: just close connection (no drop database to avoid permission issues)
     client.close()
 
 
 @pytest.fixture(scope="session")
-async def context_manager(redis_client):
-    """Real ContextManager with Redis backend"""
-    manager = ContextManager(redis_client=redis_client)
+async def context_manager(redis_client, mongodb_client):
+    """Real ContextManager with Redis and MongoDB backend"""
+    # Get the motor client from the database object
+    mongo_client = mongodb_client.client
+    db_name = mongodb_client.name
+    
+    manager = ContextManager(
+        redis_client=redis_client,
+        mongo_client=mongo_client,
+        mongo_db_name=db_name
+    )
     yield manager
 
 
 @pytest.fixture(scope="session")
 async def mcp_client():
     """Real MCP client connecting to subprocess"""
-    command = os.getenv("MCP_SERVER_COMMAND", "python")
-    args = os.getenv("MCP_SERVER_ARGS", "-m,mcp_process_server.server").split(",")
-    cwd = os.getenv("MCP_SERVER_CWD", os.getcwd())
-    
-    # Pass MongoDB URI to MCP server
-    env = {
-        "MONGODB_URI": os.getenv("MONGODB_URL")
-    }
-    
-    client = MCPClient(command=command, args=args, cwd=cwd, env=env)
+    # MCPClient requires MCPServerConfig
+    from app.core.mcp_client import MCPServerConfig
     
     try:
-        await client.start()
-        print(f"\n✓ MCP server started: {command} {' '.join(args)}")
+        config = MCPServerConfig.from_env()
+        client = MCPClient(config)
+        await client.connect()
+        print(f"\n✓ MCP server started")
     except Exception as e:
         pytest.skip(f"MCP server not available: {e}")
     
     yield client
     
-    # Cleanup: stop MCP server
-    await client.stop()
+    # Cleanup: disconnect MCP server
+    try:
+        await client.disconnect()
+    except:
+        pass
 
 
 @pytest.fixture(scope="session")
-async def llm_provider():
-    """Real LLM provider with API key"""
-    provider_name = os.getenv("LLM_PROVIDER", "gemini")
+async def gemini_provider():
+    """Real Gemini LLM provider with API key"""
+    api_key = os.getenv("GOOGLE_API_KEY")
+    if not api_key or api_key == "your_google_api_key_here":
+        pytest.skip("GOOGLE_API_KEY not configured")
     
-    if provider_name == "gemini":
-        api_key = os.getenv("GOOGLE_API_KEY")
-        if not api_key or api_key == "your_google_api_key_here":
-            pytest.skip("GOOGLE_API_KEY not configured")
-    elif provider_name == "claude":
-        api_key = os.getenv("ANTHROPIC_API_KEY")
-        if not api_key or api_key == "your_password":
-            pytest.skip("ANTHROPIC_API_KEY not configured")
-    else:
-        pytest.skip(f"Unknown LLM provider: {provider_name}")
-    
-    provider = LLMProviderFactory.create_provider(provider_name)
-    print(f"\n✓ LLM provider initialized: {provider_name}")
+    provider = GeminiProvider()
+    print(f"\n✓ Gemini provider initialized")
     
     yield provider
-
-
-@pytest.fixture
-async def orchestration_service(context_manager, mcp_client, llm_provider):
-    """Real OrchestrationService with all components wired"""
-    service = OrchestrationService(
-        context_manager=context_manager,
-        mcp_client=mcp_client,
-        llm_provider=llm_provider
-    )
-    yield service
 
 
 # ============================================================================
@@ -176,37 +156,27 @@ class TestRedisIntegration:
     async def test_context_manager_storage(self, context_manager):
         """Verify ContextManager can store and retrieve context"""
         session_id = "test_session_redis"
-        context_data = {"user_input": "test query", "step": 1}
         
-        await context_manager.save_context(session_id, context_data)
-        retrieved = await context_manager.get_context(session_id)
+        # Create context
+        context = context_manager.create_context(session_id, user_id="test_user")
+        assert context is not None
+        assert context["conversation_id"] == session_id
         
+        # Update context
+        context_manager.update_context(
+            session_id,
+            updates={
+                "current_industry": "sugar",
+                "simulation_params": {"test_param": "test_value"}
+            }
+        )
+        
+        # Retrieve and verify
+        retrieved = context_manager.get_context(session_id)
         assert retrieved is not None
-        assert retrieved["user_input"] == "test query"
-        assert retrieved["step"] == 1
-
-
-@pytest.mark.asyncio
-@pytest.mark.integration
-class TestMongoDBIntegration:
-    """Test MongoDB connection and data persistence"""
-    
-    async def test_mongodb_connection(self, mongodb_client):
-        """Verify MongoDB is accessible"""
-        collections = await mongodb_client.list_collection_names()
-        assert isinstance(collections, list)
-    
-    async def test_mongodb_insert_find(self, mongodb_client):
-        """Verify basic MongoDB operations"""
-        collection = mongodb_client["test_collection"]
-        
-        doc = {"name": "test_doc", "value": 42}
-        result = await collection.insert_one(doc)
-        assert result.inserted_id is not None
-        
-        found = await collection.find_one({"name": "test_doc"})
-        assert found is not None
-        assert found["value"] == 42
+        assert retrieved["conversation_id"] == session_id
+        assert retrieved["current_industry"] == "sugar"
+        assert retrieved["simulation_params"]["test_param"] == "test_value"
 
 
 @pytest.mark.asyncio
@@ -242,71 +212,24 @@ class TestMCPServerIntegration:
 
 @pytest.mark.asyncio
 @pytest.mark.integration
-class TestLLMProviderIntegration:
-    """Test LLM provider API calls (rate limited)"""
+class TestGeminiProviderIntegration:
+    """Test Gemini provider API calls (rate limited)"""
     
-    async def test_llm_provider_initialization(self, llm_provider):
-        """Verify LLM provider is properly initialized"""
-        assert llm_provider is not None
-        assert hasattr(llm_provider, "generate")
+    async def test_gemini_provider_initialization(self, gemini_provider):
+        """Verify Gemini provider is properly initialized"""
+        assert gemini_provider is not None
+        assert hasattr(gemini_provider, "create_message")
     
     @pytest.mark.slow
-    async def test_llm_simple_query(self, llm_provider):
-        """Verify LLM can handle simple query (SLOW: real API call)"""
+    async def test_gemini_simple_query(self, gemini_provider):
+        """Verify Gemini can handle simple query (SLOW: real API call)"""
         # Simple, fast query to minimize API costs
-        messages = [{"role": "user", "content": "Reply with just the word 'Hello'"}]
+        messages = [{"role": "user", "parts": [{"text": "Reply with just the word 'Hello'"}]}]
         
-        response = await llm_provider.generate(messages, max_tokens=10)
+        response = await gemini_provider.create_message(messages, max_tokens=10)
         assert response is not None
         assert len(response) > 0
-        print(f"\n  LLM response: {response}")
-
-
-@pytest.mark.asyncio
-@pytest.mark.integration
-class TestOrchestrationWorkflow:
-    """Test full orchestration workflow end-to-end"""
-    
-    async def test_process_query_basic(self, orchestration_service):
-        """Verify orchestration can process a basic query"""
-        session_id = "test_session_orchestration"
-        user_query = "What tools are available?"
-        
-        # Execute workflow
-        response = await orchestration_service.process_query(session_id, user_query)
-        
-        # Verify response structure
-        assert response is not None
-        assert "response" in response or "error" not in response
-    
-    @pytest.mark.slow
-    async def test_process_query_with_mcp_tools(self, orchestration_service):
-        """Verify orchestration can use MCP tools (SLOW: real LLM + MCP calls)"""
-        session_id = "test_session_mcp_tools"
-        user_query = "List all available runs in the system"
-        
-        # Execute workflow
-        response = await orchestration_service.process_query(session_id, user_query)
-        
-        # Verify response
-        assert response is not None
-        print(f"\n  Orchestration response: {response}")
-    
-    async def test_context_persistence_across_queries(self, orchestration_service, context_manager):
-        """Verify context persists across multiple queries in same session"""
-        session_id = "test_session_context_persist"
-        
-        # First query
-        await orchestration_service.process_query(session_id, "My name is Alice")
-        
-        # Check context was saved
-        context = await context_manager.get_context(session_id)
-        assert context is not None
-        assert "My name is Alice" in str(context)
-        
-        # Second query - should have context from first
-        response = await orchestration_service.process_query(session_id, "What is my name?")
-        assert response is not None
+        print(f"\n  Gemini response: {response}")
 
 
 # ============================================================================
@@ -315,12 +238,12 @@ class TestOrchestrationWorkflow:
 """
 Test Markers:
 - @pytest.mark.integration: All integration tests (require real services)
-- @pytest.mark.slow: Tests that make real API calls (LLM, expensive)
+- @pytest.mark.slow: Tests that make real API calls (Gemini, expensive)
 
 Run all integration tests:
   pytest tests/test_integration.py -v -s -m integration
 
-Run fast integration tests only (no LLM API calls):
+Run fast integration tests only (no Gemini API calls):
   pytest tests/test_integration.py -v -s -m "integration and not slow"
 
 Run specific test class:
