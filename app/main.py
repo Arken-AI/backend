@@ -1,15 +1,35 @@
 """
 FastAPI Application Entry Point
 
-This is the main FastAPI application that will be implemented in Phase 7.
+Main FastAPI application with SSE streaming support.
 """
 
+from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-# TODO: Import routers in Phase 7
+from app.api import stream
+from app.dependencies import close_redis_client
+from app.config import settings
+
+# TODO: Import additional routers in Phase 7
 # from app.api import chat, health
-# from app.config import settings
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """
+    Application lifespan manager.
+    
+    Handles startup and shutdown events:
+    - Startup: Initialize connections
+    - Shutdown: Close Redis, MongoDB, etc.
+    """
+    # Startup
+    yield
+    
+    # Shutdown
+    await close_redis_client()
 
 
 def create_app() -> FastAPI:
@@ -23,18 +43,22 @@ def create_app() -> FastAPI:
         title="MCP Chat Backend",
         description="Production-grade chat backend for MCP Process Server",
         version="0.1.0",
+        lifespan=lifespan
     )
     
-    # TODO: Add CORS middleware in Phase 7
-    # app.add_middleware(
-    #     CORSMiddleware,
-    #     allow_origins=settings.CORS_ORIGINS,
-    #     allow_credentials=True,
-    #     allow_methods=["*"],
-    #     allow_headers=["*"],
-    # )
+    # CORS middleware (allow frontend to connect)
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],  # TODO: Restrict in production
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
     
-    # TODO: Include routers in Phase 7
+    # Include routers
+    app.include_router(stream.router, prefix="/api", tags=["streaming"])
+    
+    # TODO: Include additional routers in Phase 7
     # app.include_router(health.router, prefix="/health", tags=["health"])
     # app.include_router(chat.router, prefix="/chat", tags=["chat"])
     
@@ -51,7 +75,11 @@ async def root():
         "service": "MCP Chat Backend",
         "version": "0.1.0",
         "status": "online",
-        "message": "Backend structure initialized. API endpoints will be added in Phase 7."
+        "features": ["SSE Event Streaming"],
+        "endpoints": {
+            "stream": "/api/chat/{request_id}/stream",
+            "docs": "/docs"
+        }
     }
 
 
