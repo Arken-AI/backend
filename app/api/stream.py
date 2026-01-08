@@ -10,8 +10,8 @@ Key features:
 - Auto-terminates on completion (message_final event)
 
 Usage:
-    # Frontend JavaScript
-    const eventSource = new EventSource('/api/chat/req_123/stream?after_sequence=0');
+    # Frontend JavaScript - use the same conversation_id from your chat request
+    const eventSource = new EventSource('/api/chat/conv_test_123/stream?after_sequence=0');
     eventSource.onmessage = (event) => {
         const data = JSON.parse(event.data);
         console.log(data.event_type, data);
@@ -141,9 +141,9 @@ async def event_stream_generator(
         yield f'data: {{"event_type": "error", "message": "Stream error"}}\n\n'
 
 
-@router.get("/chat/{request_id}/stream", response_class=EventSourceResponse)
+@router.get("/chat/{conversation_id}/stream", response_class=EventSourceResponse)
 async def stream_chat_events(
-    request_id: str,
+    conversation_id: str,
     after_sequence: int = Query(
         default=0,
         description="Only stream events after this sequence (for replay on reconnection)",
@@ -152,7 +152,10 @@ async def stream_chat_events(
     event_emitter: EventEmitter = Depends(get_event_emitter)
 ) -> StreamingResponse:
     """
-    Stream real-time events for a chat request using SSE.
+    Stream real-time events for a chat conversation using SSE.
+    
+    **IMPORTANT:** Use the same `conversation_id` from your POST /api/chat request.
+    Events are stored by conversation_id, so you must use the same value here.
     
     **SSE Protocol:**
     - Opens long-lived HTTP connection
@@ -180,7 +183,7 @@ async def stream_chat_events(
     - Client receives last event and connection closes gracefully
     
     Args:
-        request_id: Unique request identifier
+        conversation_id: The conversation identifier (same as used in POST /api/chat)
         after_sequence: Resume from this sequence number (default: 0 = all events)
         event_emitter: Injected EventEmitter service
         
@@ -189,8 +192,8 @@ async def stream_chat_events(
         
     Example:
         ```javascript
-        // Frontend usage
-        const eventSource = new EventSource('/api/chat/req_123/stream?after_sequence=0');
+        // Frontend usage - use the same conversation_id from your chat request
+        const eventSource = new EventSource('/api/chat/conv_test_123/stream?after_sequence=0');
         
         eventSource.onmessage = (event) => {
             const data = JSON.parse(event.data);
@@ -220,7 +223,7 @@ async def stream_chat_events(
         ```
     """
     generator = event_stream_generator(
-        request_id=request_id,
+        request_id=conversation_id,
         event_emitter=event_emitter,
         after_sequence=after_sequence
     )

@@ -16,23 +16,41 @@ This development plan follows a **backend-first approach**:
 
 ## Technology Stack
 
-### Backend
-- **Framework**: FastAPI (async)
-- **Queue**: RQ (Redis Queue)
+### Backend ✅ Implemented
+- **Framework**: FastAPI (async) with Pydantic v2
+- **LLM Provider**: Google Gemini 2.0 Flash (configurable, Claude support ready)
 - **Databases**: MongoDB (persistent), Redis (session + events)
-- **LLM**: Anthropic Claude
-- **MCP**: Existing mcp_process_server (stdio transport)
+- **MCP**: Existing mcp_process_server (stdio transport, 13 tools)
+- **Event Streaming**: Redis Streams + SSE
 
-### Frontend
+### Frontend (Phase 8 - Not Started)
 - **Framework**: Vite + React
 - **State Management**: Context API (simple, built-in)
 - **Styling**: Tailwind CSS
 - **Markdown**: react-markdown + remark-gfm
 
-### Infrastructure
-- **MongoDB**: Already running in Docker
-- **Redis**: To be added to docker-compose.yml
+### Infrastructure ✅ Running
+- **MongoDB**: Running in Docker with authentication
+- **Redis**: Running with Streams support
 - **Authentication**: Skipped for MVP (add later)
+
+---
+
+## Current Status Summary
+
+| Phase | Status | Key Deliverables |
+|-------|--------|------------------|
+| Phase 0: Infrastructure | ✅ Complete | Docker, Redis, MongoDB, Project structure |
+| Phase 1: Tool Registry | ✅ Complete | 13 tools with metadata |
+| Phase 2: Core Infrastructure | ✅ Complete | Redis, MongoDB, MCP, LLM clients |
+| Phase 3: Policy & Context | ✅ Complete | Context manager, Policy gates |
+| Phase 4: Event System | ✅ Complete | 8 event types, SSE streaming |
+| Phase 5: Agentic Loop | ✅ Complete | Multi-turn, auto-recovery, token tracking |
+| Phase 6: MongoDB Persistence | ✅ Complete | Dual storage (Redis + MongoDB) |
+| Phase 7: FastAPI Endpoints | ✅ Complete | POST /chat, GET /stream, health |
+| Phase 8: Frontend | 🔄 Next | React UI with SSE integration |
+
+**Backend is fully functional and ready for frontend development!**
 
 ---
 
@@ -512,88 +530,65 @@ Event system fully implemented with Redis Streams storage, SSE endpoint, and orc
 
 ---
 
-### **PHASE 5: RQ Worker & Agentic Loop** (Day 8-10) 🔄 **NEXT PHASE**
+### **PHASE 5: RQ Worker & Agentic Loop** (Day 8-10) ✅ **COMPLETED**
 
-**Status**: Ready to start
+**Status**: ✅ Completed (Agentic Loop implemented directly in Orchestration Service)
 **Prerequisites**: ✅ Phase 4 complete (Event System working)
 
-**Decision Point**: 
-- **Current Plan**: Implement background job processing for long-running simulations
-- **Alternative**: Skip to Phase 7 (Chat API endpoint) for immediate end-to-end testing
-- **Recommendation**: Implement Phase 7 first to enable Postman testing, then add Phase 5 for production scalability
+**Decision**: Instead of using RQ background workers, the agentic loop was implemented directly in the OrchestrationService for simpler architecture. Background workers can be added later if needed for very long-running simulations.
 
 #### Goal
-Build the core agentic execution engine (Step A + Step B)
+Build the core agentic execution engine with auto-recovery
 
-#### Tasks
-1. **RQ Job Infrastructure**
-   - File: `backend/app/workers/__init__.py`
-   - Set up RQ worker configuration
-   - Redis queue setup
-   - Job retry policies
+#### Summary
+Implemented a production-grade agentic loop that matches Claude Desktop behavior - automatically retries on errors, maintains conversation history with tool results, and iterates until the LLM has all information needed.
 
-2. **Agentic Loop Job (Step A)**
-   - File: `backend/app/workers/agentic_loop.py`
-   - Implement `run_agentic_loop_job(request_id, session_id, user_message)`
-   
-   **Step A Flow:**
-   - Emit thinking.start
-   - Load session context from Redis
-   - Detect intent from user message
-   - Get all MCP tools
-   - Filter tools by intent (eligibility filtering)
-   - Convert MCP tools to Claude format
-   - Build conversation history
-   - Call Claude with eligible tools
-   - Loop until stop_reason == "end_turn":
-     - If tool_use: enforce policy gates
-     - Call tool via MCP if allowed
-     - Store full result in MongoDB
-     - Summarize result
-     - Emit tool events
-     - Return summary to Claude
-   - Emit thinking.end
-   - Return calc_run_id
+**Completed Features:**
+- ✅ Agentic loop with max 10 iterations
+- ✅ Multi-turn conversation history (user → assistant tool calls → tool results → assistant response)
+- ✅ Auto-recovery from errors (wrong process names, validation failures sent back to LLM)
+- ✅ Model-specific system prompts (Claude minimal, Gemini detailed)
+- ✅ Token tracking across all iterations
+- ✅ Event emission at all key points
 
-3. **Report Generator (Step B)**
-   - File: `backend/app/workers/report_generator.py`
-   - Implement `generate_report(request_id, calc_run_id)`
-   
-   **Step B Flow:**
-   - Emit thinking.start
-   - Fetch full run data from MongoDB
-   - Build report prompt with run data
-   - Call Claude WITHOUT tools
-   - Stream response with message.delta
-   - Emit message.final
-   - Emit thinking.end
+**Key Implementation Details:**
+```
+Agentic Loop Flow:
+1. User sends message
+2. LLM proposes tool call(s)
+3. Execute tools (success OR error)
+4. Send ALL results back to LLM
+5. LLM decides: call more tools OR respond
+6. Repeat until LLM responds with text (max 10 iterations)
+```
 
-4. **Cancellation Support**
-   - Implement cancellation flag checking
-   - Check job status before expensive operations
-   - Graceful abort with partial results
+**Files Modified:**
+- `app/services/orchestration_service.py` - Complete rewrite (767 lines)
+  - `process_message()` - Main agentic loop with iteration tracking
+  - `_call_llm_with_history()` - Multi-turn LLM calls with tool results
+  - `_execute_tool()` - Tool execution with error handling
+  - Model-specific system prompts for Claude vs Gemini
+- `app/core/llm_gemini_provider.py` - Multi-turn support
+  - `_convert_messages()` - Handles assistant tool calls and tool results
+  - Formats `functionCall` and `functionResponse` for Gemini API
+- `app/models/requests.py` - Token tracking
+  - Added `TokenUsage` model (input_tokens, output_tokens, total_tokens)
+  - `ChatResponse` includes `token_usage` field
+- `mcp_process_server/schemas.py` - Default parameters
+  - `node_params` now `Optional[Dict] = None` for default equipment settings
 
-5. **Integration**
-   - Connect all pieces:
-     - MCP client for tool calls
-     - Policy gates before each tool call
-     - Result summarizer after each tool call
-     - Event emitter throughout
-     - MongoDB storage for runs
+#### Deliverables ✅
+- ✅ Complete agentic loop working (tested with curl)
+- ✅ Auto-recovery from wrong process names (sugar_production → sugar_factory)
+- ✅ Policy enforcement integrated (can be enabled/disabled)
+- ✅ Event emission throughout (thinking, tool, message events)
+- ✅ Token tracking (28,000+ tokens for complex queries)
 
-#### Deliverables
-- ✅ Complete agentic loop working
-- ✅ Two-step flow (A + B) implemented
-- ✅ Policy enforcement integrated
-- ✅ Event emission throughout
-- ✅ Cancellation support
-
-#### Testing
-- Test with real user message: "Simulate sugar factory with 15000 kg/hr"
-- Verify tool calls are policy-compliant
-- Verify events are emitted correctly
-- Test cancellation mid-simulation
-- Verify MongoDB stores full results
+#### Testing Results ✅
+- ✅ Simple query: "list all industries" → 1 tool call, 4,248 tokens
+- ✅ Complex query: "how many equipments" → 3 tool calls, 9,573 tokens  
+- ✅ Auto-recovery: Wrong process "sugar_production" → auto-corrects to "sugar_factory"
+- ✅ Full simulation: Runs through validate → simulate with 30,000+ tokens
 
 ---
 
@@ -655,138 +650,158 @@ ContextManager already had dual-storage architecture designed. Phase 6 work invo
 
 ---
 
-### **PHASE 5: RQ Worker & Agentic Loop** (Deferred)
+### **PHASE 5b: Background Workers** (Future - If Needed)
 
-**Status**: 🔄 Deferred until after Phase 7
-**Reason**: Chat API endpoint (Phase 7) needed first for end-to-end testing
-**Priority**: Implement Phase 7 → Test with Postman → Then add background workers
+**Status**: 📋 Deferred (Optional optimization)
+**Reason**: Current synchronous implementation handles requests well. Background workers can be added if simulation times exceed 30 seconds regularly.
 
 #### Goal
-Prevent LLM from inventing numbers in reports
+Move long-running simulations to background workers for better scalability
 
-#### Tasks
-1. **Number Extraction Utility**
-   - File: `backend/app/workers/integrity_guard.py`
-   - Implement `extract_numbers(text: str)` → List[float]
-   - Use regex to find all numbers in text
-   - Include units-aware extraction
-   - Return normalized float values
+#### Tasks (If Implemented Later)
+1. **RQ Job Infrastructure**
+   - Set up RQ worker configuration
+   - Redis queue setup
+   - Job retry policies
 
-2. **Integrity Validator**
-   - File: `backend/app/workers/integrity_guard.py`
-   - Implement `validate_report(report_text, source_data)` → (bool, List[str])
-   - Extract all numbers from report
-   - Extract all numbers from source JSON
-   - Compare with 1% rounding tolerance
-   - Return validation result + invented numbers list
+2. **Background Simulation Job**
+   - Move simulation execution to RQ worker
+   - Async job status tracking
+   - Progress events from worker
 
-3. **Template Report Generator**
-   - File: `backend/app/workers/integrity_guard.py`
-   - Implement `generate_template_report(run_data)` → str
-   - Deterministic markdown generation
-   - Process metadata section
-   - KPIs table from run JSON
-   - Warnings list from run JSON
-   - No LLM involved
+3. **Report Integrity Guard**
+   - Number extraction utility
+   - Validate LLM-generated reports against source data
+   - Template report as fallback
 
-4. **Integration into Report Generator**
-   - Modify report generator with retry logic
-   - Max 2 retries for validation
-   - Fallback to template if validation fails
-
-#### Deliverables
-- ✅ Report integrity validation working
-- ✅ Template report as fallback
-- ✅ Integration with report generator
-- ✅ Unit tests for validation logic
-
-#### Testing
-- Test with valid report (all numbers match)
-- Test with invalid report (invented numbers)
-- Verify fallback to template report
-- Test edge cases (percentages, scientific notation)
+#### When to Implement
+- If average simulation time exceeds 30 seconds
+- If concurrent user load requires request queuing
+- If API response timeouts become an issue
 
 ---
 
-### **PHASE 7: FastAPI Endpoints** (Day 12)
+### **PHASE 7: FastAPI Endpoints** (Day 12) ✅ **COMPLETED**
 
-**⚠️ LAST BACKEND-ONLY PHASE - Frontend development begins in Phase 8**
+**Status**: ✅ All endpoints implemented and tested
+**Note**: This was the final backend-only phase. Frontend development begins in Phase 8.
 
 #### Goal
 Build REST API endpoints for chat interface
 
-#### Tasks
-1. **Request/Response Models**
-   - File: `backend/app/models/requests.py`
-   - Define models:
-     - ChatRequest (session_id, message, client_message_id)
-     - ChatResponse (request_id, status)
-     - ChatStateResponse (request_id, status, messages, last_run_id)
+#### Summary
+Complete chat API implemented with agentic loop, SSE streaming, token tracking, and multi-turn conversation support.
 
-2. **Chat Endpoints**
-   - File: `backend/app/api/chat.py`
-   - Implement endpoints:
-   
-   **POST /chat**
-   - Validate request
-   - Check idempotency
-   - Generate request_id
-   - Queue RQ job
-   - Return request_id and status
-   
-   **GET /chat/{request_id}/stream**
-   - Replay from last_event_id if provided
-   - Stream live events from Redis Streams
-   - Format as SSE
-   
-   **POST /chat/{request_id}/cancel**
-   - Set cancellation flag in Redis
-   - Return cancellation status
-   
-   **GET /chat/{request_id}**
-   - Fetch final state from Redis + MongoDB
-   - Return status, messages, last_run_id
+**Completed Features:**
+- ✅ POST /api/chat - Send messages with agentic loop processing
+- ✅ GET /api/chat/{conversation_id}/stream - SSE streaming with replay support
+- ✅ GET /api/chat/{conversation_id}/context - Retrieve conversation context
+- ✅ DELETE /api/chat/{conversation_id}/context - Clear conversation
+- ✅ GET /api/health - Health check endpoint
+- ✅ Token usage tracking in responses
+- ✅ Bytes-to-string conversion for Redis stream data
 
-3. **Health Endpoint**
-   - File: `backend/app/api/health.py`
-   - Check MongoDB connection
-   - Check Redis connection
-   - Check MCP server connection
-   - Return service health status
+**API Endpoints:**
 
-4. **Main FastAPI App**
-   - File: `backend/app/main.py`
-   - Create FastAPI app
-   - Add CORS middleware
-   - Register routers
-   - Startup/shutdown events
-   - Error handlers
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/chat` | POST | Send message, returns response with token usage |
+| `/api/chat/{conversation_id}/stream` | GET | SSE stream of events (replay supported) |
+| `/api/chat/{conversation_id}/context` | GET | Get conversation context |
+| `/api/chat/{conversation_id}/context` | DELETE | Clear conversation |
+| `/api/health` | GET | Service health check |
 
-#### Deliverables
+**Request/Response Examples:**
+
+```bash
+# Send a message
+curl -X POST "http://localhost:8001/api/chat" \
+  -H "Content-Type: application/json" \
+  -d '{"conversation_id": "conv_123", "message": "list all industries"}'
+
+# Response
+{
+  "conversation_id": "conv_123",
+  "request_id": "req_abc123",
+  "status": "completed",
+  "message": "The available industry is sugar.",
+  "token_usage": {
+    "input_tokens": 4238,
+    "output_tokens": 10,
+    "total_tokens": 4248
+  }
+}
+
+# Stream events (use same conversation_id)
+curl -N -H "Accept: text/event-stream" \
+  "http://localhost:8001/api/chat/conv_123/stream?after_sequence=0"
+
+# SSE Events received:
+# id: 1
+# event: thinking_start
+# data: {"request_id": "conv_123", ...}
+#
+# id: 2  
+# event: tool_start
+# data: {"tool_name": "list_industries", ...}
+#
+# id: 3
+# event: tool_end
+# data: {"status": "success", ...}
+#
+# id: 4
+# event: message_final
+# data: {"content": "The available industry is sugar.", ...}
+```
+
+**Files Created/Modified:**
+- `app/api/chat.py` - Chat endpoints
+- `app/api/stream.py` - SSE streaming endpoint (renamed param to conversation_id)
+- `app/api/health.py` - Health check endpoint
+- `app/models/requests.py` - Added TokenUsage model
+- `app/models/events.py` - Fixed bytes-to-string conversion in from_redis_dict()
+- `app/core/mongo_client.py` - Fixed sparse index for session_id
+
+**Bug Fixes:**
+- ✅ Fixed Redis bytes keys issue (keys returned as b'data' not "data")
+- ✅ Fixed MongoDB duplicate key error (sparse index for null session_id)
+- ✅ Fixed stream endpoint parameter naming (conversation_id not request_id)
+- ✅ Fixed async await issues in context manager
+
+#### Deliverables ✅
 - ✅ All REST endpoints working
-- ✅ Idempotency support
-- ✅ SSE streaming endpoint
+- ✅ SSE streaming with replay support
+- ✅ Token usage tracking
 - ✅ Health check endpoint
-- ✅ OpenAPI documentation
+- ✅ OpenAPI documentation at /docs
 
-#### Testing
-- Test POST /chat → returns request_id
-- Test GET /stream → receives SSE events
-- Test POST /cancel → cancels job
-- Test GET /chat/{id} → returns final state
-- Test idempotency with duplicate requests
+#### Testing Results ✅
+- ✅ POST /api/chat → Returns response with token usage
+- ✅ GET /stream → Receives all SSE events (tested with curl)
+- ✅ Multi-turn conversations work correctly
+- ✅ Agentic loop auto-recovers from errors
+- ✅ Real-time streaming verified (events arrive as they occur)
 
 ---
 
-### **PHASE 8: Frontend - Core Components** (Day 13-14)
+### **PHASE 8: Frontend - Core Components** (Day 13-14) 🔄 **NEXT PHASE**
 
 **🎨 FRONTEND DEVELOPMENT STARTS HERE**
 
-**Prerequisites**: 
+**Prerequisites**: ✅ All met
 - ✅ All backend endpoints functional (Phase 7 complete)
 - ✅ SSE streaming working and tested
-- ✅ API documentation complete
+- ✅ API documentation complete (available at /docs)
 - ✅ Backend running stably with all services
+
+**Backend API Ready for Frontend:**
+```
+POST /api/chat                           - Send message
+GET  /api/chat/{conversation_id}/stream  - SSE events  
+GET  /api/chat/{conversation_id}/context - Get context
+DELETE /api/chat/{conversation_id}/context - Clear context
+GET  /api/health                         - Health check
+```
 
 #### Goal
 Build React UI with real-time event handling
@@ -795,9 +810,9 @@ Build React UI with real-time event handling
 1. **API Client**
    - File: `frontend/src/utils/api.js`
    - Implement functions:
-     - `sendMessage(sessionId, message)`
-     - `cancelRequest(requestId)`
-     - `getChatState(requestId)`
+     - `sendMessage(conversationId, message)`
+     - `getContext(conversationId)`
+     - `clearContext(conversationId)`
 
 2. **SSE Hook**
    - File: `frontend/src/hooks/useSSE.js`

@@ -140,7 +140,7 @@ class MongoClient:
         Create database indexes for performance.
         
         Indexes:
-        - conversations.session_id (unique)
+        - conversations.session_id (unique, sparse - allows multiple null values)
         - conversations.user_id
         - conversations.created_at
         - conversations.linked_runs
@@ -148,7 +148,8 @@ class MongoClient:
         """
         try:
             # Conversations collection indexes
-            await self._db.conversations.create_index("session_id", unique=True)
+            # Use sparse=True so multiple documents can have session_id=null
+            await self._db.conversations.create_index("session_id", unique=True, sparse=True)
             await self._db.conversations.create_index("user_id")
             await self._db.conversations.create_index("created_at")
             await self._db.conversations.create_index("linked_runs")

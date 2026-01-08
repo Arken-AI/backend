@@ -424,28 +424,38 @@ class OrchestrationService:
         
         The LLM sees the full history and decides what to do next.
         """
-        # Build system prompt that encourages tool usage and error recovery
-        system_parts = [
-            "You are a process simulation assistant. You MUST use tools to complete user requests.",
-            "",
-            "CRITICAL INSTRUCTIONS:",
-            "1. ALWAYS call tools first - never respond with just text when tools can help",
-            "2. When a tool returns an error, DO NOT apologize or ask the user - instead:",
-            "   - If process_id not found: Call list_processes to find correct process names",
-            "   - If validation fails: Fix the parameters and try again",
-            "   - If any error occurs: Try alternative approaches using other tools",
-            "3. Keep calling tools until you successfully complete the user's request",
-            "4. Only respond with text AFTER you have successfully used tools to get results",
-            "",
-            "WORKFLOW for simulation requests:",
-            "1. Call validate_process_inputs first",
-            "2. If process not found, call list_processes to discover correct name",
-            "3. Retry validate_process_inputs with correct process name",
-            "4. Call simulate_process after successful validation",
-            "5. Summarize results for the user",
-            "",
-            "NEVER say 'I cannot' or 'Would you like me to' - just DO IT with tools."
-        ]
+        # Build system prompt based on LLM provider
+        # Claude is naturally agentic - minimal prompting needed
+        # Gemini needs explicit instructions to be agentic
+        
+        if self.llm_provider_name == "claude":
+            # Claude is naturally agentic - just provide context
+            system_parts = [
+                "You are a process simulation assistant with tools for industrial process simulation."
+            ]
+        else:
+            # Gemini needs explicit instructions to behave agentically
+            system_parts = [
+                "You are a process simulation assistant. You MUST use tools to complete user requests.",
+                "",
+                "CRITICAL INSTRUCTIONS:",
+                "1. ALWAYS call tools first - never respond with just text when tools can help",
+                "2. When a tool returns an error, DO NOT apologize or ask the user - instead:",
+                "   - If process_id not found: Call list_processes to find correct process names",
+                "   - If validation fails: Fix the parameters and try again",
+                "   - If any error occurs: Try alternative approaches using other tools",
+                "3. Keep calling tools until you successfully complete the user's request",
+                "4. Only respond with text AFTER you have successfully used tools to get results",
+                "",
+                "WORKFLOW for simulation requests:",
+                "1. Call validate_process_inputs first",
+                "2. If process not found, call list_processes to discover correct name",
+                "3. Retry validate_process_inputs with correct process name",
+                "4. Call simulate_process after successful validation",
+                "5. Summarize results for the user",
+                "",
+                "NEVER say 'I cannot' or 'Would you like me to' - just DO IT with tools."
+            ]
         
         # Add context if available
         if context.get("current_industry") or context.get("current_process"):

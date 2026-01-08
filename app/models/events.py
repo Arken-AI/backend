@@ -135,14 +135,27 @@ class BaseEvent(BaseModel):
         
         Args:
             data: Dict from Redis with 'data' field containing JSON
+                  Note: Redis returns keys/values as bytes, so we handle both
             
         Returns:
             Appropriate event instance based on event_type
         """
         import json
         
-        if isinstance(data.get("data"), str):
-            event_data = json.loads(data["data"])
+        # Handle bytes keys from Redis - convert to string dict
+        if data and isinstance(next(iter(data.keys()), None), bytes):
+            data = {
+                k.decode() if isinstance(k, bytes) else k: 
+                v.decode() if isinstance(v, bytes) else v 
+                for k, v in data.items()
+            }
+        
+        # Parse the JSON data field
+        data_value = data.get("data")
+        if isinstance(data_value, str):
+            event_data = json.loads(data_value)
+        elif isinstance(data_value, bytes):
+            event_data = json.loads(data_value.decode())
         else:
             event_data = data
         
