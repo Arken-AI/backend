@@ -24,7 +24,7 @@ This matches Claude Desktop behavior where LLM can:
 """
 
 import json
-import logging
+import traceback
 from typing import Dict, Any, List, Optional
 from datetime import datetime
 
@@ -33,11 +33,11 @@ from app.services.tool_registry import ToolRegistry
 from app.services.event_emitter import EventEmitter
 from app.core.policy_engine import PolicyEngine, PolicyDecision
 from app.core.llm_provider import ClaudeProvider
-from app.core.llm_gemini_provider import GeminiProvider
 from app.core.mcp_client import MCPClient, MCPServerConfig
-from app.config import settings
 
-logger = logging.getLogger(__name__)
+# Gemini provider - commented out for future use with free tier
+# from app.core.llm_gemini_provider import GeminiProvider
+# from app.config import settings
 
 
 class OrchestrationService:
@@ -58,7 +58,8 @@ class OrchestrationService:
         policy_engine: PolicyEngine,
         mcp_client: MCPClient,
         event_emitter: Optional[EventEmitter] = None,
-        llm_provider: str = None
+        anthropic_api_key: str = None,
+        llm_provider: str = "claude"  # Can be "claude" or "gemini" in future
     ):
         """
         Initialize orchestration service.
@@ -69,7 +70,8 @@ class OrchestrationService:
             policy_engine: Policy enforcement engine
             mcp_client: MCP client for tool execution
             event_emitter: Event emitter for real-time updates (optional)
-            llm_provider: "claude" or "gemini" (defaults to settings.default_llm_provider)
+            anthropic_api_key: Anthropic API key for Claude (required for claude provider)
+            llm_provider: "claude" (default) or "gemini" for future use
         """
         self.context_manager = context_manager
         self.tool_registry = tool_registry
@@ -78,22 +80,27 @@ class OrchestrationService:
         self.event_emitter = event_emitter
         
         # Initialize LLM provider
-        self.llm_provider_name = llm_provider or settings.default_llm_provider
-        if self.llm_provider_name == "claude":
-            self.llm = ClaudeProvider(
-                api_key=settings.anthropic_api_key
-            )
-        elif self.llm_provider_name == "gemini":
-            self.llm = GeminiProvider(
-                api_key=settings.google_api_key,
-                model=settings.llm_model_gemini,
-                max_tokens=settings.llm_max_tokens,
-                temperature=settings.llm_temperature
-            )
-        else:
-            raise ValueError(f"Unknown LLM provider: {self.llm_provider_name}")
+        self.llm_provider_name = llm_provider
         
-        logger.info(f"Orchestration service initialized with {self.llm_provider_name}")
+        if self.llm_provider_name == "claude":
+            # Claude provider (claude-sonnet-4-20250514)
+            self.llm = ClaudeProvider(
+                api_key=anthropic_api_key
+            )
+            print(f"Orchestration service initialized with Claude (claude-sonnet-4-20250514)")
+        
+        # Gemini provider - commented out for future use with free tier
+        # elif self.llm_provider_name == "gemini":
+        #     self.llm = GeminiProvider(
+        #         api_key=settings.google_api_key,
+        #         model=settings.llm_model_gemini,
+        #         max_tokens=settings.llm_max_tokens,
+        #         temperature=settings.llm_temperature
+        #     )
+        #     print(f"Orchestration service initialized with Gemini")
+        
+        else:
+            raise ValueError(f"Unknown LLM provider: {self.llm_provider_name}. Currently only 'claude' is supported.")
     
     # =========================================================================
     # AGENTIC LOOP - Main Entry Point
@@ -142,7 +149,7 @@ class OrchestrationService:
         total_output_tokens = 0
         
         try:
-            logger.info(f"Processing message for conversation {conversation_id}")
+            print(f"Processing message for conversation {conversation_id}")
             
             # Step 1: Load or create context
             context = await self._get_or_create_context(conversation_id, user_id)
@@ -155,10 +162,25 @@ class OrchestrationService:
             total_tool_calls = 0
             
             # Build conversation history for multi-turn
-            # Start with user's message
-            conversation_history = [
-                {"role": "user", "content": user_message}
-            ]
+            # Load previous messages from context for continuity
+            previous_messages = await self.context_manager.get_messages(conversation_id)
+            
+            conversation_history = []
+            
+            # Add previous conversation turns (limit to last 10 for context window)
+            for msg in previous_messages[-10:]:
+                conversation_history.append({
+                    "role": msg["role"],
+                    "content": msg["content"]
+                })
+            
+            # Add current user message
+            conversation_history.append({"role": "user", "content": user_message})
+            
+            # Save user message to context for future turns
+            await self.context_manager.add_message(conversation_id, "user", user_message)
+            
+            print(f"Conversation history has {len(conversation_history)} messages")
             
             # Emit thinking start
             if self.event_emitter:
@@ -168,7 +190,7 @@ class OrchestrationService:
             # AGENTIC LOOP: Continue until LLM stops calling tools
             # =====================================================
             for iteration in range(MAX_ITERATIONS):
-                logger.info(f"=== Agentic Loop Iteration {iteration + 1} ===")
+                print(f"=== Agentic Loop Iteration {iteration + 1} ===")
                 
                 # Call LLM with conversation history
                 thinking_start = datetime.now()
@@ -179,10 +201,17 @@ class OrchestrationService:
                 )
                 thinking_duration_ms = int((datetime.now() - thinking_start).total_seconds() * 1000)
                 
-                # Track tokens
+                # Track tokens - handle both dict and object usage attributes
                 if hasattr(llm_response, 'usage'):
-                    total_input_tokens += llm_response.usage.get("input_tokens", 0)
-                    total_output_tokens += llm_response.usage.get("output_tokens", 0)
+                    usage = llm_response.usage
+                    if isinstance(usage, dict):
+                        # Gemini returns dict
+                        total_input_tokens += usage.get("input_tokens", 0)
+                        total_output_tokens += usage.get("output_tokens", 0)
+                    else:
+                        # Claude returns Anthropic Usage object
+                        total_input_tokens += getattr(usage, "input_tokens", 0)
+                        total_output_tokens += getattr(usage, "output_tokens", 0)
                 
                 # Extract response info
                 if hasattr(llm_response, 'has_tool_calls'):
@@ -198,7 +227,15 @@ class OrchestrationService:
                 # EXIT CONDITION: LLM has no more tool calls
                 # =====================================================
                 if not has_tools:
-                    logger.info(f"LLM finished after {iteration + 1} iterations with text response")
+                    print(f"LLM finished after {iteration + 1} iterations with text response")
+                    
+                    # Save assistant response to context for future turns
+                    await self.context_manager.add_message(
+                        conversation_id, 
+                        "assistant", 
+                        message_text,
+                        metadata={"iterations": iteration + 1, "tool_calls": len(all_tool_results)}
+                    )
                     
                     # Emit thinking end
                     if self.event_emitter:
@@ -227,7 +264,7 @@ class OrchestrationService:
                 # =====================================================
                 # TOOL EXECUTION: Process each tool call
                 # =====================================================
-                logger.info(f"LLM requested {len(tool_calls_list)} tool calls")
+                print(f"LLM requested {len(tool_calls_list)} tool calls")
                 
                 # Add assistant message with tool calls to history
                 conversation_history.append({
@@ -242,7 +279,7 @@ class OrchestrationService:
                     # Safety check: don't exceed tool call limit
                     total_tool_calls += 1
                     if total_tool_calls > MAX_TOOL_CALLS:
-                        logger.warning(f"Tool call limit exceeded ({MAX_TOOL_CALLS})")
+                        print(f"WARNING: " + f"Tool call limit exceeded ({MAX_TOOL_CALLS})")
                         iteration_tool_results.append({
                             "name": "system",
                             "result": {
@@ -260,14 +297,14 @@ class OrchestrationService:
                         tool_name = tool_call.name
                         tool_params = tool_call.input if hasattr(tool_call, 'input') else tool_call.arguments
                     
-                    logger.info(f"Executing tool: {tool_name}")
+                    print(f"Executing tool: {tool_name}")
                     
                     # Check policy
                     policy_result = await self._enforce_policy(tool_name, context, tool_params)
                     
                     if policy_result["decision"] != "allow":
                         # Policy denied - send error back to LLM (not to user!)
-                        logger.warning(f"Policy DENIED: {tool_name} - {policy_result['reason']}")
+                        print(f"WARNING: " + f"Policy DENIED: {tool_name} - {policy_result['reason']}")
                         
                         if self.event_emitter:
                             await self.event_emitter.emit_app_error(
@@ -305,6 +342,13 @@ class OrchestrationService:
                     tool_start_time = datetime.now()
                     result = await self._execute_tool(tool_name, tool_params)
                     tool_duration_ms = int((datetime.now() - tool_start_time).total_seconds() * 1000)
+                    
+                    # DEBUG: Log the result keys and calc_run_id for simulation tools
+                    if tool_name in ["simulate_process", "simulate_equipment"]:
+                        print(f"[DEBUG] Simulation result keys: {list(result.keys())}")
+                        print(f"[DEBUG] calc_run_id: {result.get('calc_run_id')}")
+                        print(f"[DEBUG] run_id: {result.get('run_id')}")
+                        print(f"[DEBUG] status: {result.get('status')}")
                     
                     # Emit tool end
                     if self.event_emitter:
@@ -353,14 +397,14 @@ class OrchestrationService:
                     "tool_results": iteration_tool_results
                 })
                 
-                logger.info(f"Sent {len(iteration_tool_results)} tool results back to LLM")
+                print(f"Sent {len(iteration_tool_results)} tool results back to LLM")
                 
                 # Continue loop - LLM will see results in next iteration
             
             # =====================================================
             # MAX ITERATIONS REACHED
             # =====================================================
-            logger.warning(f"Max iterations ({MAX_ITERATIONS}) reached")
+            print(f"WARNING: " + f"Max iterations ({MAX_ITERATIONS}) reached")
             
             if self.event_emitter:
                 await self.event_emitter.emit_thinking_end(conversation_id, 0)
@@ -382,7 +426,7 @@ class OrchestrationService:
             }
             
         except Exception as e:
-            logger.error(f"Error processing message: {e}", exc_info=True)
+            print(f"ERROR: " + f"Error processing message: {e}"); import traceback; traceback.print_exc()
             
             if self.event_emitter:
                 await self.event_emitter.emit_app_error(
@@ -466,9 +510,66 @@ class OrchestrationService:
                 context_info.append(f"Process: {context['current_process']}")
             system_parts.append("Current context: " + ", ".join(context_info))
         
+        # Add simulation summary for follow-up questions
+        if context.get("last_simulation_summary"):
+            summary = context["last_simulation_summary"]
+            print(f"Including simulation summary in prompt: run_id={summary.get('run_id')}, type={summary.get('simulation_type')}, equipment_count={len(summary.get('equipment_summary', {}))}")
+            summary_parts = [
+                "",
+                "=== PREVIOUS SIMULATION RESULTS ===",
+                "(Use this data to answer follow-up questions without calling tools)",
+                "",
+                f"Run ID: {summary.get('run_id')}",
+                f"Type: {summary.get('simulation_type')}",
+                f"Process/Equipment: {summary.get('process_id') or summary.get('equipment_type')}",
+                f"Status: {summary.get('status')}",
+            ]
+            
+            # Include inputs used
+            if summary.get('inputs_used'):
+                summary_parts.append("")
+                summary_parts.append("Inputs Used:")
+                summary_parts.append(json.dumps(summary.get('inputs_used', {}), indent=2))
+            
+            # Include KPIs/Summary
+            if summary.get('kpis'):
+                summary_parts.append("")
+                summary_parts.append("KPIs/Summary:")
+                summary_parts.append(json.dumps(summary.get('kpis', {}), indent=2))
+            
+            # Include equipment details (heater, evaporator, etc.)
+            if summary.get('equipment_summary'):
+                summary_parts.append("")
+                summary_parts.append("Equipment Results (heater, evaporator, clarifier, etc.):")
+                summary_parts.append(json.dumps(summary.get('equipment_summary', {}), indent=2))
+            
+            # Include boiling house if available
+            if summary.get('boiling_house'):
+                summary_parts.append("")
+                summary_parts.append("Boiling House Summary:")
+                summary_parts.append(json.dumps(summary.get('boiling_house', {}), indent=2))
+            
+            # Include balances if available
+            if summary.get('balances'):
+                summary_parts.append("")
+                summary_parts.append("Balance Errors:")
+                summary_parts.append(json.dumps(summary.get('balances', {}), indent=2))
+            
+            # Include warnings
+            if summary.get('warnings'):
+                summary_parts.append("")
+                summary_parts.append(f"Warnings: {summary.get('warnings')}")
+            
+            summary_parts.append("")
+            summary_parts.append("=== END SIMULATION RESULTS ===")
+            summary_parts.append("Use this data for follow-up questions. Only call get_run if user needs MORE detailed data.")
+            system_parts.extend(summary_parts)
+        else:
+            print(f"No simulation summary in context for follow-up")
+        
         system = "\n".join(system_parts)
         
-        logger.info(f"Calling LLM with {len(conversation_history)} messages")
+        print(f"Calling LLM with {len(conversation_history)} messages")
         
         response = await self.llm.create_message(
             messages=conversation_history,
@@ -491,7 +592,7 @@ class OrchestrationService:
         Kept for backward compatibility.
         """
         messages = self._build_message_history(user_message, context)
-        logger.info(f"Calling {self.llm_provider_name} with {len(tools)} tools")
+        print(f"Calling {self.llm_provider_name} with {len(tools)} tools")
         response = await self.llm.create_message(messages, tools)
         return response
     
@@ -533,7 +634,7 @@ class OrchestrationService:
         context = await self.context_manager.get_context(conversation_id)
         
         if not context:
-            logger.info(f"Creating new context for conversation {conversation_id}")
+            print(f"Creating new context for conversation {conversation_id}")
             await self.context_manager.create_context(conversation_id, user_id)
             context = await self.context_manager.get_context(conversation_id)
         
@@ -554,15 +655,30 @@ class OrchestrationService:
             result
         )
         
+        print(f"[_update_context] tool_name={tool_name}, result_keys={list(result.keys())}")
+        
         # Update simulation params if this was a simulation
         if tool_name in ["simulate_process", "simulate_equipment"]:
+            # Extract run_id - could be 'calc_run_id' or 'run_id' depending on the tool
+            run_id = result.get("calc_run_id") or result.get("run_id")
+            
+            print(f"[_update_context] Simulation detected! run_id={run_id}, status={result.get('status')}")
+            
+            # Extract condensed summary for quick follow-up answers
+            simulation_summary = self._extract_simulation_summary(tool_name, result, params)
+            
+            print(f"[_update_context] Extracted summary: run_id={simulation_summary.get('run_id') if simulation_summary else None}")
+            
             await self.context_manager.update_context(
                 conversation_id,
                 {
                     "simulation_params": params,
-                    "last_run_id": result.get("run_id")
+                    "last_run_id": run_id,
+                    "last_simulation_summary": simulation_summary
                 }
             )
+            
+            print(f"[_update_context] Context update called for conversation {conversation_id}")
         
         # Update validation params if this was a validation
         if tool_name.startswith("validate_"):
@@ -571,7 +687,281 @@ class OrchestrationService:
                 {"validation_params": params}
             )
         
-        logger.info(f"Context updated after {tool_name} execution")
+        print(f"Context updated after {tool_name} execution")
+    
+    # =========================================================================
+    # Simulation Summary Extraction
+    # =========================================================================
+    
+    def _extract_simulation_summary(
+        self,
+        tool_name: str,
+        result: Dict[str, Any],
+        params: Dict[str, Any]
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Extract condensed summary from simulation results.
+        
+        Works for both process simulations and standalone equipment.
+        The summary is stored in context for quick follow-up answers.
+        
+        Handles two different result structures:
+        - Process simulation: {summary, units, boiling_house, balances, ...}
+        - Equipment simulation: {kpis, computed, outputs, ...}
+        
+        Args:
+            tool_name: 'simulate_process' or 'simulate_equipment'
+            result: Full simulation result from MCP server
+            params: Parameters used for the simulation
+            
+        Returns:
+            Condensed summary dict or None if extraction fails
+        """
+        if result.get("status") != "success":
+            return None
+        
+        try:
+            is_equipment = tool_name == "simulate_equipment"
+            
+            summary = {
+                "run_id": result.get("calc_run_id") or result.get("run_id"),
+                "simulation_type": "equipment" if is_equipment else "process",
+                "timestamp": datetime.now().isoformat(),
+                "status": "success"
+            }
+            
+            if is_equipment:
+                # Equipment-specific fields
+                summary["equipment_type"] = params.get("equipment_type") or result.get("unit")
+                summary["industry"] = result.get("industry", "sugar")
+                
+                # Extract KPIs from equipment result
+                if "kpis" in result:
+                    summary["kpis"] = self._round_numeric_values(result["kpis"])
+                
+                # Extract computed values
+                if "computed" in result:
+                    summary["computed"] = self._round_numeric_values(result["computed"])
+                
+                # Extract output streams from "outputs" key
+                summary["output_streams"] = self._extract_output_streams(result)
+                
+                # Single equipment summary
+                equipment_type = summary.get("equipment_type", "unknown")
+                summary["equipment_summary"] = {
+                    equipment_type: self._condense_single_equipment(result)
+                }
+            else:
+                # Process-specific fields
+                summary["process_id"] = params.get("process_id")
+                summary["industry"] = params.get("industry", "sugar")
+                
+                # Extract KPIs from "summary" key (process simulations use this)
+                if "summary" in result:
+                    summary["kpis"] = self._round_numeric_values(result["summary"])
+                elif "kpis" in result:
+                    summary["kpis"] = self._round_numeric_values(result["kpis"])
+                
+                # Extract balances for context
+                if "balances" in result:
+                    summary["balances"] = self._extract_key_balances(result["balances"])
+                
+                # Extract equipment data from "units" key (NOT "outputs")
+                if "units" in result:
+                    summary["equipment_summary"] = self._condense_units_data(result["units"])
+                elif "outputs" in result:
+                    summary["equipment_summary"] = self._condense_equipment_outputs(result["outputs"])
+                
+                # Extract boiling house summary
+                if "boiling_house" in result:
+                    bh = result["boiling_house"]
+                    if "summary" in bh:
+                        summary["boiling_house"] = self._round_numeric_values(bh["summary"])
+            
+            # Keep warnings for context (limit to 5)
+            if result.get("warnings"):
+                summary["warnings"] = result["warnings"][:5]
+            
+            # Store the input parameters used for reference
+            summary["inputs_used"] = self._extract_key_inputs(params)
+            
+            print(f"Extracted simulation summary for {tool_name}: kpis={len(summary.get('kpis', {}))}, equipment={len(summary.get('equipment_summary', {}))}")
+            return summary
+            
+        except Exception as e:
+            print(f"WARNING: " + f"Failed to extract simulation summary: {e}", exc_info=True)
+            return None
+    
+    def _extract_key_balances(self, balances: Dict[str, Any]) -> Dict[str, Any]:
+        """Extract key balance metrics."""
+        key_metrics = {}
+        
+        if "mass_balance" in balances:
+            mb = balances["mass_balance"]
+            if isinstance(mb, dict):
+                key_metrics["mass_balance_error_pct"] = mb.get("error_pct")
+        
+        if "sucrose_balance" in balances:
+            sb = balances["sucrose_balance"]
+            if isinstance(sb, dict):
+                key_metrics["sucrose_balance_error_pct"] = sb.get("error_pct")
+        
+        return key_metrics
+    
+    def _condense_units_data(self, units: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Condense per-unit data from process simulation.
+        
+        The 'units' dict has structure like:
+        {
+            "heater": {"juice_in_kg_hr": ..., "outlet_temp_C": ..., ...},
+            "evaporator": {"steam_consumed_kg_hr": ..., ...},
+            ...
+        }
+        """
+        condensed = {}
+        
+        for unit_name, unit_data in units.items():
+            if isinstance(unit_data, dict):
+                # Keep all numeric values from each unit
+                unit_condensed = {}
+                for key, value in unit_data.items():
+                    if isinstance(value, (int, float)):
+                        if isinstance(value, float):
+                            unit_condensed[key] = round(value, 2)
+                        else:
+                            unit_condensed[key] = value
+                    elif isinstance(value, str):
+                        unit_condensed[key] = value
+                
+                if unit_condensed:
+                    condensed[unit_name] = unit_condensed
+        
+        return condensed
+    
+    def _extract_key_inputs(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Extract key input parameters for reference."""
+        key_inputs = {}
+        
+        # Common input parameters to capture
+        input_keys = [
+            "process_id", "equipment_type", "cane_flow_kg_hr", "cane_flow_tcd",
+            "cane_brix", "cane_fiber_pct", "cane_purity", "operating_mode",
+            "inlet_stream", "operating_params"
+        ]
+        
+        for key in input_keys:
+            if key in params:
+                value = params[key]
+                if isinstance(value, dict):
+                    # Flatten nested dicts for inlet_stream, operating_params
+                    key_inputs[key] = self._round_numeric_values(value)
+                else:
+                    key_inputs[key] = value
+        
+        return key_inputs
+    
+    def _extract_output_streams(self, result: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Extract key output stream data from simulation result.
+        
+        Looks for common stream names and extracts key properties.
+        """
+        streams = {}
+        outputs = result.get("outputs", {})
+        
+        # Common output stream names across different simulations
+        stream_names = [
+            "syrup", "condensate", "sugar", "molasses", "bagasse",
+            "clarified_juice", "mixed_juice", "massecuite", "filter_cake",
+            "raw_juice", "clear_juice", "mother_liquor", "crystal"
+        ]
+        
+        # Key properties to extract from streams
+        key_properties = [
+            "flow_kg_hr", "flow", "temperature", "brix", "purity",
+            "pol", "composition", "pressure", "phase", "moisture"
+        ]
+        
+        for stream_name in stream_names:
+            if stream_name in outputs:
+                stream_data = outputs[stream_name]
+                if isinstance(stream_data, dict):
+                    # Extract only key properties
+                    condensed = {}
+                    for prop in key_properties:
+                        if prop in stream_data:
+                            value = stream_data[prop]
+                            if isinstance(value, float):
+                                condensed[prop] = round(value, 2)
+                            else:
+                                condensed[prop] = value
+                    if condensed:
+                        streams[stream_name] = condensed
+        
+        return streams
+    
+    def _condense_equipment_outputs(self, outputs: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Condense equipment outputs from a full process simulation.
+        
+        Extracts key metrics for each equipment unit.
+        """
+        condensed = {}
+        
+        # Key metrics to extract from equipment outputs
+        key_metrics = [
+            "efficiency", "extraction", "recovery", "yield",
+            "outlet_brix", "outlet_temp", "outlet_flow",
+            "steam_economy", "heat_duty", "power",
+            "crystal_yield", "purity", "pressure_drop",
+            "inlet_brix", "inlet_temp", "concentration_ratio"
+        ]
+        
+        for equip_name, equip_data in outputs.items():
+            if isinstance(equip_data, dict):
+                equip_condensed = {}
+                for metric in key_metrics:
+                    if metric in equip_data:
+                        value = equip_data[metric]
+                        if isinstance(value, float):
+                            equip_condensed[metric] = round(value, 3)
+                        else:
+                            equip_condensed[metric] = value
+                if equip_condensed:
+                    condensed[equip_name] = equip_condensed
+        
+        return condensed
+    
+    def _condense_single_equipment(self, result: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Condense single equipment simulation result to key metrics.
+        """
+        condensed = {}
+        
+        # Add KPIs
+        if "kpis" in result:
+            condensed.update(self._round_numeric_values(result["kpis"]))
+        
+        # Add computed values
+        if "computed" in result:
+            condensed.update(self._round_numeric_values(result["computed"]))
+        
+        return condensed
+    
+    def _round_numeric_values(self, data: Dict[str, Any], decimals: int = 3) -> Dict[str, Any]:
+        """
+        Round all numeric values in a dictionary.
+        """
+        rounded = {}
+        for key, value in data.items():
+            if isinstance(value, float):
+                rounded[key] = round(value, decimals)
+            elif isinstance(value, dict):
+                rounded[key] = self._round_numeric_values(value, decimals)
+            else:
+                rounded[key] = value
+        return rounded
     
     # =========================================================================
     # Tool Management
@@ -580,7 +970,7 @@ class OrchestrationService:
     async def _get_available_tools(self) -> List[Dict[str, Any]]:
         """Get all available tools from MCP server."""
         tools = await self.mcp_client.list_tools()
-        logger.info(f"Retrieved {len(tools)} tools from MCP server")
+        print(f"Retrieved {len(tools)} tools from MCP server")
         return tools
     
     async def _execute_tool(
@@ -589,7 +979,7 @@ class OrchestrationService:
         params: Dict[str, Any]
     ) -> Dict[str, Any]:
         """Execute tool via MCP client."""
-        logger.info(f"Executing tool: {tool_name}")
+        print(f"Executing tool: {tool_name}")
         
         try:
             result = await self.mcp_client.call_tool(tool_name, params)
@@ -621,7 +1011,7 @@ class OrchestrationService:
                     "data": result
                 }
         except Exception as e:
-            logger.error(f"Tool execution error: {e}")
+            print(f"ERROR: " + f"Tool execution error: {e}")
             return {
                 "status": "error",
                 "error": str(e),
@@ -767,7 +1157,7 @@ class OrchestrationService:
         """
         await self.context_manager.clear_context(conversation_id)
         
-        logger.info(f"Conversation {conversation_id} reset")
+        print(f"Conversation {conversation_id} reset")
         
         return {
             "status": "success",

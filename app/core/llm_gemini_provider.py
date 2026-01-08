@@ -23,7 +23,7 @@ Note: Uses google-genai library (not deprecated google.generativeai)
 
 import asyncio
 import json
-import logging
+import traceback
 import os
 from typing import Any, AsyncGenerator, Dict, List, Optional, Union
 
@@ -32,7 +32,6 @@ from google.genai import types
 
 from .mcp_client import MCPTool
 
-logger = logging.getLogger(__name__)
 
 
 # =============================================================================
@@ -235,7 +234,7 @@ class GeminiProvider:
         # Initialize client
         self.client = genai.Client(api_key=self.api_key)
         
-        logger.info(f"Gemini provider initialized with model: {model}")
+        print(f"Gemini provider initialized with model: {model}")
     
     def _convert_messages(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """
@@ -361,7 +360,7 @@ class GeminiProvider:
         if tools:
             function_declarations = convert_mcp_tools_to_gemini(tools)
             gemini_tools = types.Tool(function_declarations=function_declarations)
-            logger.debug(f"Converted {len(tools)} MCP tools to Gemini format")
+            print(f"Converted {len(tools)} MCP tools to Gemini format")
         
         # Build generation config
         config = types.GenerateContentConfig(
@@ -373,7 +372,7 @@ class GeminiProvider:
         
         # Make API call
         try:
-            logger.debug(f"Sending message to Gemini ({len(messages)} messages)")
+            print(f"Sending message to Gemini ({len(messages)} messages)")
             
             response = await self.client.aio.models.generate_content(
                 model=kwargs.get("model", self.model),
@@ -391,14 +390,14 @@ class GeminiProvider:
             )
             
             if parsed.has_tool_calls:
-                logger.info(f"Gemini requested {len(parsed.tool_calls)} function calls")
+                print(f"Gemini requested {len(parsed.tool_calls)} function calls")
                 for call in parsed.tool_calls:
-                    logger.debug(f"  - {call['name']}: {list(call['input'].keys())}")
+                    print(f"  - {call['name']}: {list(call['input'].keys())}")
             
             return parsed
             
         except Exception as e:
-            logger.error(f"Gemini API error: {e}")
+            print(f"ERROR: " + str(f"Gemini API error: {e}"))
             raise
     
     async def create_message_stream(
@@ -443,7 +442,7 @@ class GeminiProvider:
         if tools:
             function_declarations = convert_mcp_tools_to_gemini(tools)
             gemini_tools = types.Tool(function_declarations=function_declarations)
-            logger.debug(f"Converted {len(tools)} MCP tools for streaming")
+            print(f"Converted {len(tools)} MCP tools for streaming")
         
         # Build generation config
         config = types.GenerateContentConfig(
@@ -454,7 +453,7 @@ class GeminiProvider:
         )
         
         try:
-            logger.debug(f"Starting streaming message to Gemini")
+            print(f"Starting streaming message to Gemini")
             
             stream = await self.client.aio.models.generate_content_stream(
                 model=kwargs.get("model", self.model),
@@ -465,15 +464,15 @@ class GeminiProvider:
             async for chunk in stream:
                 yield chunk
             
-            logger.info("Stream complete")
+            print("Stream complete")
             
         except Exception as e:
-            logger.error(f"Gemini streaming error: {e}")
+            print(f"ERROR: " + str(f"Gemini streaming error: {e}"))
             raise
     
     async def close(self):
         """Close the Gemini client connection (no-op for google-genai)."""
-        logger.info("Gemini provider closed")
+        print("Gemini provider closed")
     
     def __repr__(self) -> str:
         return f"GeminiProvider(model={self.model}, max_tokens={self.max_tokens})"

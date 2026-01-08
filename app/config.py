@@ -116,7 +116,7 @@ class Settings(BaseSettings):
         description="Claude model to use"
     )
     llm_model_gemini: str = Field(
-        default="gemini-2.0-flash",
+        default="gemini-exp-1206",
         description="Gemini model to use"
     )
     

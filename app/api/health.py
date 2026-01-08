@@ -4,7 +4,6 @@ Health Check Endpoint
 This module provides system health check endpoints to verify all services are operational.
 """
 
-import logging
 import time
 from datetime import datetime
 from typing import Dict
@@ -15,12 +14,11 @@ from fastapi.responses import JSONResponse
 from app.dependencies import (
     get_redis_client,
     get_mongo_client,
-    get_mcp_client,
-    get_llm_provider
+    get_mcp_client
 )
+from app.config import settings
 from app.models.requests import HealthResponse, ServiceStatus
 
-logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -39,7 +37,7 @@ async def check_redis_health(redis_client) -> ServiceStatus:
             response_time_ms=round(response_time, 2)
         )
     except Exception as e:
-        logger.error(f"Redis health check failed: {e}")
+        print(f"ERROR: " + str(f"Redis health check failed: {e}"))
         return ServiceStatus(
             name="Redis",
             status="unhealthy",
@@ -73,7 +71,7 @@ async def check_mongodb_health(mongo_client) -> ServiceStatus:
             response_time_ms=round(response_time, 2)
         )
     except Exception as e:
-        logger.error(f"MongoDB health check failed: {e}")
+        print(f"ERROR: " + str(f"MongoDB health check failed: {e}"))
         return ServiceStatus(
             name="MongoDB",
             status="unhealthy",
@@ -98,7 +96,7 @@ async def check_mcp_health(mcp_client) -> ServiceStatus:
             response_time_ms=round(response_time, 2)
         )
     except Exception as e:
-        logger.error(f"MCP health check failed: {e}")
+        print(f"ERROR: " + str(f"MCP health check failed: {e}"))
         return ServiceStatus(
             name="MCP Server",
             status="unhealthy",
@@ -106,26 +104,24 @@ async def check_mcp_health(mcp_client) -> ServiceStatus:
         )
 
 
-async def check_llm_health(llm_provider) -> ServiceStatus:
-    """Check LLM provider availability"""
+async def check_llm_health() -> ServiceStatus:
+    """Check LLM provider (Claude) availability"""
     try:
-        # For Gemini, we just check if the client is initialized with API key
-        # We don't make an actual API call to avoid costs
-        if llm_provider and hasattr(llm_provider, 'api_key') and llm_provider.api_key:
-            model_name = getattr(llm_provider, 'model', 'gemini-2.0-flash')
+        # Check if Claude API key is configured
+        if settings.anthropic_api_key and len(settings.anthropic_api_key) > 0:
             return ServiceStatus(
                 name="LLM Provider",
                 status="healthy",
-                message=f"Google Gemini client initialized (model: {model_name})"
+                message="Claude API key configured (model: claude-sonnet-4-20250514)"
             )
         else:
             return ServiceStatus(
                 name="LLM Provider",
                 status="unknown",
-                message="Client status unknown or API key not set"
+                message="Claude API key not set"
             )
     except Exception as e:
-        logger.error(f"LLM health check failed: {e}")
+        print(f"ERROR: LLM health check failed: {e}")
         return ServiceStatus(
             name="LLM Provider",
             status="unhealthy",
@@ -200,8 +196,7 @@ async def check_llm_health(llm_provider) -> ServiceStatus:
 async def health_check(
     redis_client=Depends(get_redis_client),
     mongo_client=Depends(get_mongo_client),
-    mcp_client=Depends(get_mcp_client),
-    llm_provider=Depends(get_llm_provider)
+    mcp_client=Depends(get_mcp_client)
 ):
     """
     Perform health check on all backend services.
@@ -209,14 +204,14 @@ async def health_check(
     Returns:
         HealthResponse with overall status and individual service statuses
     """
-    logger.info("Performing health check on all services")
+    print("Performing health check on all services")
     
     # Check all services in parallel
     service_checks = {
         "redis": await check_redis_health(redis_client),
         "mongodb": await check_mongodb_health(mongo_client),
         "mcp": await check_mcp_health(mcp_client),
-        "llm": await check_llm_health(llm_provider)
+        "llm": await check_llm_health()
     }
     
     # Determine overall health status
@@ -232,15 +227,15 @@ async def health_check(
     if unhealthy_services:
         overall_status = "unhealthy"
         http_status = status.HTTP_503_SERVICE_UNAVAILABLE
-        logger.warning(f"Health check failed: {', '.join(unhealthy_services)} unhealthy")
+        print(f"WARNING: " + str(f"Health check failed: {', '.join(unhealthy_services)} unhealthy"))
     elif unknown_services:
         overall_status = "degraded"
         http_status = status.HTTP_200_OK
-        logger.info(f"Health check degraded: {', '.join(unknown_services)} status unknown")
+        print(f"Health check degraded: {', '.join(unknown_services)} status unknown")
     else:
         overall_status = "healthy"
         http_status = status.HTTP_200_OK
-        logger.info("Health check passed: all services healthy")
+        print("Health check passed: all services healthy")
     
     response = HealthResponse(
         status=overall_status,

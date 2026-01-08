@@ -18,7 +18,7 @@ Usage:
     events = await emitter.get_events("req_123", after_sequence=5)
 """
 
-import logging
+import traceback
 from typing import List, Optional, Dict, Any
 from datetime import datetime
 import redis.asyncio as redis
@@ -37,7 +37,6 @@ from app.models.events import (
     ErrorType,
 )
 
-logger = logging.getLogger(__name__)
 
 
 class EventEmitter:
@@ -136,11 +135,11 @@ class EventEmitter:
             if sequence == 1:
                 await self.redis.expire(stream_key, self.ttl_seconds)
             
-            logger.debug(f"Emitted {event.event_type} (seq={sequence}) for {request_id}")
+            print(f"Emitted {event.event_type} (seq={sequence}) for {request_id}")
             return sequence
             
         except Exception as e:
-            logger.error(f"Failed to emit event for {request_id}: {e}", exc_info=True)
+            print(f"ERROR: " + str(f"Failed to emit event for {request_id}: {e}")); import traceback; traceback.print_exc()
             # Don't raise - events are best-effort, don't break main flow
             return -1
     
@@ -411,13 +410,13 @@ class EventEmitter:
                         events.append(event)
                         
                 except Exception as e:
-                    logger.error(f"Failed to parse event from Redis: {e}")
+                    print(f"ERROR: " + str(f"Failed to parse event from Redis: {e}"))
                     continue
             
             return events
             
         except Exception as e:
-            logger.error(f"Failed to get events for {request_id}: {e}", exc_info=True)
+            print(f"ERROR: " + str(f"Failed to get events for {request_id}: {e}")); import traceback; traceback.print_exc()
             return []
     
     async def get_event_count(self, request_id: str) -> int:
@@ -435,7 +434,7 @@ class EventEmitter:
             length = await self.redis.xlen(stream_key)
             return length
         except Exception as e:
-            logger.error(f"Failed to get event count for {request_id}: {e}")
+            print(f"ERROR: " + str(f"Failed to get event count for {request_id}: {e}"))
             return 0
     
     async def clear_events(self, request_id: str) -> bool:
@@ -453,9 +452,9 @@ class EventEmitter:
             seq_key = self._sequence_key(request_id)
             
             await self.redis.delete(stream_key, seq_key)
-            logger.info(f"Cleared events for {request_id}")
+            print(f"Cleared events for {request_id}")
             return True
             
         except Exception as e:
-            logger.error(f"Failed to clear events for {request_id}: {e}")
+            print(f"ERROR: " + str(f"Failed to clear events for {request_id}: {e}"))
             return False

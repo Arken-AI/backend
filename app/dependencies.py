@@ -12,7 +12,6 @@ from app.config import settings
 from app.services.event_emitter import EventEmitter
 from app.core.mongo_client import MongoClient
 from app.core.mcp_client import MCPClient, MCPServerConfig
-from app.core.llm_gemini_provider import GeminiProvider
 from app.core.policy_engine import PolicyEngine
 from app.services.context_manager import ContextManager
 from app.services.tool_registry import ToolRegistry
@@ -31,11 +30,12 @@ async def get_redis_client() -> redis.Redis:
     Dependency to get Redis client instance (singleton).
     
     Returns:
-        redis.Redis: Async Redis client
+        redis.Redis: Async Redis client from redis.asyncio
     """
     global _redis_client
     
     if _redis_client is None:
+        # Use redis.asyncio.Redis for async operations
         _redis_client = redis.Redis(
             host=settings.redis_host,
             port=settings.redis_port,
@@ -43,7 +43,6 @@ async def get_redis_client() -> redis.Redis:
             db=0,
             decode_responses=True,
             socket_connect_timeout=5,
-            socket_keepalive=True
         )
     
     return _redis_client
@@ -53,7 +52,7 @@ async def close_redis_client():
     """Close Redis client on application shutdown"""
     global _redis_client
     if _redis_client:
-        await _redis_client.close()
+        await _redis_client.aclose()  # Use aclose() for async redis client
         _redis_client = None
 
 
@@ -133,33 +132,6 @@ async def get_mcp_client() -> MCPClient:
 
 
 # =============================================================================
-# LLM Provider (Gemini)
-# =============================================================================
-
-_llm_provider: GeminiProvider | None = None
-
-
-async def get_llm_provider() -> GeminiProvider:
-    """
-    Dependency to get LLM provider (Gemini) instance (singleton).
-    
-    Returns:
-        GeminiProvider: Gemini API provider
-    """
-    global _llm_provider
-    
-    if _llm_provider is None:
-        _llm_provider = GeminiProvider(
-            api_key=settings.google_api_key,
-            model=settings.llm_model_gemini,
-            max_tokens=settings.llm_max_tokens,
-            temperature=settings.llm_temperature
-        )
-    
-    return _llm_provider
-
-
-# =============================================================================
 # Orchestration Service
 # =============================================================================
 
@@ -186,14 +158,14 @@ async def get_orchestration_service(
     tool_registry = ToolRegistry()
     policy_engine = PolicyEngine()  # PolicyEngine takes no arguments
     
-    # Create orchestration service
+    # Create orchestration service with Claude (claude-sonnet-4-20250514)
     orchestration = OrchestrationService(
         context_manager=context_manager,
         tool_registry=tool_registry,
         policy_engine=policy_engine,
         mcp_client=mcp_client,
         event_emitter=event_emitter,
-        llm_provider=settings.default_llm_provider
+        anthropic_api_key=settings.anthropic_api_key
     )
     
     return orchestration

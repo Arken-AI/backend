@@ -20,8 +20,7 @@ Architecture:
 """
 
 import asyncio
-import logging
-import os
+import traceback
 from typing import Any, AsyncGenerator, Dict, List, Optional, Union
 from anthropic import Anthropic, AsyncAnthropic
 from anthropic.types import Message, MessageStreamEvent
@@ -29,14 +28,13 @@ from anthropic.types.message_create_params import MessageCreateParamsNonStreamin
 
 from .mcp_client import MCPTool
 
-logger = logging.getLogger(__name__)
 
 
 # =============================================================================
 # Configuration
 # =============================================================================
 
-DEFAULT_MODEL = "claude-3-5-sonnet-20241022"
+DEFAULT_MODEL = "claude-sonnet-4-20250514"
 DEFAULT_MAX_TOKENS = 4096
 DEFAULT_TEMPERATURE = 1.0
 
@@ -138,6 +136,127 @@ class ParsedResponse:
 
 
 # =============================================================================
+# Message Conversion for Agentic Loop
+# =============================================================================
+
+def convert_messages_to_anthropic(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """
+    Convert conversation history from orchestration format to Anthropic API format.
+    
+    Orchestration format:
+        - {"role": "user", "content": "..."}
+        - {"role": "assistant", "tool_calls": [...]}
+        - {"role": "tool", "tool_results": [...]}
+    
+    Anthropic format:
+        - {"role": "user", "content": "..."}
+        - {"role": "assistant", "content": [{"type": "tool_use", ...}]}
+        - {"role": "user", "content": [{"type": "tool_result", ...}]}
+    
+    Args:
+        messages: Conversation history in orchestration format
+        
+    Returns:
+        Messages in Anthropic API format
+    """
+    import json
+    import uuid
+    
+    converted = []
+    # Track tool call IDs for matching results
+    tool_id_map = {}  # tool_name -> list of tool_ids
+    current_tool_ids = {}  # tool_name -> current_tool_id for matching
+    
+    for msg in messages:
+        role = msg.get("role")
+        
+        if role == "user":
+            # Simple user message
+            content = msg.get("content", "")
+            if isinstance(content, str):
+                converted.append({"role": "user", "content": content})
+            else:
+                converted.append({"role": "user", "content": content})
+                
+        elif role == "assistant":
+            # Check if this is a tool call message or text message
+            if "tool_calls" in msg:
+                # Convert tool calls to Anthropic tool_use format
+                content_blocks = []
+                tool_calls = msg["tool_calls"]
+                
+                for tc in tool_calls:
+                    # Generate a unique ID for this tool call
+                    tool_id = tc.get("id") or f"toolu_{uuid.uuid4().hex[:24]}"
+                    tool_name = tc.get("name", "unknown")
+                    tool_input = tc.get("input", tc.get("arguments", {}))
+                    
+                    content_blocks.append({
+                        "type": "tool_use",
+                        "id": tool_id,
+                        "name": tool_name,
+                        "input": tool_input
+                    })
+                    
+                    # Track the ID for matching with results
+                    current_tool_ids[tool_name] = tool_id
+                
+                converted.append({
+                    "role": "assistant",
+                    "content": content_blocks
+                })
+            else:
+                # Regular text message
+                content = msg.get("content", "")
+                if isinstance(content, str):
+                    converted.append({"role": "assistant", "content": content})
+                else:
+                    converted.append({"role": "assistant", "content": content})
+                    
+        elif role == "tool":
+            # Convert tool results to Anthropic tool_result format
+            # Tool results must be sent as a "user" message with tool_result content
+            tool_results = msg.get("tool_results", [])
+            content_blocks = []
+            
+            for tr in tool_results:
+                tool_name = tr.get("name", "unknown")
+                result = tr.get("result", {})
+                
+                # Get the matching tool ID
+                tool_id = current_tool_ids.get(tool_name, f"toolu_{uuid.uuid4().hex[:24]}")
+                
+                # Convert result to string if it's a dict
+                if isinstance(result, dict):
+                    result_content = json.dumps(result)
+                else:
+                    result_content = str(result)
+                
+                # Check if this is an error
+                is_error = result.get("status") == "error" if isinstance(result, dict) else False
+                
+                content_blocks.append({
+                    "type": "tool_result",
+                    "tool_use_id": tool_id,
+                    "content": result_content,
+                    "is_error": is_error
+                })
+            
+            if content_blocks:
+                converted.append({
+                    "role": "user",
+                    "content": content_blocks
+                })
+        
+        elif role == "system":
+            # System messages are handled separately in Anthropic API
+            # Skip them here as they're passed as a separate parameter
+            pass
+    
+    return converted
+
+
+# =============================================================================
 # Claude Provider
 # =============================================================================
 
@@ -185,16 +304,16 @@ class ClaudeProvider:
         Initialize Claude provider.
         
         Args:
-            api_key: Anthropic API key (defaults to ANTHROPIC_API_KEY env var)
+            api_key: Anthropic API key (required)
             model: Claude model to use
             max_tokens: Maximum tokens in response
             temperature: Sampling temperature (0.0 to 1.0)
             max_retries: Maximum retry attempts on failure
             timeout: Request timeout in seconds
         """
-        self.api_key = api_key or os.getenv("ANTHROPIC_API_KEY")
-        if not self.api_key:
-            raise ValueError("ANTHROPIC_API_KEY not found in environment or constructor")
+        if not api_key:
+            raise ValueError("Anthropic API key is required")
+        self.api_key = api_key
         
         self.model = model
         self.max_tokens = max_tokens
@@ -209,7 +328,7 @@ class ClaudeProvider:
             timeout=timeout
         )
         
-        logger.info(f"Claude provider initialized with model: {model}")
+        print(f"Claude provider initialized with model: {model}")
     
     async def create_message(
         self,
@@ -252,12 +371,15 @@ class ClaudeProvider:
         anthropic_tools = None
         if tools:
             anthropic_tools = convert_mcp_tools_to_anthropic(tools)
-            logger.debug(f"Converted {len(tools)} MCP tools to Anthropic format")
+            print(f"Converted {len(tools)} MCP tools to Anthropic format")
+        
+        # Convert messages to Anthropic format (handles tool calls and results)
+        anthropic_messages = convert_messages_to_anthropic(messages)
         
         # Build request parameters
         params: Dict[str, Any] = {
             "model": kwargs.get("model", self.model),
-            "messages": messages,
+            "messages": anthropic_messages,
             "max_tokens": kwargs.get("max_tokens", self.max_tokens),
             "temperature": kwargs.get("temperature", self.temperature),
         }
@@ -270,27 +392,27 @@ class ClaudeProvider:
         
         # Make API call with retry logic
         try:
-            logger.debug(f"Sending message to Claude ({len(messages)} messages)")
+            print(f"Sending message to Claude ({len(anthropic_messages)} messages)")
             message = await self.client.messages.create(**params)
             
             # Parse response
             parsed = ParsedResponse(message)
             
-            logger.info(
+            print(
                 f"Claude response: {parsed.usage.input_tokens} in, "
                 f"{parsed.usage.output_tokens} out, "
                 f"stop_reason={parsed.stop_reason}"
             )
             
             if parsed.has_tool_calls:
-                logger.info(f"Claude requested {len(parsed.tool_calls)} tool calls")
+                print(f"Claude requested {len(parsed.tool_calls)} tool calls")
                 for call in parsed.tool_calls:
-                    logger.debug(f"  - {call['name']}: {list(call['input'].keys())}")
+                    print(f"  - {call['name']}: {list(call['input'].keys())}")
             
             return parsed
             
         except Exception as e:
-            logger.error(f"Claude API error: {e}")
+            print(f"ERROR: " + str(f"Claude API error: {e}"))
             raise
     
     async def create_message_stream(
@@ -341,7 +463,7 @@ class ClaudeProvider:
         anthropic_tools = None
         if tools:
             anthropic_tools = convert_mcp_tools_to_anthropic(tools)
-            logger.debug(f"Converted {len(tools)} MCP tools for streaming")
+            print(f"Converted {len(tools)} MCP tools for streaming")
         
         # Build request parameters
         params: Dict[str, Any] = {
@@ -358,7 +480,7 @@ class ClaudeProvider:
             params["tools"] = anthropic_tools
         
         try:
-            logger.debug(f"Starting streaming message to Claude")
+            print(f"Starting streaming message to Claude")
             
             async with self.client.messages.stream(**params) as stream:
                 async for event in stream:
@@ -366,19 +488,19 @@ class ClaudeProvider:
             
             # Log final message stats
             final_message = await stream.get_final_message()
-            logger.info(
+            print(
                 f"Stream complete: {final_message.usage.input_tokens} in, "
                 f"{final_message.usage.output_tokens} out"
             )
             
         except Exception as e:
-            logger.error(f"Claude streaming error: {e}")
+            print(f"ERROR: " + str(f"Claude streaming error: {e}"))
             raise
     
     async def close(self):
         """Close the Anthropic client connection."""
         await self.client.close()
-        logger.info("Claude provider closed")
+        print("Claude provider closed")
     
     def __repr__(self) -> str:
         return f"ClaudeProvider(model={self.model}, max_tokens={self.max_tokens})"

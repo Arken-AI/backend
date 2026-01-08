@@ -12,10 +12,12 @@ Key responsibilities:
 """
 
 import json
+import traceback
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Any
 import redis
 from motor.motor_asyncio import AsyncIOMotorClient
+
 
 
 class ContextManager:
@@ -76,7 +78,9 @@ class ContextManager:
             "current_process": None,
             "simulation_params": {},
             "executed_tools": [],
+            "messages": [],  # Conversation history for multi-turn
             "last_run_id": None,
+            "last_simulation_summary": None,  # Condensed simulation results for follow-up questions
             "created_at": now,
             "updated_at": now
         }
@@ -110,12 +114,14 @@ class ContextManager:
             return context
         
         # Fallback to MongoDB (slower but permanent)
-        # Note: For async compatibility, we need to handle this properly
-        # In sync context, we can't await, so MongoDB fallback is limited
-        # This will be properly fixed when all callers are async
+        context = await self._load_from_mongo_async(conversation_id)
         
-        # For now, return empty dict if not in Redis
-        # Full async implementation will enable MongoDB fallback
+        if context:
+            # Re-cache in Redis for faster subsequent access
+            await self._save_to_redis(conversation_id, context)
+            print(f"Context loaded from MongoDB and cached in Redis: {conversation_id}")
+            return context
+        
         return {}
     
     async def update_context(
@@ -138,6 +144,16 @@ class ContextManager:
             ...     "current_process": "sugar_production"
             ... })
         """
+        print(f"[update_context] Updating context for {conversation_id} with keys: {list(updates.keys())}")
+        
+        # Log simulation summary details if present
+        if "last_simulation_summary" in updates:
+            summary = updates.get("last_simulation_summary")
+            if summary:
+                print(f"[update_context] Simulation summary run_id: {summary.get('run_id')}")
+        if "last_run_id" in updates:
+            print(f"[update_context] Setting last_run_id: {updates.get('last_run_id')}")
+        
         # Get existing context
         context = await self.get_context(conversation_id)
         
@@ -150,9 +166,13 @@ class ContextManager:
         context.update(updates)
         context["updated_at"] = datetime.utcnow().isoformat()
         
+        print(f"[update_context] Context updated, saving to Redis and MongoDB...")
+        
         # Save to both storages
         await self._save_to_redis(conversation_id, context)
         await self._save_to_mongo_async(conversation_id, context)
+        
+        print(f"[update_context] Context saved successfully for {conversation_id}")
     
     async def add_tool_execution(
         self,
@@ -189,7 +209,7 @@ class ContextManager:
             "status": result.get("status", "unknown"),
             "process_id": result.get("process_id"),
             "valid": result.get("valid"),
-            "run_id": result.get("run_id")
+            "run_id": result.get("calc_run_id") or result.get("run_id")
         }
         
         # Append to executed_tools list
@@ -199,13 +219,86 @@ class ContextManager:
         context["executed_tools"].append(execution)
         context["updated_at"] = datetime.utcnow().isoformat()
         
-        # Update last_run_id if present
-        if result.get("run_id"):
-            context["last_run_id"] = result["run_id"]
+        # Update last_run_id if present (check both calc_run_id and run_id)
+        run_id = result.get("calc_run_id") or result.get("run_id")
+        if run_id:
+            context["last_run_id"] = run_id
         
         # Save to both storages
         await self._save_to_redis(conversation_id, context)
         await self._save_to_mongo_async(conversation_id, context)
+    
+    async def add_message(
+        self,
+        conversation_id: str,
+        role: str,
+        content: str,
+        metadata: Optional[Dict[str, Any]] = None
+    ) -> None:
+        """
+        Add a message to conversation history for multi-turn support.
+        
+        This enables the LLM to remember previous user questions and its own responses.
+        
+        Args:
+            conversation_id: Unique identifier for the conversation
+            role: Message role ("user" or "assistant")
+            content: Message content
+            metadata: Optional metadata (tool_calls, token_usage, etc.)
+            
+        Example:
+            >>> await add_message("conv_123", "user", "Simulate sugar factory")
+            >>> await add_message("conv_123", "assistant", "Here are the results...")
+        """
+        context = await self.get_context(conversation_id)
+        
+        if not context:
+            context = await self.create_context(conversation_id, user_id="system")
+        
+        # Ensure messages list exists
+        if "messages" not in context:
+            context["messages"] = []
+        
+        # Create message record
+        message = {
+            "role": role,
+            "content": content,
+            "timestamp": datetime.utcnow().isoformat()
+        }
+        
+        if metadata:
+            message["metadata"] = metadata
+        
+        context["messages"].append(message)
+        context["updated_at"] = datetime.utcnow().isoformat()
+        
+        # Save to both storages
+        await self._save_to_redis(conversation_id, context)
+        await self._save_to_mongo_async(conversation_id, context)
+    
+    async def get_messages(self, conversation_id: str) -> List[Dict[str, Any]]:
+        """
+        Get conversation message history.
+        
+        Returns messages in chronological order for building LLM context.
+        
+        Args:
+            conversation_id: Unique identifier for the conversation
+            
+        Returns:
+            List of messages with role, content, and timestamp
+            
+        Example:
+            >>> messages = await get_messages("conv_123")
+            >>> for msg in messages:
+            ...     print(f"{msg['role']}: {msg['content'][:50]}...")
+        """
+        context = await self.get_context(conversation_id)
+        
+        if not context or "messages" not in context:
+            return []
+        
+        return context["messages"]
     
     async def get_executed_tools(self, conversation_id: str) -> List[str]:
         """
@@ -347,7 +440,7 @@ class ContextManager:
             # Log error but don't fail - Redis is primary storage
             print(f"Warning: Failed to save context to MongoDB: {e}")
     
-    async def _load_from_mongo_sync(self, conversation_id: str) -> Optional[Dict[str, Any]]:
+    async def _load_from_mongo_async(self, conversation_id: str) -> Optional[Dict[str, Any]]:
         """
         Load context from MongoDB (async operation).
         
