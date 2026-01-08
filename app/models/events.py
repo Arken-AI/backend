@@ -51,6 +51,7 @@ class ErrorType(str, Enum):
     VALIDATION_ERROR = "validation_error"
     TIMEOUT_ERROR = "timeout_error"
     SYSTEM_ERROR = "system_error"
+    INTERNAL_ERROR = "internal_error"
 
 
 class BaseEvent(BaseModel):

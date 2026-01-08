@@ -1,11 +1,12 @@
 """
 Context Manager Tests
 
-Simple tests to verify Context Manager functionality.
+Tests for Context Manager functionality with MongoDB persistence.
 Run with: python test_context_manager.py
 """
 
 import sys
+import asyncio
 import redis
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -17,7 +18,7 @@ from app.services.context_manager import ContextManager
 from motor.motor_asyncio import AsyncIOMotorClient
 
 
-def test_context_manager():
+async def test_context_manager():
     """Test Context Manager functionality."""
     
     print("🧪 Testing Context Manager\n")
@@ -40,7 +41,7 @@ def test_context_manager():
     
     # Test 2: Update context
     print("✅ Test 2: Update Context")
-    cm.update_context("test_conv_001", {
+    await cm.update_context("test_conv_001", {
         "current_industry": "sugar",
         "current_process": "sugar_production",
         "simulation_params": {"cane_input": 100}
@@ -57,7 +58,7 @@ def test_context_manager():
     
     # Test 3: Add tool execution - validation
     print("✅ Test 3: Track Validation Tool")
-    cm.add_tool_execution("test_conv_001", "validate_process_inputs", {
+    await cm.add_tool_execution("test_conv_001", "validate_process_inputs", {
         "status": "success",
         "process_id": "sugar_production",
         "valid": True
@@ -85,7 +86,7 @@ def test_context_manager():
     
     # Test 5: Add simulation tool
     print("✅ Test 5: Track Simulation Tool")
-    cm.add_tool_execution("test_conv_001", "simulate_process", {
+    await cm.add_tool_execution("test_conv_001", "simulate_process", {
         "status": "success",
         "process_id": "sugar_production",
         "run_id": "run_test_123"
@@ -103,7 +104,7 @@ def test_context_manager():
     # Test 6: Multi-conversation isolation
     print("✅ Test 6: Conversation Isolation")
     context2 = cm.create_context("test_conv_002", user_id="another_user")
-    cm.update_context("test_conv_002", {"current_industry": "hydrogen"})
+    await cm.update_context("test_conv_002", {"current_industry": "hydrogen"})
     
     # Verify contexts are separate
     context1 = cm.get_context("test_conv_001")
@@ -129,8 +130,8 @@ def test_context_manager():
     
     # Cleanup
     print("🧹 Cleanup")
-    cm.clear_context("test_conv_001")
-    cm.clear_context("test_conv_002")
+    await cm.clear_context("test_conv_001")
+    await cm.clear_context("test_conv_002")
     print("   Contexts cleared")
     print()
     
@@ -140,4 +141,4 @@ def test_context_manager():
 
 
 if __name__ == "__main__":
-    test_context_manager()
+    asyncio.run(test_context_manager())

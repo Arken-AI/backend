@@ -22,6 +22,7 @@ Note: Uses google-genai library (not deprecated google.generativeai)
 """
 
 import asyncio
+import json
 import logging
 import os
 from typing import Any, AsyncGenerator, Dict, List, Optional, Union
@@ -236,26 +237,82 @@ class GeminiProvider:
         
         logger.info(f"Gemini provider initialized with model: {model}")
     
-    def _convert_messages(self, messages: List[Dict[str, str]]) -> List[Dict[str, Any]]:
+    def _convert_messages(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """
-        Convert Anthropic-style messages to Gemini format.
+        Convert messages to Gemini format, supporting multi-turn with tool calls/results.
         
-        Anthropic format: [{"role": "user", "content": "..."}]
-        Gemini format: [{"role": "user", "parts": [{"text": "..."}]}]
+        Handles three message types:
+        1. Simple text messages: {"role": "user", "content": "..."}
+        2. Assistant with tool calls: {"role": "assistant", "tool_calls": [...]}
+        3. Tool results: {"role": "tool", "tool_results": [...]}
         
-        Also converts "assistant" role to "model" for Gemini.
+        Gemini format uses:
+        - "user" role for user messages AND tool results (as functionResponse)
+        - "model" role for assistant messages AND tool calls (as functionCall)
         """
         gemini_messages = []
+        
         for msg in messages:
-            role = msg["role"]
-            # Gemini uses "model" instead of "assistant"
-            if role == "assistant":
-                role = "model"
+            role = msg.get("role", "user")
+            content = msg.get("content")
             
-            gemini_messages.append({
-                "role": role,
-                "parts": [{"text": msg["content"]}]
-            })
+            # Handle tool results (sent back to model)
+            if role == "tool" and "tool_results" in msg:
+                # Gemini expects tool results as "user" role with functionResponse parts
+                parts = []
+                for result in msg["tool_results"]:
+                    # Convert result to JSON string if it's a dict
+                    result_content = result.get("result", {})
+                    if isinstance(result_content, dict):
+                        result_str = json.dumps(result_content)
+                    else:
+                        result_str = str(result_content)
+                    
+                    parts.append({
+                        "function_response": {
+                            "name": result["name"],
+                            "response": {"result": result_str}
+                        }
+                    })
+                gemini_messages.append({
+                    "role": "user",
+                    "parts": parts
+                })
+                continue
+            
+            # Handle assistant messages with tool calls
+            if role == "assistant" and "tool_calls" in msg:
+                parts = []
+                for tool_call in msg["tool_calls"]:
+                    parts.append({
+                        "function_call": {
+                            "name": tool_call["name"],
+                            "args": tool_call.get("input", tool_call.get("arguments", {}))
+                        }
+                    })
+                gemini_messages.append({
+                    "role": "model",
+                    "parts": parts
+                })
+                continue
+            
+            # Handle simple text messages
+            if content:
+                # Gemini uses "model" instead of "assistant"
+                gemini_role = "model" if role == "assistant" else role
+                
+                # Content can be a string or a list of parts
+                if isinstance(content, str):
+                    gemini_messages.append({
+                        "role": gemini_role,
+                        "parts": [{"text": content}]
+                    })
+                elif isinstance(content, list):
+                    # Already in parts format
+                    gemini_messages.append({
+                        "role": gemini_role,
+                        "parts": content
+                    })
         
         return gemini_messages
     

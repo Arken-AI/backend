@@ -8,12 +8,9 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api import stream
+from app.api import stream, health, chat
 from app.dependencies import close_redis_client
 from app.config import settings
-
-# TODO: Import additional routers in Phase 7
-# from app.api import chat, health
 
 
 @asynccontextmanager
@@ -56,11 +53,9 @@ def create_app() -> FastAPI:
     )
     
     # Include routers
+    app.include_router(health.router, prefix="/api", tags=["health"])
+    app.include_router(chat.router, prefix="/api", tags=["chat"])
     app.include_router(stream.router, prefix="/api", tags=["streaming"])
-    
-    # TODO: Include additional routers in Phase 7
-    # app.include_router(health.router, prefix="/health", tags=["health"])
-    # app.include_router(chat.router, prefix="/chat", tags=["chat"])
     
     return app
 

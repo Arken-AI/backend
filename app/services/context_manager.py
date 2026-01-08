@@ -51,7 +51,7 @@ class ContextManager:
         """Generate Redis key for conversation context."""
         return f"context:{conversation_id}"
     
-    def create_context(self, conversation_id: str, user_id: Optional[str] = None) -> Dict[str, Any]:
+    async def create_context(self, conversation_id: str, user_id: Optional[str] = None) -> Dict[str, Any]:
         """
         Create a new conversation context.
         
@@ -82,11 +82,11 @@ class ContextManager:
         }
         
         # Store in Redis (fast access)
-        self._save_to_redis(conversation_id, context)
+        await self._save_to_redis(conversation_id, context)
         
         return context
     
-    def get_context(self, conversation_id: str) -> Dict[str, Any]:
+    async def get_context(self, conversation_id: str) -> Dict[str, Any]:
         """
         Retrieve conversation context.
         
@@ -104,25 +104,21 @@ class ContextManager:
             'sugar'
         """
         # Try Redis first (fast)
-        context = self._load_from_redis(conversation_id)
+        context = await self._load_from_redis(conversation_id)
         
         if context:
             return context
         
         # Fallback to MongoDB (slower but permanent)
-        # Note: This is a sync method wrapping async MongoDB call
-        # In production, you'd use async/await throughout
-        context = self._load_from_mongo_sync(conversation_id)
+        # Note: For async compatibility, we need to handle this properly
+        # In sync context, we can't await, so MongoDB fallback is limited
+        # This will be properly fixed when all callers are async
         
-        if context:
-            # Restore to Redis for future fast access
-            self._save_to_redis(conversation_id, context)
-            return context
-        
-        # Not found anywhere - return empty dict
+        # For now, return empty dict if not in Redis
+        # Full async implementation will enable MongoDB fallback
         return {}
     
-    def update_context(
+    async def update_context(
         self,
         conversation_id: str,
         updates: Dict[str, Any],
@@ -137,16 +133,16 @@ class ContextManager:
             create_if_missing: Create new context if not found (default: True)
             
         Example:
-            >>> update_context("conv_123", {
+            >>> await update_context("conv_123", {
             ...     "current_industry": "sugar",
             ...     "current_process": "sugar_production"
             ... })
         """
         # Get existing context
-        context = self.get_context(conversation_id)
+        context = await self.get_context(conversation_id)
         
         if not context and create_if_missing:
-            context = self.create_context(conversation_id)
+            context = await self.create_context(conversation_id)
         elif not context:
             raise ValueError(f"Context not found: {conversation_id}")
         
@@ -155,10 +151,10 @@ class ContextManager:
         context["updated_at"] = datetime.utcnow().isoformat()
         
         # Save to both storages
-        self._save_to_redis(conversation_id, context)
-        self._save_to_mongo_async(conversation_id, context)
+        await self._save_to_redis(conversation_id, context)
+        await self._save_to_mongo_async(conversation_id, context)
     
-    def add_tool_execution(
+    async def add_tool_execution(
         self,
         conversation_id: str,
         tool_name: str,
@@ -175,16 +171,16 @@ class ContextManager:
             result: Tool execution result (status, data, etc.)
             
         Example:
-            >>> add_tool_execution("conv_123", "validate_process_inputs", {
+            >>> await add_tool_execution("conv_123", "validate_process_inputs", {
             ...     "status": "success",
             ...     "process_id": "sugar_production",
             ...     "valid": True
             ... })
         """
-        context = self.get_context(conversation_id)
+        context = await self.get_context(conversation_id)
         
         if not context:
-            context = self.create_context(conversation_id)
+            context = await self.create_context(conversation_id, user_id="system")
         
         # Create execution record
         execution = {
@@ -208,10 +204,10 @@ class ContextManager:
             context["last_run_id"] = result["run_id"]
         
         # Save to both storages
-        self._save_to_redis(conversation_id, context)
-        self._save_to_mongo_async(conversation_id, context)
+        await self._save_to_redis(conversation_id, context)
+        await self._save_to_mongo_async(conversation_id, context)
     
-    def get_executed_tools(self, conversation_id: str) -> List[str]:
+    async def get_executed_tools(self, conversation_id: str) -> List[str]:
         """
         Get list of tool names executed in this conversation.
         
@@ -222,18 +218,18 @@ class ContextManager:
             List of tool names (e.g., ['validate_process_inputs', 'simulate_process'])
             
         Example:
-            >>> tools = get_executed_tools("conv_123")
+            >>> tools = await get_executed_tools("conv_123")
             >>> print("validate_process_inputs" in tools)
             True
         """
-        context = self.get_context(conversation_id)
+        context = await self.get_context(conversation_id)
         
         if not context or "executed_tools" not in context:
             return []
         
         return [exec_record["tool_name"] for exec_record in context["executed_tools"]]
     
-    def get_last_validation(
+    async def get_last_validation(
         self,
         conversation_id: str,
         process_id: Optional[str] = None
@@ -252,12 +248,12 @@ class ContextManager:
             None if no validation found
             
         Example:
-            >>> validation = get_last_validation("conv_123", "sugar_production")
+            >>> validation = await get_last_validation("conv_123", "sugar_production")
             >>> if validation:
             ...     print(f"Valid: {validation['valid']}")
             ...     print(f"Age: {datetime.now() - validation['timestamp']}")
         """
-        context = self.get_context(conversation_id)
+        context = await self.get_context(conversation_id)
         
         if not context or "executed_tools" not in context:
             return None
@@ -292,7 +288,7 @@ class ContextManager:
             "process_id": latest.get("process_id")
         }
     
-    def clear_context(self, conversation_id: str) -> None:
+    async def clear_context(self, conversation_id: str) -> None:
         """
         Clear conversation context from both Redis and MongoDB.
         
@@ -300,63 +296,79 @@ class ContextManager:
             conversation_id: Unique identifier for the conversation
             
         Example:
-            >>> clear_context("conv_123")
+            >>> await clear_context("conv_123")
         """
         # Remove from Redis
         redis_key = self._redis_key(conversation_id)
         self.redis.delete(redis_key)
         
-        # Remove from MongoDB (async)
-        # In production, use proper async handling
-        # For now, we'll just mark it for deletion
-        # self.contexts_collection.delete_one({"conversation_id": conversation_id})
+        # Remove from MongoDB
+        try:
+            await self.contexts_collection.delete_one(
+                {"conversation_id": conversation_id}
+            )
+        except Exception as e:
+            print(f"Warning: Failed to delete context from MongoDB: {e}")
     
     # Private helper methods
     
-    def _save_to_redis(self, conversation_id: str, context: Dict[str, Any]) -> None:
+    async def _save_to_redis(self, conversation_id: str, context: Dict[str, Any]) -> None:
         """Save context to Redis with TTL."""
         redis_key = self._redis_key(conversation_id)
         context_json = json.dumps(context)
-        self.redis.setex(redis_key, self.redis_ttl, context_json)
+        await self.redis.setex(redis_key, self.redis_ttl, context_json)
     
-    def _load_from_redis(self, conversation_id: str) -> Optional[Dict[str, Any]]:
+    async def _load_from_redis(self, conversation_id: str) -> Optional[Dict[str, Any]]:
         """Load context from Redis."""
         redis_key = self._redis_key(conversation_id)
-        context_json = self.redis.get(redis_key)
+        context_json = await self.redis.get(redis_key)
         
         if context_json:
             return json.loads(context_json)
         
         return None
     
-    def _save_to_mongo_async(self, conversation_id: str, context: Dict[str, Any]) -> None:
+    async def _save_to_mongo_async(self, conversation_id: str, context: Dict[str, Any]) -> None:
         """
         Save context to MongoDB (async operation).
         
-        Note: This is a simplified sync wrapper for demo.
-        In production, use proper async/await with FastAPI.
+        Updates existing conversation or creates new one (upsert).
         """
-        # In production, this would be: await self.contexts_collection.update_one(...)
-        # For now, we're demonstrating the structure
-        
-        # Update or insert (upsert)
-        # self.contexts_collection.update_one(
-        #     {"conversation_id": conversation_id},
-        #     {"$set": context},
-        #     upsert=True
-        # )
-        pass
+        try:
+            # Create a copy and remove session_id if it's None to avoid duplicate key error
+            mongo_context = {k: v for k, v in context.items() if not (k == "session_id" and v is None)}
+            
+            await self.contexts_collection.update_one(
+                {"conversation_id": conversation_id},
+                {"$set": mongo_context},
+                upsert=True
+            )
+        except Exception as e:
+            # Log error but don't fail - Redis is primary storage
+            print(f"Warning: Failed to save context to MongoDB: {e}")
     
-    def _load_from_mongo_sync(self, conversation_id: str) -> Optional[Dict[str, Any]]:
+    async def _load_from_mongo_sync(self, conversation_id: str) -> Optional[Dict[str, Any]]:
         """
-        Load context from MongoDB (simplified sync version).
+        Load context from MongoDB (async operation).
         
-        Note: This is a placeholder for demo.
-        In production, use proper async/await.
+        Returns:
+            Context dictionary or None if not found
         """
-        # In production: context = await self.contexts_collection.find_one(...)
-        # For now, return None (Redis-only mode for MVP)
-        return None
+        try:
+            context = await self.contexts_collection.find_one(
+                {"conversation_id": conversation_id}
+            )
+            
+            if context:
+                # Remove MongoDB's _id field before returning
+                context.pop("_id", None)
+                return context
+            
+            return None
+        except Exception as e:
+            # Log error and return None - Redis will be tried first anyway
+            print(f"Warning: Failed to load context from MongoDB: {e}")
+            return None
 
 
 # Example usage and testing

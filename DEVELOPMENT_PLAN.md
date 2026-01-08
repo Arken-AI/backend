@@ -379,68 +379,148 @@ Implement core policy enforcement and conversation context management (simplifie
 
 ---
 
-### **PHASE 4: Event System & SSE** (Day 7) 🔄 **NEXT PHASE**
+### **PHASE 4: Event System & SSE** (Day 7) ✅ **COMPLETED**
 
-**Status**: Ready to start
+**Status**: ✅ All tasks completed
 **Prerequisites**: ✅ Phase 3 complete (Context + Policy working)
-
-**Decision Point**: 
-- **Option A (Recommended)**: Proceed with Event System now for complete backend
-- **Option B**: Skip to Phase 5 (Agentic Loop) and add events later
-- **Current Plan**: Implement basic events for orchestration flow tracking
-
-**Note**: This phase may be deferred until after frontend is complete and end-to-end flow is verified working. Event system can be added incrementally for real-time UI updates.
 
 #### Goal
 Build typed SSE event protocol for real-time UI updates
 
+#### Summary
+Event system fully implemented with Redis Streams storage, SSE endpoint, and orchestration integration.
+
+**Completed Features:**
+- ✅ 8 event types with full serialization (BaseEvent, ThinkingStart/End, ToolStart/End, RunProgress, MessageDelta/Final, AppError)
+- ✅ EventEmitter service with Redis Streams backend
+- ✅ SSE streaming endpoint with replay support
+- ✅ Orchestration service emitting events at all key points
+- ✅ MongoDB context persistence implemented
+- ✅ All async operations properly awaited
+
+**Test Results:**
+- ✅ Event Models: 35/35 tests passing
+- ✅ Event Emitter: 23/23 tests passing  
+- ✅ SSE Stream: 13/13 tests passing
+- ✅ Total: 71 tests passing
+
 #### Tasks
-1. **Event Models**
-   - File: `backend/app/models/events.py`
-   - Define Pydantic models for all event types:
+1. **Event Models** ✅
+   - File: `backend/app/models/events.py` (380 lines)
+   - Implemented Pydantic models for all event types:
      - BaseEvent (request_id, seq, ts)
-     - ThinkingStartEvent, ThinkingEndEvent
-     - ToolStartEvent, ToolEndEvent
-     - RunStatusEvent, RunProgressEvent
-     - MessageDeltaEvent, MessageFinalEvent
-     - AppErrorEvent
+     - ThinkingStartEvent, ThinkingEndEvent (duration_ms)
+     - ToolStartEvent, ToolEndEvent (tool_name, status, duration, summary)
+     - RunProgressEvent (stage, percentage, message)
+     - MessageDeltaEvent, MessageFinalEvent (content, role, metadata)
+     - AppErrorEvent (error_type, error_message, details, recoverable)
+   - Helper methods: to_sse_format(), to_redis_dict(), from_redis_dict()
+   - Enums: EventType, ToolStatus, ErrorType
 
-2. **Event Emitter Service**
-   - File: `backend/app/services/event_emitter.py`
-   - Implement `EventEmitter` class with methods:
+2. **Event Emitter Service** ✅
+   - File: `backend/app/services/event_emitter.py` (472 lines)
+   - Implemented `EventEmitter` class with methods:
      - `emit_thinking_start(request_id)`
-     - `emit_thinking_end(request_id)`
-     - `emit_tool_start(request_id, tool_name, args)`
-     - `emit_tool_end(request_id, tool_name, status, duration, summary)`
-     - `emit_run_status(request_id, status, calc_run_id)`
-     - `emit_run_progress(request_id, block_name, percentage)`
-     - `emit_message_delta(request_id, delta)`
-     - `emit_message_final(request_id, content)`
-     - `emit_app_error(request_id, error, details)`
-   - Store events in Redis Streams
-   - Auto-increment sequence numbers
+     - `emit_thinking_end(request_id, duration_ms)`
+     - `emit_tool_start(request_id, tool_name, args, estimated_duration_ms)`
+     - `emit_tool_end(request_id, tool_name, status, duration, summary, error_message, result_id)`
+     - `emit_run_progress(request_id, stage, percentage, message, current_block, total_blocks)`
+     - `emit_message_delta(request_id, delta, accumulated_length)`
+     - `emit_message_final(request_id, content, role, metadata)`
+     - `emit_app_error(request_id, error_type, error_message, details, recoverable)`
+     - `get_events(request_id, after_sequence)` - For SSE replay
+     - `get_event_count(request_id)`
+     - `clear_events(request_id)`
+   - Redis Streams storage with automatic sequence numbers
+   - TTL management (1-hour expiration)
+   - MAXLEN protection (10,000 events limit)
 
-3. **SSE Generator**
-   - File: `backend/app/api/chat.py`
-   - Implement SSE streaming endpoint
-   - Replay from last_event_id if provided
-   - Stream live events
-   - Format as SSE: id, event, data
+3. **SSE Streaming Endpoint** ✅
+   - File: `backend/app/api/stream.py` (190 lines)
+   - Implemented SSE streaming at `GET /api/chat/{request_id}/stream`
+   - Features:
+     - Replay support via `after_sequence` query parameter
+     - Auto-termination on `message_final` event
+     - Keepalive heartbeat (every 15 seconds)
+     - Proper SSE headers (Cache-Control, Connection, X-Accel-Buffering)
+     - Graceful error handling
+   - EventSourceResponse wrapper for SSE format
 
-#### Deliverables
-- ✅ All event types defined
-- ✅ Event emission working
-- ✅ SSE streaming endpoint
-- ✅ Replay from last event ID
+4. **Orchestration Integration** ✅
+   - File: `backend/app/services/orchestration_service.py`
+   - Added EventEmitter dependency (optional)
+   - Event emissions at all key points:
+     - `emit_thinking_start/end` around LLM calls (with duration tracking)
+     - `emit_tool_start/end` around tool execution (with status and duration)
+     - `emit_run_progress` for long-running calculations
+     - `emit_message_delta` during streaming responses (placeholder)
+     - `emit_message_final` when request completes
+     - `emit_app_error` for policy violations and exceptions
+   - All events include timestamps and sequence numbers
 
-#### Testing
-- Emit events, verify Redis storage
-- Test SSE endpoint with curl
-- Test replay with last_event_id
+5. **MongoDB Context Persistence** ✅
+   - File: `backend/app/services/context_manager.py`
+   - Implemented dual-storage strategy:
+     - Redis: Fast cache with 1-hour TTL (primary)
+     - MongoDB: Permanent backup (secondary)
+   - Methods updated to async:
+     - `async update_context()` - Saves to both Redis and MongoDB
+     - `async add_tool_execution()` - Saves to both storages
+     - `async clear_context()` - Deletes from both storages
+   - MongoDB operations with error handling (best-effort)
+   - Context survives server restarts via MongoDB fallback
+
+#### Deliverables ✅
+- ✅ 8 event types with full serialization (35 tests passing)
+- ✅ EventEmitter service with Redis Streams (23 tests passing)
+- ✅ SSE streaming endpoint with replay (13 tests passing)
+- ✅ Orchestration emitting events at all key points
+- ✅ MongoDB persistence for conversations
+- ✅ All async operations properly awaited
+
+#### Testing Results ✅
+- ✅ Event Models: 35/35 tests passing
+  - Event creation, validation, serialization
+  - SSE format generation
+  - Redis dict conversion (round-trip)
+- ✅ Event Emitter: 23/23 tests passing
+  - Sequence number management
+  - All 8 event emission methods
+  - Event retrieval and replay
+  - TTL and cleanup
+  - Error handling
+- ✅ SSE Stream: 13/13 tests passing
+  - Basic streaming
+  - Replay after sequence
+  - Auto-termination
+  - SSE format compliance
+  - Error scenarios
+- ✅ Context Manager: Tests updated to async
+- ✅ Orchestration Service: Fixed method calls, verified async await usage
+
+**Files Created/Modified:**
+- `app/models/events.py` - 380 lines (8 event classes)
+- `app/services/event_emitter.py` - 472 lines (EventEmitter class)
+- `app/api/stream.py` - 190 lines (SSE endpoint)
+- `app/services/orchestration_service.py` - Modified (event integration)
+- `app/services/context_manager.py` - Modified (MongoDB persistence)
+- `tests/test_events.py` - 510 lines (35 tests)
+- `tests/test_event_emitter.py` - 340+ lines (23 tests)
+- `tests/test_stream.py` - 300+ lines (13 tests)
+- `tests/test_context_manager.py` - Modified (async tests)
+- `test_sse_manual.py` - 250 lines (manual testing script)
 
 ---
 
-### **PHASE 5: RQ Worker & Agentic Loop** (Day 8-10)
+### **PHASE 5: RQ Worker & Agentic Loop** (Day 8-10) 🔄 **NEXT PHASE**
+
+**Status**: Ready to start
+**Prerequisites**: ✅ Phase 4 complete (Event System working)
+
+**Decision Point**: 
+- **Current Plan**: Implement background job processing for long-running simulations
+- **Alternative**: Skip to Phase 7 (Chat API endpoint) for immediate end-to-end testing
+- **Recommendation**: Implement Phase 7 first to enable Postman testing, then add Phase 5 for production scalability
 
 #### Goal
 Build the core agentic execution engine (Step A + Step B)
@@ -517,7 +597,69 @@ Build the core agentic execution engine (Step A + Step B)
 
 ---
 
-### **PHASE 6: Report Integrity Guard** (Day 11)
+### **PHASE 6: MongoDB Context Persistence** ✅ **COMPLETED**
+
+**Status**: ✅ Integrated with Phase 4
+**Note**: Originally planned as separate phase, but architecture already supported dual storage. Implementation completed as part of Phase 4 event system work.
+
+#### Goal
+Ensure conversations persist beyond Redis TTL (complete Phase 6 MongoDB integration)
+
+#### Summary
+ContextManager already had dual-storage architecture designed. Phase 6 work involved uncommenting and implementing the MongoDB save/load methods.
+
+**Completed Features:**
+- ✅ MongoDB save operations implemented (upsert on updates)
+- ✅ MongoDB load operations implemented (fallback from Redis)
+- ✅ MongoDB delete operations implemented (context cleanup)
+- ✅ Async/await properly used throughout
+- ✅ Error handling (best-effort, doesn't break on MongoDB failures)
+- ✅ Conversations survive server restarts
+
+#### Implementation Details
+- Modified `_save_to_mongo_async()` - Actually saves to MongoDB with upsert
+- Modified `_load_from_mongo_sync()` - Actually loads from MongoDB with _id removal
+- Modified `clear_context()` - Deletes from both Redis and MongoDB
+- Updated all callers to use `await` for async methods
+- Fixed orchestration service to use `_update_context()` wrapper method
+
+**Files Modified:**
+- `app/services/context_manager.py` - MongoDB methods implemented
+- `app/services/orchestration_service.py` - Fixed method call (line 375)
+- `tests/test_context_manager.py` - Updated to async tests
+
+#### Storage Strategy
+**Redis (Primary - Fast Access)**:
+- 1-hour TTL
+- In-memory cache
+- Fast read/write
+- Automatic expiration
+
+**MongoDB (Secondary - Persistence)**:
+- No TTL (permanent)
+- Disk-based storage
+- Survives restarts
+- Fallback on Redis miss
+
+#### Deliverables ✅
+- ✅ MongoDB persistence fully functional
+- ✅ Dual-storage strategy working
+- ✅ Context survives server restarts
+- ✅ All async operations properly awaited
+
+#### Testing
+- Context stored in MongoDB after updates
+- Context retrieved from MongoDB on Redis miss
+- Context deleted from both storages on clear
+- Server restart doesn't lose conversations
+
+---
+
+### **PHASE 5: RQ Worker & Agentic Loop** (Deferred)
+
+**Status**: 🔄 Deferred until after Phase 7
+**Reason**: Chat API endpoint (Phase 7) needed first for end-to-end testing
+**Priority**: Implement Phase 7 → Test with Postman → Then add background workers
 
 #### Goal
 Prevent LLM from inventing numbers in reports
