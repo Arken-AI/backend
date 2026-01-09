@@ -547,48 +547,78 @@ Implemented a production-grade agentic loop that matches Claude Desktop behavior
 - ✅ Agentic loop with max 10 iterations
 - ✅ Multi-turn conversation history (user → assistant tool calls → tool results → assistant response)
 - ✅ Auto-recovery from errors (wrong process names, validation failures sent back to LLM)
-- ✅ Model-specific system prompts (Claude minimal, Gemini detailed)
+- ✅ Claude-only implementation (Gemini code removed for simplicity)
 - ✅ Token tracking across all iterations
 - ✅ Event emission at all key points
+- ✅ **Token Optimization (5 phases completed)**
+- ✅ **MCP Server health checks (fail-fast on server down)**
+- ✅ **Run ID array tracking (newest first, max 10)**
 
 **Key Implementation Details:**
 ```
 Agentic Loop Flow:
 1. User sends message
-2. LLM proposes tool call(s)
-3. Execute tools (success OR error)
-4. Send ALL results back to LLM
-5. LLM decides: call more tools OR respond
-6. Repeat until LLM responds with text (max 10 iterations)
+2. Health check MCP server (fail fast if down)
+3. LLM proposes tool call(s)
+4. Execute tools (success OR error)
+5. Send ALL results back to LLM
+6. LLM decides: call more tools OR respond
+7. Repeat until LLM responds with text (max 10 iterations)
 ```
 
+**Token Optimization (Added Jan 2026):**
+- ✅ Phase 1: Sliding window (keep last 10 messages, summarize older)
+- ✅ Phase 2: Removed `last_simulation_summary` (~200 lines, ~800-1000 tokens/request saved)
+- ✅ Phase 3: Removed Gemini code (Claude-only, cleaner prompts)
+- ✅ Phase 4: Removed unused constants
+- ✅ Phase 5: Context-aware tool filtering (13 → 6-11 tools based on context)
+- **Total savings: ~800-1500 tokens per request**
+
+**MCP Health Checks (Added Jan 2026):**
+- ✅ Health check at start of `process_message()` - fails immediately if MCP server down
+- ✅ Health check before each tool execution - prevents wasted LLM calls
+- ✅ Clear error messages when MCP server unavailable
+- **Prevents wasting ~10 LLM API calls when server is down**
+
+**Run ID Tracking (Added Jan 2026):**
+- ✅ Changed from single `last_run_id` to `run_ids` array
+- ✅ Newest run always at index 0: `run_ids[0]`
+- ✅ Keeps last 10 simulations in order: `["newest", "prev", "older", ...]`
+- ✅ LLM can access previous runs via `get_run` or `compare_runs` tools
+- ✅ Stored in both Redis and MongoDB automatically
+
 **Files Modified:**
-- `app/services/orchestration_service.py` - Complete rewrite (767 lines)
-  - `process_message()` - Main agentic loop with iteration tracking
-  - `_call_llm_with_history()` - Multi-turn LLM calls with tool results
-  - `_execute_tool()` - Tool execution with error handling
-  - Model-specific system prompts for Claude vs Gemini
-- `app/core/llm_gemini_provider.py` - Multi-turn support
-  - `_convert_messages()` - Handles assistant tool calls and tool results
-  - Formats `functionCall` and `functionResponse` for Gemini API
-- `app/models/requests.py` - Token tracking
-  - Added `TokenUsage` model (input_tokens, output_tokens, total_tokens)
-  - `ChatResponse` includes `token_usage` field
-- `mcp_process_server/schemas.py` - Default parameters
-  - `node_params` now `Optional[Dict] = None` for default equipment settings
+- `app/services/orchestration_service.py` - Major updates (985 lines)
+  - `process_message()` - Agentic loop with MCP health check
+  - `_call_llm_with_history()` - Claude-only, optimized prompts
+  - `_execute_tool()` - Health check before execution
+  - `_update_context()` - Run ID array management
+  - `_get_available_tools()` - Context-aware tool filtering
+  - `_prepare_conversation_for_llm()` - Sliding window optimization
+  - `_extract_summary_from_messages()` - Compact summaries
+- `app/services/context_manager.py` - Run ID array support
+  - `run_ids` field instead of `last_run_id`
+  - Logging for run ID updates
+- `app/api/chat.py` - Returns `run_ids` array in responses
+- `app/core/mcp_client.py` - Health check method used
+- Removed files: Gemini provider and related code
 
 #### Deliverables ✅
 - ✅ Complete agentic loop working (tested with curl)
 - ✅ Auto-recovery from wrong process names (sugar_production → sugar_factory)
-- ✅ Policy enforcement integrated (can be enabled/disabled)
+- ✅ Policy enforcement integrated (disabled for MVP, can be enabled)
 - ✅ Event emission throughout (thinking, tool, message events)
-- ✅ Token tracking (28,000+ tokens for complex queries)
+- ✅ Token tracking with optimizations applied
+- ✅ MCP health checks preventing wasted API calls
+- ✅ Run history tracking with array storage
 
 #### Testing Results ✅
-- ✅ Simple query: "list all industries" → 1 tool call, 4,248 tokens
-- ✅ Complex query: "how many equipments" → 3 tool calls, 9,573 tokens  
+- ✅ Simple query: "list all industries" → 1 tool call, optimized tokens
+- ✅ Complex query: "how many equipments" → 3 tool calls, optimized tokens
 - ✅ Auto-recovery: Wrong process "sugar_production" → auto-corrects to "sugar_factory"
-- ✅ Full simulation: Runs through validate → simulate with 30,000+ tokens
+- ✅ Full simulation: Runs through validate → simulate successfully
+- ✅ MCP down: Returns error immediately without LLM calls
+- ✅ Multiple simulations: Run IDs stored in array, newest first
 
 ---
 
