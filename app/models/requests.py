@@ -81,6 +81,15 @@ class ChatRequest(BaseModel):
     }
 
 
+class ToolExecution(BaseModel):
+    """Tool execution record for chat response"""
+    
+    tool_name: str = Field(..., description="Name of the tool executed")
+    status: Literal["success", "error"] = Field(..., description="Execution status")
+    duration_ms: Optional[int] = Field(default=None, description="Execution time in milliseconds")
+    summary: Optional[str] = Field(default=None, description="Brief result summary")
+
+
 class ChatResponse(BaseModel):
     """Response model after sending a chat message"""
     
@@ -103,6 +112,14 @@ class ChatResponse(BaseModel):
     token_usage: Optional[TokenUsage] = Field(
         default=None,
         description="Token usage statistics for this conversation"
+    )
+    run_ids: List[str] = Field(
+        default_factory=list,
+        description="Array of simulation run IDs (newest first, max 10)"
+    )
+    tool_executions: List[ToolExecution] = Field(
+        default_factory=list,
+        description="List of tools executed in this request"
     )
     
     model_config = {
@@ -161,9 +178,9 @@ class ConversationContextResponse(BaseModel):
         default_factory=list,
         description="Full message history"
     )
-    last_run_id: Optional[str] = Field(
-        default=None,
-        description="ID of the last calculation run (if any simulation was executed)"
+    run_ids: List[str] = Field(
+        default_factory=list,
+        description="Array of simulation run IDs (newest first, max 10)"
     )
     executed_tools: List[str] = Field(
         default_factory=list,
@@ -204,7 +221,7 @@ class ConversationContextResponse(BaseModel):
                             "metadata": {"tool_calls": ["list_industries"]}
                         }
                     ],
-                    "last_run_id": None,
+                    "run_ids": ["run_abc123"],
                     "executed_tools": ["list_industries"],
                     "current_industry": None,
                     "current_process": None,
@@ -214,6 +231,27 @@ class ConversationContextResponse(BaseModel):
             ]
         }
     }
+
+
+class ConversationListItem(BaseModel):
+    """Summary of a conversation for list view"""
+    
+    conversation_id: str = Field(..., description="The conversation identifier")
+    title: Optional[str] = Field(default=None, description="Conversation title (first user message)")
+    message_count: int = Field(default=0, description="Number of messages in conversation")
+    has_simulations: bool = Field(default=False, description="Whether any simulations were run")
+    created_at: datetime = Field(..., description="When the conversation was created")
+    updated_at: datetime = Field(..., description="When the conversation was last updated")
+
+
+class ConversationListResponse(BaseModel):
+    """Response model for listing conversations"""
+    
+    conversations: List[ConversationListItem] = Field(
+        default_factory=list,
+        description="List of conversations"
+    )
+    total: int = Field(default=0, description="Total number of conversations")
 
 
 class ServiceStatus(BaseModel):

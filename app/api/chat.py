@@ -19,8 +19,11 @@ from app.models.requests import (
     ChatRequest,
     ChatResponse,
     ConversationContextResponse,
+    ConversationListResponse,
+    ConversationListItem,
     MessageHistoryItem,
-    ErrorResponse
+    ErrorResponse,
+    ToolExecution
 )
 from app.services.orchestration_service import OrchestrationService
 from app.services.context_manager import ContextManager
@@ -110,6 +113,12 @@ async def send_message(
             from app.models.requests import TokenUsage
             token_usage = TokenUsage(**result["token_usage"])
         
+        # Extract run_ids and tool executions
+        run_ids = result.get("run_ids", [])
+        tool_executions = [
+            ToolExecution(**te) for te in result.get("tool_executions", [])
+        ]
+        
         logger.info(
             f"Message processed: conversation_id={conversation_id}, "
             f"request_id={request_id}, status={response_status}"
@@ -120,7 +129,9 @@ async def send_message(
             request_id=request_id,
             status=response_status,
             message=response_message,
-            token_usage=token_usage
+            token_usage=token_usage,
+            run_ids=run_ids,
+            tool_executions=tool_executions
         )
         
     except Exception as e:
@@ -275,5 +286,85 @@ async def delete_conversation(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to delete conversation: {str(e)}"
+        )
+
+
+@router.get(
+    "/conversations",
+    response_model=ConversationListResponse,
+    summary="List Conversations",
+    description="Get a list of all conversations for the current user.",
+    responses={
+        200: {
+            "description": "List of conversations",
+            "model": ConversationListResponse
+        },
+        500: {
+            "description": "Internal server error",
+            "model": ErrorResponse
+        }
+    }
+)
+async def list_conversations(
+    limit: int = 50,
+    offset: int = 0,
+    mongo_client: MongoClient = Depends(get_mongo_client)
+) -> ConversationListResponse:
+    """
+    List all conversations.
+    
+    Returns a paginated list of conversations with summary information.
+    Conversations are sorted by updated_at (newest first).
+    
+    Args:
+        limit: Maximum number of conversations to return (default: 50)
+        offset: Number of conversations to skip (default: 0)
+        mongo_client: MongoDB client dependency
+        
+    Returns:
+        ConversationListResponse with list of conversations
+    """
+    try:
+        db = mongo_client._client["arken_process_db"]
+        collection = db["conversations"]
+        
+        # Get total count
+        total = await collection.count_documents({})
+        
+        # Get conversations sorted by updated_at
+        cursor = collection.find({}).sort("updated_at", -1).skip(offset).limit(limit)
+        
+        conversations = []
+        async for doc in cursor:
+            # Extract first user message as title
+            messages = doc.get("messages", [])
+            title = None
+            for msg in messages:
+                if msg.get("role") == "user":
+                    title = msg.get("content", "")[:100]  # First 100 chars
+                    break
+            
+            # Check if has simulations
+            run_ids = doc.get("run_ids", [])
+            
+            conversations.append(ConversationListItem(
+                conversation_id=doc.get("conversation_id", str(doc.get("_id"))),
+                title=title,
+                message_count=len(messages),
+                has_simulations=len(run_ids) > 0,
+                created_at=datetime.fromisoformat(doc.get("created_at")) if doc.get("created_at") else datetime.now(),
+                updated_at=datetime.fromisoformat(doc.get("updated_at")) if doc.get("updated_at") else datetime.now()
+            ))
+        
+        return ConversationListResponse(
+            conversations=conversations,
+            total=total
+        )
+        
+    except Exception as e:
+        logger.error(f"Error listing conversations: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to list conversations: {str(e)}"
         )
 

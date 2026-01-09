@@ -259,13 +259,29 @@ class OrchestrationService:
                             metadata={"iterations": iteration + 1, "tool_calls": len(all_tool_results)}
                         )
                     
+                    # Get updated context with run_ids
+                    final_context = await self.context_manager.get_context(conversation_id)
+                    
+                    # Format tool executions for response
+                    tool_executions = [
+                        {
+                            "tool_name": tc.get("name", "unknown"),
+                            "status": "success" if tc.get("result", {}).get("status") != "error" else "error",
+                            "duration_ms": tc.get("duration_ms"),
+                            "summary": tc.get("result", {}).get("summary", str(tc.get("result", {}))[:100])
+                        }
+                        for tc in all_tool_results
+                    ]
+                    
                     return {
                         "status": "success",
                         "message": message_text,
                         "tool_calls": all_tool_results,
+                        "tool_executions": tool_executions,
+                        "run_ids": final_context.get("run_ids", []),
                         "iterations": iteration + 1,
                         "conversation_id": conversation_id,
-                        "context": await self.context_manager.get_context(conversation_id),
+                        "context": final_context,
                         "token_usage": {
                             "input_tokens": total_input_tokens,
                             "output_tokens": total_output_tokens,
@@ -421,15 +437,31 @@ class OrchestrationService:
             if self.event_emitter:
                 await self.event_emitter.emit_thinking_end(conversation_id, 0)
             
+            # Get context for run_ids
+            final_context = await self.context_manager.get_context(conversation_id)
+            
+            # Format tool executions for response
+            tool_executions = [
+                {
+                    "tool_name": tc.get("name", "unknown"),
+                    "status": "success" if tc.get("result", {}).get("status") != "error" else "error",
+                    "duration_ms": tc.get("duration_ms"),
+                    "summary": tc.get("result", {}).get("summary", str(tc.get("result", {}))[:100])
+                }
+                for tc in all_tool_results
+            ]
+            
             # Return partial results
             return {
                 "status": "error",
                 "message": "I apologize, but I couldn't complete your request within the allowed iterations. Here's what I was able to do:\n\n" + 
                           self._format_results_for_user(all_tool_results),
                 "tool_calls": all_tool_results,
+                "tool_executions": tool_executions,
+                "run_ids": final_context.get("run_ids", []),
                 "iterations": MAX_ITERATIONS,
                 "conversation_id": conversation_id,
-                "context": await self.context_manager.get_context(conversation_id),
+                "context": final_context,
                 "token_usage": {
                     "input_tokens": total_input_tokens,
                     "output_tokens": total_output_tokens,
@@ -453,6 +485,8 @@ class OrchestrationService:
                 "status": "error",
                 "message": f"Error processing your request: {str(e)}",
                 "conversation_id": conversation_id,
+                "tool_executions": [],
+                "run_ids": [],
                 "token_usage": {
                     "input_tokens": total_input_tokens,
                     "output_tokens": total_output_tokens,
