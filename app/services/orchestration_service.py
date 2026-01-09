@@ -495,12 +495,15 @@ class OrchestrationService:
             system_parts.append("Current context: " + ", ".join(context_info))
         
         # Add last run reference for follow-up questions
-        if context.get("last_run_id"):
-            run_id = context["last_run_id"]
-            system_parts.append(f"\nLast simulation run_id: {run_id} - use get_run tool if user asks about previous results.")
-            print(f"Including last_run_id in prompt: {run_id}")
+        run_ids = context.get("run_ids", [])
+        if run_ids:
+            latest_run_id = run_ids[0]  # Newest is always first
+            system_parts.append(f"\nLast simulation run_id: {latest_run_id} - use get_run tool if user asks about previous results.")
+            if len(run_ids) > 1:
+                system_parts.append(f"Previous run_ids available: {run_ids[1:]} - use compare_runs to compare simulations.")
+            print(f"Including run_ids in prompt: latest={latest_run_id}, total={len(run_ids)}")
         else:
-            print(f"No last_run_id in context for follow-up")
+            print(f"No run_ids in context for follow-up")
         
         system = "\n".join(system_parts)
         
@@ -744,16 +747,22 @@ class OrchestrationService:
             
             print(f"[_update_context] Simulation detected! run_id={run_id}, status={result.get('status')}")
             
-            # Store only the run_id - LLM will call get_run tool if needed
+            # Get current run_ids array and prepend new run_id (newest first)
+            current_run_ids = context.get("run_ids", [])
+            updated_run_ids = [run_id] + current_run_ids
+            # Keep only last 10 run IDs
+            updated_run_ids = updated_run_ids[:10]
+            
+            # Store run_ids array - LLM will call get_run tool if needed
             await self.context_manager.update_context(
                 conversation_id,
                 {
                     "simulation_params": params,
-                    "last_run_id": run_id
+                    "run_ids": updated_run_ids
                 }
             )
             
-            print(f"[_update_context] Context updated with last_run_id={run_id}")
+            print(f"[_update_context] Context updated with run_ids (latest={run_id}, total={len(updated_run_ids)})")
         
         # Update validation params if this was a validation
         if tool_name.startswith("validate_"):
@@ -792,8 +801,8 @@ class OrchestrationService:
         # Determine which tool categories to include
         include_categories = set(CORE_TOOLS)  # Always include simulation + validation
         
-        # Include run tools if we have a previous run
-        if context.get("last_run_id"):
+        # Include run tools if we have previous runs
+        if context.get("run_ids"):
             include_categories |= RUN_TOOLS
         
         # Include discovery tools if no process context established
@@ -806,7 +815,7 @@ class OrchestrationService:
             if self._get_tool_name(tool) in include_categories
         ]
         
-        print(f"Tool filtering: {len(all_tools)} → {len(filtered_tools)} tools (context: process={context.get('current_process')}, run_id={bool(context.get('last_run_id'))})")
+        print(f"Tool filtering: {len(all_tools)} → {len(filtered_tools)} tools (context: process={context.get('current_process')}, run_ids={len(context.get('run_ids', []))})")
         
         return filtered_tools
     

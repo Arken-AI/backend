@@ -79,7 +79,7 @@ class ContextManager:
             "simulation_params": {},
             "executed_tools": [],
             "messages": [],  # Conversation history for multi-turn
-            "last_run_id": None,
+            "run_ids": [],  # Array of run IDs, newest first (max 10)
             "last_simulation_summary": None,  # Condensed simulation results for follow-up questions
             "created_at": now,
             "updated_at": now
@@ -151,8 +151,10 @@ class ContextManager:
             summary = updates.get("last_simulation_summary")
             if summary:
                 print(f"[update_context] Simulation summary run_id: {summary.get('run_id')}")
-        if "last_run_id" in updates:
-            print(f"[update_context] Setting last_run_id: {updates.get('last_run_id')}")
+        if "run_ids" in updates:
+            run_ids = updates.get('run_ids', [])
+            latest = run_ids[0] if run_ids else None
+            print(f"[update_context] Updating run_ids: latest={latest}, total={len(run_ids)}")
         
         # Get existing context
         context = await self.get_context(conversation_id)

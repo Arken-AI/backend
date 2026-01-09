@@ -201,7 +201,7 @@ async def get_conversation_context(
         response = ConversationContextResponse(
             conversation_id=conversation_id,
             messages=messages,
-            last_run_id=context.get("last_run_id"),
+            run_ids=context.get("run_ids", []),  # Array of run IDs, newest first
             executed_tools=context.get("executed_tools", []),
             current_industry=context.get("current_industry"),
             current_process=context.get("current_process"),
