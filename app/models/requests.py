@@ -167,6 +167,16 @@ class MessageHistoryItem(BaseModel):
     )
 
 
+class ExecutedToolRecord(BaseModel):
+    """Record of an executed tool in conversation context"""
+    
+    tool_name: str = Field(..., description="Name of the tool executed")
+    status: Optional[str] = Field(default=None, description="Execution status")
+    duration_ms: Optional[int] = Field(default=None, description="Execution time in milliseconds")
+    summary: Optional[str] = Field(default=None, description="Brief result summary")
+    run_id: Optional[str] = Field(default=None, description="Associated run ID if applicable")
+
+
 class ConversationContextResponse(BaseModel):
     """Response model for conversation context/state"""
     
@@ -182,9 +192,9 @@ class ConversationContextResponse(BaseModel):
         default_factory=list,
         description="Array of simulation run IDs (newest first, max 10)"
     )
-    executed_tools: List[str] = Field(
+    executed_tools: List[ExecutedToolRecord] = Field(
         default_factory=list,
-        description="List of tool names that have been executed in this conversation"
+        description="List of tools that have been executed in this conversation"
     )
     current_industry: Optional[str] = Field(
         default=None,

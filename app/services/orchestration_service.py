@@ -781,8 +781,9 @@ class OrchestrationService:
             
             print(f"[_update_context] Simulation detected! run_id={run_id}, status={result.get('status')}")
             
-            # Get current run_ids array and prepend new run_id (newest first)
-            current_run_ids = context.get("run_ids", [])
+            # Get current context to retrieve existing run_ids
+            context = await self.context_manager.get_context(conversation_id)
+            current_run_ids = context.get("run_ids", []) if context else []
             updated_run_ids = [run_id] + current_run_ids
             # Keep only last 10 run IDs
             updated_run_ids = updated_run_ids[:10]
