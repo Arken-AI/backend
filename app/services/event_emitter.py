@@ -419,6 +419,24 @@ class EventEmitter:
             print(f"ERROR: " + str(f"Failed to get events for {request_id}: {e}")); import traceback; traceback.print_exc()
             return []
     
+    async def get_current_sequence(self, request_id: str) -> int:
+        """
+        Get the current sequence number for a request (without incrementing).
+        
+        Args:
+            request_id: Request identifier
+            
+        Returns:
+            Current sequence number (0 if no events emitted yet)
+        """
+        try:
+            seq_key = self._sequence_key(request_id)
+            sequence = await self.redis.get(seq_key)
+            return int(sequence) if sequence else 0
+        except Exception as e:
+            print(f"ERROR: Failed to get current sequence for {request_id}: {e}")
+            return 0
+    
     async def get_event_count(self, request_id: str) -> int:
         """
         Get total number of events for a request.

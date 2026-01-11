@@ -89,6 +89,9 @@ async def event_stream_generator(
         
         logger.info(f"Starting SSE stream for {request_id} (after_sequence={after_sequence})")
         
+        # Send initial keepalive to keep connection open
+        yield ":keepalive\n\n"
+        
         while not stream_complete:
             current_time = asyncio.get_event_loop().time()
             

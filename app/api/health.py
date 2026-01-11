@@ -204,8 +204,6 @@ async def health_check(
     Returns:
         HealthResponse with overall status and individual service statuses
     """
-    print("Performing health check on all services")
-    
     # Check all services in parallel
     service_checks = {
         "redis": await check_redis_health(redis_client),
@@ -227,15 +225,12 @@ async def health_check(
     if unhealthy_services:
         overall_status = "unhealthy"
         http_status = status.HTTP_503_SERVICE_UNAVAILABLE
-        print(f"WARNING: " + str(f"Health check failed: {', '.join(unhealthy_services)} unhealthy"))
     elif unknown_services:
         overall_status = "degraded"
         http_status = status.HTTP_200_OK
-        print(f"Health check degraded: {', '.join(unknown_services)} status unknown")
     else:
         overall_status = "healthy"
         http_status = status.HTTP_200_OK
-        print("Health check passed: all services healthy")
     
     response = HealthResponse(
         status=overall_status,

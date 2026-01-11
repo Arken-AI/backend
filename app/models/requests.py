@@ -212,6 +212,10 @@ class ConversationContextResponse(BaseModel):
         ...,
         description="When the conversation was last updated"
     )
+    last_event_sequence: int = Field(
+        default=0,
+        description="Last event sequence number (for SSE reconnection)"
+    )
     
     model_config = {
         "json_schema_extra": {

@@ -108,10 +108,9 @@ class BaseEvent(BaseModel):
         data_json = json.dumps(data_dict)
         lines.append(f"data: {data_json}")
         
-        # Empty line to end event
-        lines.append("")
-        
-        return "\n".join(lines)
+        # SSE requires two newlines (\n\n) at the end to signal event completion
+        # Join with \n and add trailing \n to get the required \n\n
+        return "\n".join(lines) + "\n\n"
     
     def to_redis_dict(self) -> Dict[str, str]:
         """

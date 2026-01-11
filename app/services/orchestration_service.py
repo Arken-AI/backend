@@ -644,10 +644,10 @@ class OrchestrationService:
                 for tr in tool_results:
                     result = tr.get("result", {})
                     if isinstance(result, dict):
-                        # Extract run IDs (first 8 chars for brevity)
+                        # Extract run IDs (keep FULL ID for tool use)
                         run_id = result.get("calc_run_id") or result.get("run_id")
                         if run_id:
-                            run_ids.append(str(run_id)[:8])
+                            run_ids.append(str(run_id))  # Keep full ID
                         
                         # Extract process/equipment info
                         if result.get("process_id"):
@@ -687,9 +687,8 @@ class OrchestrationService:
             parts.append(f"Equipment: {', '.join(sorted(equipment))}")
         
         if run_ids:
-            # Keep only last 3 run IDs
-            recent_runs = run_ids[-3:]
-            parts.append(f"Runs: {', '.join(recent_runs)}")
+            # Keep all run IDs (LLM needs them for compare_runs tool)
+            parts.append(f"Available run_ids: {', '.join(run_ids)}")
         
         if success_count or error_count:
             parts.append(f"Results: {success_count} success, {error_count} errors")

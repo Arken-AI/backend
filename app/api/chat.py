@@ -7,12 +7,13 @@ REST API endpoints for chat interface:
 - DELETE /chat/{conversation_id} - Delete conversation
 """
 
+import asyncio
 import logging
 import uuid
 from datetime import datetime
 from typing import Dict, Any
 
-from fastapi import APIRouter, HTTPException, Depends, status
+from fastapi import APIRouter, HTTPException, Depends, status, BackgroundTasks
 from fastapi.responses import JSONResponse
 
 from app.models.requests import (
@@ -27,13 +28,49 @@ from app.models.requests import (
 )
 from app.services.orchestration_service import OrchestrationService
 from app.services.context_manager import ContextManager
-from app.dependencies import get_orchestration_service, get_redis_client, get_mongo_client
+from app.dependencies import get_orchestration_service, get_redis_client, get_mongo_client, get_event_emitter
 from app.core.mongo_client import MongoClient
+from app.services.event_emitter import EventEmitter
 import redis.asyncio as redis
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+
+async def process_message_background(
+    orchestration: OrchestrationService,
+    event_emitter: EventEmitter,
+    conversation_id: str,
+    message: str,
+    user_id: str
+):
+    """
+    Background task to process message asynchronously.
+    
+    This runs after the POST /chat endpoint returns, allowing
+    the frontend to connect to SSE immediately.
+    
+    Any errors are emitted as app_error events.
+    """
+    try:
+        logger.info(f"Background task started for {conversation_id}")
+        await orchestration.process_message(
+            conversation_id=conversation_id,
+            user_message=message,
+            user_id=user_id
+        )
+        logger.info(f"Background task completed for {conversation_id}")
+    except Exception as e:
+        logger.error(f"Background task error for {conversation_id}: {e}", exc_info=True)
+        # Emit error event so frontend knows something went wrong
+        if event_emitter:
+            await event_emitter.emit_app_error(
+                conversation_id,
+                error_type="processing_error",
+                error_message=str(e),
+                recoverable=False
+            )
 
 
 @router.post(
@@ -58,10 +95,14 @@ router = APIRouter()
 )
 async def send_message(
     request: ChatRequest,
-    orchestration: OrchestrationService = Depends(get_orchestration_service)
+    orchestration: OrchestrationService = Depends(get_orchestration_service),
+    event_emitter: EventEmitter = Depends(get_event_emitter)
 ) -> ChatResponse:
     """
-    Send a chat message and get response.
+    Send a chat message and start processing.
+    
+    Returns immediately with conversation_id and request_id.
+    Processing happens in background - listen to SSE stream for events.
     
     For new conversations, leave conversation_id empty.
     For multi-turn conversations, provide the same conversation_id.
@@ -69,9 +110,10 @@ async def send_message(
     Args:
         request: Chat request with message and optional conversation_id
         orchestration: Orchestration service dependency
+        event_emitter: Event emitter for error handling
         
     Returns:
-        ChatResponse with conversation_id and request_id
+        ChatResponse with conversation_id and request_id (status="processing")
     """
     try:
         # Generate conversation_id if new conversation
@@ -80,62 +122,43 @@ async def send_message(
         # Generate unique request_id for this message
         request_id = f"req_{uuid.uuid4().hex[:16]}"
         
+        user_id = request.metadata.get("user_id", "default_user") if request.metadata else "default_user"
+        
         logger.info(
-            f"Processing chat message: conversation_id={conversation_id}, "
+            f"Starting chat processing: conversation_id={conversation_id}, "
             f"request_id={request_id}, message_length={len(request.message)}"
         )
         
-        # Process message through orchestration service
-        # This will:
-        # 1. Load/create context
-        # 2. Call LLM with tools
-        # 3. Execute any tool calls
-        # 4. Emit events via SSE
-        # 5. Return final response
-        result = await orchestration.process_message(
-            conversation_id=conversation_id,
-            user_message=request.message,
-            user_id=request.metadata.get("user_id", "default_user") if request.metadata else "default_user"
+        # Spawn background task - DON'T AWAIT
+        # This allows the endpoint to return immediately
+        asyncio.create_task(
+            process_message_background(
+                orchestration=orchestration,
+                event_emitter=event_emitter,
+                conversation_id=conversation_id,
+                message=request.message,
+                user_id=user_id
+            )
         )
-        
-        # Determine status based on result
-        if result.get("error"):
-            response_status = "error"
-            response_message = result.get("error")
-        else:
-            response_status = "completed"
-            # Get the LLM's response message from the result
-            response_message = result.get("message", "")
-        
-        # Extract token usage if available
-        token_usage = None
-        if result.get("token_usage"):
-            from app.models.requests import TokenUsage
-            token_usage = TokenUsage(**result["token_usage"])
-        
-        # Extract run_ids and tool executions
-        run_ids = result.get("run_ids", [])
-        tool_executions = [
-            ToolExecution(**te) for te in result.get("tool_executions", [])
-        ]
         
         logger.info(
-            f"Message processed: conversation_id={conversation_id}, "
-            f"request_id={request_id}, status={response_status}"
+            f"Background task spawned: conversation_id={conversation_id}, "
+            f"request_id={request_id}"
         )
         
+        # Return immediately - frontend should connect to SSE stream
         return ChatResponse(
             conversation_id=conversation_id,
             request_id=request_id,
-            status=response_status,
-            message=response_message,
-            token_usage=token_usage,
-            run_ids=run_ids,
-            tool_executions=tool_executions
+            status="processing",
+            message=None,  # Response will come via SSE events
+            token_usage=None,
+            run_ids=[],
+            tool_executions=[]
         )
         
     except Exception as e:
-        logger.error(f"Error processing chat message: {e}", exc_info=True)
+        logger.error(f"Error starting chat processing: {e}", exc_info=True)
         
         # Return error response
         error_conversation_id = request.conversation_id or f"conv_{uuid.uuid4().hex[:16]}"
@@ -167,7 +190,8 @@ async def send_message(
 async def get_conversation_context(
     conversation_id: str,
     redis_client: redis.Redis = Depends(get_redis_client),
-    mongo_client: MongoClient = Depends(get_mongo_client)
+    mongo_client: MongoClient = Depends(get_mongo_client),
+    event_emitter: EventEmitter = Depends(get_event_emitter)
 ) -> ConversationContextResponse:
     """
     Get conversation context and state.
@@ -208,6 +232,9 @@ async def get_conversation_context(
                 metadata=msg.get("metadata")
             ))
         
+        # Get last event sequence for SSE reconnection
+        last_sequence = await event_emitter.get_current_sequence(conversation_id)
+        
         # Build response
         response = ConversationContextResponse(
             conversation_id=conversation_id,
@@ -217,7 +244,8 @@ async def get_conversation_context(
             current_industry=context.get("current_industry"),
             current_process=context.get("current_process"),
             created_at=datetime.fromisoformat(context.get("created_at")) if context.get("created_at") else datetime.now(),
-            updated_at=datetime.fromisoformat(context.get("updated_at")) if context.get("updated_at") else datetime.now()
+            updated_at=datetime.fromisoformat(context.get("updated_at")) if context.get("updated_at") else datetime.now(),
+            last_event_sequence=last_sequence
         )
         
         return response
