@@ -61,16 +61,18 @@ async def event_stream_generator(
     event_emitter: EventEmitter,
     after_sequence: int = 0,
     poll_interval: float = 0.1,  # Reduced from 0.5s for real-time streaming
-    keepalive_interval: float = 15.0
+    keepalive_interval: float = 15.0,
+    max_duration: float = 300.0  # Step 5.3: Maximum stream duration (5 minutes)
 ) -> AsyncGenerator[str, None]:
     """
     Generate SSE stream of events for a request.
     
     Flow:
     1. Send all existing events (replay)
-    2. Poll Redis for new events every 500ms
+    2. Poll Redis for new events every 100ms
     3. Send keepalive comment every 15s
     4. Terminate on message_final event
+    5. Auto-terminate after max_duration to prevent zombie streams
     
     Args:
         request_id: Request identifier
@@ -78,6 +80,7 @@ async def event_stream_generator(
         after_sequence: Only send events after this sequence (for replay)
         poll_interval: How often to check for new events (seconds)
         keepalive_interval: How often to send keepalive (seconds)
+        max_duration: Maximum stream duration before auto-termination (seconds)
         
     Yields:
         SSE formatted strings: "data: {...}\n\n" or ":keepalive\n\n"
@@ -85,6 +88,7 @@ async def event_stream_generator(
     try:
         last_sequence = after_sequence
         last_keepalive = asyncio.get_event_loop().time()
+        stream_start = asyncio.get_event_loop().time()
         stream_complete = False
         
         logger.info(f"Starting SSE stream for {request_id} (after_sequence={after_sequence})")
@@ -94,6 +98,12 @@ async def event_stream_generator(
         
         while not stream_complete:
             current_time = asyncio.get_event_loop().time()
+            
+            # Step 5.3: Check for stream timeout to prevent zombie connections
+            if current_time - stream_start > max_duration:
+                logger.warning(f"SSE stream timeout for {request_id} after {max_duration}s")
+                yield f'data: {{"event_type": "stream_timeout", "message": "Stream timeout - please refresh to see results"}}\n\n'
+                break
             
             # Fetch new events from Redis
             try:

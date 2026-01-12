@@ -422,7 +422,7 @@ class OrchestrationService:
                         )
                     
                     tool_start_time = datetime.now()
-                    result = await self._execute_tool(tool_name, tool_params)
+                    result = await self._execute_tool(tool_name, tool_params, conversation_id)
                     tool_duration_ms = int((datetime.now() - tool_start_time).total_seconds() * 1000)
                     
                     # DEBUG: Log the result keys and calc_run_id for simulation tools
@@ -728,6 +728,25 @@ class OrchestrationService:
             print(f"ERROR: Claude streaming error: {e}")
             import traceback
             traceback.print_exc()
+            
+            # Step 5.3: Emit error event so frontend can handle gracefully
+            if self.event_emitter and conversation_id:
+                await self.event_emitter.emit_app_error(
+                    conversation_id,
+                    "llm_streaming_error",
+                    f"Error during LLM streaming: {str(e)}",
+                    details={"exception": str(e), "accumulated_text": accumulated_text[:200] if accumulated_text else ""},
+                    recoverable=True
+                )
+            
+            # If we have partial text, return it so user sees something
+            if accumulated_text:
+                return StreamingLLMResponse(
+                    text=accumulated_text + "\n\n_[Response was interrupted due to an error]_",
+                    tool_calls=tool_calls,
+                    usage=usage
+                )
+            
             raise
     
     # =========================================================================
@@ -1038,9 +1057,10 @@ class OrchestrationService:
     async def _execute_tool(
         self,
         tool_name: str,
-        params: Dict[str, Any]
+        params: Dict[str, Any],
+        conversation_id: Optional[str] = None
     ) -> Dict[str, Any]:
-        """Execute tool via MCP client."""
+        """Execute tool via MCP client with progress tracking for simulations."""
         print(f"Executing tool: {tool_name}")
         
         try:
@@ -1052,7 +1072,27 @@ class OrchestrationService:
                     "message": f"Cannot execute {tool_name}: MCP server connection lost"
                 }
             
+            # For simulation tools, emit progress events to show user activity
+            is_simulation = tool_name in ["simulate_process", "simulate_equipment"]
+            if is_simulation and self.event_emitter and conversation_id:
+                # Emit initial progress - starting simulation
+                await self.event_emitter.emit_run_progress(
+                    conversation_id,
+                    stage="Initializing",
+                    percentage=5,
+                    message=f"Starting {tool_name.replace('_', ' ')}..."
+                )
+            
             result = await self.mcp_client.call_tool(tool_name, params)
+            
+            # Emit completion progress for simulations
+            if is_simulation and self.event_emitter and conversation_id:
+                await self.event_emitter.emit_run_progress(
+                    conversation_id,
+                    stage="Complete",
+                    percentage=100,
+                    message="Simulation finished"
+                )
             
             # MCP client returns text content directly, wrap it in dict format
             if isinstance(result, str):
