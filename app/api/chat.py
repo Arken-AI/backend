@@ -235,9 +235,33 @@ async def get_conversation_context(
         # Get last event sequence for SSE reconnection
         last_sequence = await event_emitter.get_current_sequence(conversation_id)
         
+        # Determine conversation status
+        # Check if there are pending events (thinking_start without message_final)
+        conversation_status = "idle"
+        if last_sequence > 0:
+            # Get the last few events to check if processing is complete
+            recent_events = await event_emitter.get_events(conversation_id, after_sequence=max(0, last_sequence - 5))
+            
+            has_thinking_start = False
+            has_message_final = False
+            
+            for event in recent_events:
+                if event.event_type.value == "thinking_start":
+                    has_thinking_start = True
+                elif event.event_type.value == "message_final":
+                    # Only count non-intermediate message_final as completion
+                    if not (hasattr(event, 'metadata') and event.metadata and event.metadata.get('is_intermediate')):
+                        has_message_final = True
+            
+            if has_thinking_start and not has_message_final:
+                conversation_status = "processing"
+            elif has_message_final:
+                conversation_status = "completed"
+        
         # Build response
         response = ConversationContextResponse(
             conversation_id=conversation_id,
+            status=conversation_status,
             messages=messages,
             run_ids=context.get("run_ids", []),  # Array of run IDs, newest first
             executed_tools=context.get("executed_tools", []),

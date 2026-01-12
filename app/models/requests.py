@@ -184,6 +184,10 @@ class ConversationContextResponse(BaseModel):
         ...,
         description="The conversation identifier"
     )
+    status: str = Field(
+        default="idle",
+        description="Conversation status: idle, processing, completed, error"
+    )
     messages: List[MessageHistoryItem] = Field(
         default_factory=list,
         description="Full message history"
