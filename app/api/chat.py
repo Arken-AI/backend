@@ -246,9 +246,12 @@ async def get_conversation_context(
             has_message_final = False
             
             for event in recent_events:
-                if event.event_type.value == "thinking_start":
+                # Handle event_type as either string or enum
+                event_type = event.event_type.value if hasattr(event.event_type, 'value') else str(event.event_type)
+                
+                if event_type == "thinking_start":
                     has_thinking_start = True
-                elif event.event_type.value == "message_final":
+                elif event_type == "message_final":
                     # Only count non-intermediate message_final as completion
                     if not (hasattr(event, 'metadata') and event.metadata and event.metadata.get('is_intermediate')):
                         has_message_final = True

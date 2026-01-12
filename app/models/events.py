@@ -48,10 +48,13 @@ class ErrorType(str, Enum):
     POLICY_VIOLATION = "policy_violation"
     TOOL_ERROR = "tool_error"
     LLM_ERROR = "llm_error"
+    LLM_STREAMING_ERROR = "llm_streaming_error"
     VALIDATION_ERROR = "validation_error"
     TIMEOUT_ERROR = "timeout_error"
     SYSTEM_ERROR = "system_error"
     INTERNAL_ERROR = "internal_error"
+    MCP_SERVER_UNAVAILABLE = "mcp_server_unavailable"
+    PROCESSING_ERROR = "processing_error"
 
 
 class BaseEvent(BaseModel):

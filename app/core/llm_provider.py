@@ -163,9 +163,10 @@ def convert_messages_to_anthropic(messages: List[Dict[str, Any]]) -> List[Dict[s
     import uuid
     
     converted = []
-    # Track tool call IDs for matching results
-    tool_id_map = {}  # tool_name -> list of tool_ids
-    current_tool_ids = {}  # tool_name -> current_tool_id for matching
+    # Track pending tool call IDs that need results
+    # Each assistant message with tool_calls creates entries here
+    # The next tool message consumes them in order
+    pending_tool_ids = []  # List of (tool_name, tool_id) tuples
     
     for msg in messages:
         role = msg.get("role")
@@ -195,7 +196,7 @@ def convert_messages_to_anthropic(messages: List[Dict[str, Any]]) -> List[Dict[s
                     })
                 
                 for tc in tool_calls:
-                    # Generate a unique ID for this tool call
+                    # Use the ID from the tool call if available, otherwise generate new one
                     tool_id = tc.get("id") or f"toolu_{uuid.uuid4().hex[:24]}"
                     tool_name = tc.get("name", "unknown")
                     tool_input = tc.get("input", tc.get("arguments", {}))
@@ -207,8 +208,8 @@ def convert_messages_to_anthropic(messages: List[Dict[str, Any]]) -> List[Dict[s
                         "input": tool_input
                     })
                     
-                    # Track the ID for matching with results
-                    current_tool_ids[tool_name] = tool_id
+                    # Queue this tool ID to be matched with its result
+                    pending_tool_ids.append((tool_name, tool_id))
                 
                 converted.append({
                     "role": "assistant",
@@ -232,8 +233,17 @@ def convert_messages_to_anthropic(messages: List[Dict[str, Any]]) -> List[Dict[s
                 tool_name = tr.get("name", "unknown")
                 result = tr.get("result", {})
                 
-                # Get the matching tool ID
-                tool_id = current_tool_ids.get(tool_name, f"toolu_{uuid.uuid4().hex[:24]}")
+                # Find the matching tool ID from pending queue
+                tool_id = None
+                for i, (pending_name, pending_id) in enumerate(pending_tool_ids):
+                    if pending_name == tool_name:
+                        tool_id = pending_id
+                        pending_tool_ids.pop(i)  # Remove from queue
+                        break
+                
+                # If no matching ID found, generate a new one (shouldn't happen normally)
+                if not tool_id:
+                    tool_id = f"toolu_{uuid.uuid4().hex[:24]}"
                 
                 # Convert result to string if it's a dict
                 if isinstance(result, dict):
@@ -474,10 +484,13 @@ class ClaudeProvider:
             anthropic_tools = convert_mcp_tools_to_anthropic(tools)
             print(f"Converted {len(tools)} MCP tools for streaming")
         
+        # Convert messages to Anthropic format (handles tool calls and results)
+        anthropic_messages = convert_messages_to_anthropic(messages)
+        
         # Build request parameters
         params: Dict[str, Any] = {
             "model": kwargs.get("model", self.model),
-            "messages": messages,
+            "messages": anthropic_messages,
             "max_tokens": kwargs.get("max_tokens", self.max_tokens),
             "temperature": kwargs.get("temperature", self.temperature),
         }
