@@ -60,7 +60,7 @@ async def event_stream_generator(
     request_id: str,
     event_emitter: EventEmitter,
     after_sequence: int = 0,
-    poll_interval: float = 0.5,
+    poll_interval: float = 0.1,  # Reduced from 0.5s for real-time streaming
     keepalive_interval: float = 15.0
 ) -> AsyncGenerator[str, None]:
     """

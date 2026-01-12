@@ -185,6 +185,15 @@ def convert_messages_to_anthropic(messages: List[Dict[str, Any]]) -> List[Dict[s
                 content_blocks = []
                 tool_calls = msg["tool_calls"]
                 
+                # Step 1.3: Include any text content BEFORE tool calls
+                # Claude can send text like "I'll validate your inputs..." along with tool calls
+                text_content = msg.get("content", "")
+                if text_content and isinstance(text_content, str) and text_content.strip():
+                    content_blocks.append({
+                        "type": "text",
+                        "text": text_content
+                    })
+                
                 for tc in tool_calls:
                     # Generate a unique ID for this tool call
                     tool_id = tc.get("id") or f"toolu_{uuid.uuid4().hex[:24]}"

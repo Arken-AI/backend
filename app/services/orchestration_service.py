@@ -48,6 +48,42 @@ from app.core.llm_provider import ClaudeProvider
 from app.core.mcp_client import MCPClient, MCPServerConfig
 
 
+# =============================================================================
+# Streaming LLM Response
+# =============================================================================
+
+class StreamingLLMResponse:
+    """
+    Response object from streaming LLM call.
+    
+    Provides same interface as ParsedResponse for compatibility
+    with existing agentic loop code.
+    """
+    
+    def __init__(
+        self,
+        text: str,
+        tool_calls: List[Dict[str, Any]],
+        usage: Dict[str, int]
+    ):
+        self.text = text
+        self.tool_calls = tool_calls
+        self._usage = usage
+    
+    @property
+    def has_tool_calls(self) -> bool:
+        """Check if response contains tool calls."""
+        return len(self.tool_calls) > 0
+    
+    @property
+    def usage(self):
+        """Return usage as object with attributes for compatibility."""
+        return type('Usage', (), self._usage)()
+    
+    def __repr__(self) -> str:
+        return f"StreamingLLMResponse(text_len={len(self.text)}, tool_calls={len(self.tool_calls)})"
+
+
 class OrchestrationService:
     """
     Central orchestrator for chat-based process simulation.
@@ -204,12 +240,13 @@ class OrchestrationService:
             for iteration in range(MAX_ITERATIONS):
                 print(f"=== Agentic Loop Iteration {iteration + 1} ===")
                 
-                # Call LLM with conversation history
+                # Call LLM with conversation history (streaming with message_delta events)
                 thinking_start = datetime.now()
                 llm_response = await self._call_llm_with_history(
                     conversation_history, 
                     tools, 
-                    context
+                    context,
+                    conversation_id  # Pass conversation_id for streaming events
                 )
                 thinking_duration_ms = int((datetime.now() - thinking_start).total_seconds() * 1000)
                 
@@ -294,11 +331,28 @@ class OrchestrationService:
                 # =====================================================
                 print(f"LLM requested {len(tool_calls_list)} tool calls")
                 
-                # Add assistant message with tool calls to history
-                conversation_history.append({
-                    "role": "assistant",
-                    "tool_calls": tool_calls_list
-                })
+                # Step 1.3: Emit intermediate message BEFORE executing tools
+                # Claude often sends text like "I'll validate your inputs now..." before tool calls
+                # We need to emit this as a message_final so it appears in the chat!
+                if message_text and message_text.strip() and self.event_emitter:
+                    print(f"Emitting intermediate message before tools: {message_text[:50]}...")
+                    # Emit as message_final so it persists in the chat UI
+                    await self.event_emitter.emit_message_final(
+                        conversation_id,
+                        message_text,
+                        role="assistant",
+                        metadata={
+                            "is_intermediate": True,  # Flag to indicate more coming
+                            "iteration": iteration + 1,
+                            "has_tool_calls": True
+                        }
+                    )
+                
+                # Add assistant message with BOTH text and tool calls to history
+                assistant_msg = {"role": "assistant", "tool_calls": tool_calls_list}
+                if message_text and message_text.strip():
+                    assistant_msg["content"] = message_text  # Preserve intermediate text
+                conversation_history.append(assistant_msg)
                 
                 # Execute tools and collect results
                 iteration_tool_results = []
@@ -502,10 +556,11 @@ class OrchestrationService:
         self,
         conversation_history: List[Dict[str, Any]],
         tools: List[Any],
-        context: Dict[str, Any]
+        context: Dict[str, Any],
+        conversation_id: Optional[str] = None
     ) -> Any:
         """
-        Call LLM with full conversation history including tool results.
+        Call LLM with full conversation history using STREAMING.
         
         This enables the agentic loop by preserving:
         - User message
@@ -513,6 +568,7 @@ class OrchestrationService:
         - Tool results (success and errors)
         
         The LLM sees the full history and decides what to do next.
+        Now uses streaming to emit message_delta events in real-time.
         """
         # Build system prompt - Claude is naturally agentic, minimal prompting needed
         system_parts = [
@@ -546,13 +602,133 @@ class OrchestrationService:
         
         print(f"Calling LLM with {len(optimized_history)} messages (original: {len(conversation_history)})")
         
-        response = await self.llm.create_message(
-            messages=optimized_history,
-            tools=tools,
-            system=system
+        # Use streaming to emit real-time message deltas
+        return await self._call_llm_streaming(
+            optimized_history,
+            tools,
+            system,
+            conversation_id
         )
+    
+    async def _call_llm_streaming(
+        self,
+        messages: List[Dict[str, Any]],
+        tools: List[Any],
+        system: str,
+        conversation_id: Optional[str] = None
+    ) -> "StreamingLLMResponse":
+        """
+        Call LLM with streaming and emit message_delta events.
         
-        return response
+        Processes the Claude stream and:
+        1. Emits message_delta for each text chunk (typing effect)
+        2. Accumulates text and tool calls
+        3. Returns a response object compatible with non-streaming interface
+        
+        Args:
+            messages: Prepared conversation history
+            tools: Available tools
+            system: System prompt
+            conversation_id: For emitting events (optional)
+            
+        Returns:
+            StreamingLLMResponse with accumulated text, tool_calls, usage
+        """
+        accumulated_text = ""
+        accumulated_length = 0
+        tool_calls = []
+        current_tool_call = None
+        current_tool_input_json = ""
+        usage = {"input_tokens": 0, "output_tokens": 0}
+        
+        print(f"Starting streaming message to Claude")
+        
+        try:
+            async for event in self.llm.create_message_stream(
+                messages=messages,
+                tools=tools,
+                system=system
+            ):
+                # Handle different event types from Claude stream
+                if event.type == "message_start":
+                    # Message metadata (usage will be updated at end)
+                    if hasattr(event, 'message') and hasattr(event.message, 'usage'):
+                        usage["input_tokens"] = event.message.usage.input_tokens
+                
+                elif event.type == "content_block_start":
+                    # New content block starting
+                    if hasattr(event, 'content_block'):
+                        if event.content_block.type == "text":
+                            # Text block starting - nothing to do yet
+                            pass
+                        elif event.content_block.type == "tool_use":
+                            # Tool call starting
+                            current_tool_call = {
+                                "id": event.content_block.id,
+                                "name": event.content_block.name,
+                                "input": {}
+                            }
+                            current_tool_input_json = ""
+                            print(f"  Tool call starting: {event.content_block.name}")
+                
+                elif event.type == "content_block_delta":
+                    if hasattr(event, 'delta'):
+                        if event.delta.type == "text_delta":
+                            # TEXT CHUNK - emit message_delta for typing effect
+                            chunk = event.delta.text
+                            accumulated_text += chunk
+                            accumulated_length += len(chunk)
+                            
+                            # Emit message_delta event for real-time streaming
+                            if self.event_emitter and conversation_id:
+                                await self.event_emitter.emit_message_delta(
+                                    conversation_id,
+                                    delta=chunk,
+                                    accumulated_length=accumulated_length
+                                )
+                        
+                        elif event.delta.type == "input_json_delta":
+                            # Tool input being streamed (JSON chunks)
+                            if current_tool_call:
+                                current_tool_input_json += event.delta.partial_json
+                
+                elif event.type == "content_block_stop":
+                    # Content block finished
+                    if current_tool_call:
+                        # Parse accumulated tool input JSON
+                        try:
+                            if current_tool_input_json:
+                                current_tool_call["input"] = json.loads(current_tool_input_json)
+                        except json.JSONDecodeError:
+                            print(f"WARNING: Failed to parse tool input JSON: {current_tool_input_json[:100]}")
+                            current_tool_call["input"] = {}
+                        
+                        tool_calls.append(current_tool_call)
+                        print(f"  Tool call complete: {current_tool_call['name']}")
+                        current_tool_call = None
+                        current_tool_input_json = ""
+                
+                elif event.type == "message_delta":
+                    # Final message metadata (stop_reason, usage)
+                    if hasattr(event, 'usage'):
+                        usage["output_tokens"] = event.usage.output_tokens
+                
+                elif event.type == "message_stop":
+                    # Stream complete
+                    print(f"Stream complete: {usage['input_tokens']} in, {usage['output_tokens']} out")
+            
+            # Return response object compatible with existing code
+            return StreamingLLMResponse(
+                text=accumulated_text,
+                tool_calls=tool_calls,
+                usage=usage
+            )
+            
+        except Exception as e:
+            print(f"ERROR: Claude streaming error: {e}")
+            import traceback
+            traceback.print_exc()
+            raise
     
     # =========================================================================
     # Context Optimization (Sliding Window + Summarization)
