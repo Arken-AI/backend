@@ -135,7 +135,9 @@ class EventEmitter:
             if sequence == 1:
                 await self.redis.expire(stream_key, self.ttl_seconds)
             
-            print(f"Emitted {event.event_type} (seq={sequence}) for {request_id}")
+            # Suppress verbose logging for high-frequency events
+            if event.event_type not in ("message_delta", "MessageDeltaEvent"):
+                print(f"Emitted {event.event_type} (seq={sequence}) for {request_id}")
             return sequence
             
         except Exception as e:

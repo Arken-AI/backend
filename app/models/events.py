@@ -49,6 +49,7 @@ class ErrorType(str, Enum):
     TOOL_ERROR = "tool_error"
     LLM_ERROR = "llm_error"
     LLM_STREAMING_ERROR = "llm_streaming_error"
+    RATE_LIMIT_ERROR = "rate_limit_error"
     VALIDATION_ERROR = "validation_error"
     TIMEOUT_ERROR = "timeout_error"
     SYSTEM_ERROR = "system_error"

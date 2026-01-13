@@ -25,6 +25,7 @@ This matches Claude Desktop behavior where LLM can:
 
 import json
 import traceback
+import asyncio
 from typing import Dict, Any, List, Optional
 from datetime import datetime
 
@@ -241,13 +242,38 @@ class OrchestrationService:
                 print(f"=== Agentic Loop Iteration {iteration + 1} ===")
                 
                 # Call LLM with conversation history (streaming with message_delta events)
+                # Retry logic for rate limits
+                max_retries = 2
+                retry_delay = 60  # seconds
+                
                 thinking_start = datetime.now()
-                llm_response = await self._call_llm_with_history(
-                    conversation_history, 
-                    tools, 
-                    context,
-                    conversation_id  # Pass conversation_id for streaming events
-                )
+                llm_response = None
+                
+                for retry in range(max_retries + 1):
+                    try:
+                        llm_response = await self._call_llm_with_history(
+                            conversation_history, 
+                            tools, 
+                            context,
+                            conversation_id  # Pass conversation_id for streaming events
+                        )
+                        break  # Success - exit retry loop
+                        
+                    except Exception as e:
+                        error_message = str(e)
+                        is_rate_limit = "rate_limit_error" in error_message or "429" in error_message
+                        
+                        if is_rate_limit and retry < max_retries:
+                            print(f"Rate limit hit on attempt {retry + 1}/{max_retries + 1}, waiting {retry_delay}s...")
+                            await asyncio.sleep(retry_delay)
+                            continue
+                        
+                        # Not a rate limit or out of retries - re-raise
+                        raise
+                
+                if llm_response is None:
+                    raise Exception("Failed to get LLM response after retries")
+                    
                 thinking_duration_ms = int((datetime.now() - thinking_start).total_seconds() * 1000)
                 
                 # Track tokens - handle both dict and object usage attributes
@@ -488,8 +514,17 @@ class OrchestrationService:
             # =====================================================
             print(f"WARNING: " + f"Max iterations ({MAX_ITERATIONS}) reached")
             
+            error_message = "I apologize, but I couldn't complete your request within the allowed iterations. Here's what I was able to do:\n\n" + self._format_results_for_user(all_tool_results)
+            
             if self.event_emitter:
                 await self.event_emitter.emit_thinking_end(conversation_id, 0)
+                # Always emit message_final so frontend knows we're done
+                await self.event_emitter.emit_message_final(
+                    conversation_id,
+                    error_message,
+                    role="assistant",
+                    metadata={"max_iterations_reached": True}
+                )
             
             # Get context for run_ids
             final_context = await self.context_manager.get_context(conversation_id)
@@ -508,8 +543,7 @@ class OrchestrationService:
             # Return partial results
             return {
                 "status": "error",
-                "message": "I apologize, but I couldn't complete your request within the allowed iterations. Here's what I was able to do:\n\n" + 
-                          self._format_results_for_user(all_tool_results),
+                "message": error_message,
                 "tool_calls": all_tool_results,
                 "tool_executions": tool_executions,
                 "run_ids": final_context.get("run_ids", []),
@@ -526,13 +560,22 @@ class OrchestrationService:
         except Exception as e:
             print(f"ERROR: " + f"Error processing message: {e}"); import traceback; traceback.print_exc()
             
+            error_msg = f"Error processing your request: {str(e)}"
+            
             if self.event_emitter:
                 await self.event_emitter.emit_app_error(
                     conversation_id,
                     "internal_error",
-                    f"Error processing your request: {str(e)}",
+                    error_msg,
                     details={"exception": str(e)},
                     recoverable=True
+                )
+                # Always emit message_final so frontend knows we're done
+                await self.event_emitter.emit_message_final(
+                    conversation_id,
+                    error_msg,
+                    role="assistant",
+                    metadata={"error": True}
                 )
             
             return {
@@ -725,17 +768,51 @@ class OrchestrationService:
             )
             
         except Exception as e:
+            # Check if it's a rate limit error
+            error_message = str(e)
+            is_rate_limit = "rate_limit_error" in error_message or "429" in error_message
+            
+            if is_rate_limit:
+                print(f"RATE LIMIT: Request exceeded API rate limits")
+                
+                # Emit user-friendly rate limit error
+                if self.event_emitter and conversation_id:
+                    from app.models.events import ErrorType
+                    await self.event_emitter.emit_app_error(
+                        conversation_id,
+                        error_type=ErrorType.RATE_LIMIT_ERROR,
+                        error_message="Rate limit exceeded. Please wait a moment and try again.",
+                        details={
+                            "error": "Too many requests in a short time",
+                            "suggestion": "Please wait 60 seconds before sending another message",
+                            "limit": "30,000 tokens per minute"
+                        }
+                    )
+                
+                # Return partial response if we have text
+                if accumulated_text:
+                    return StreamingLLMResponse(
+                        text=accumulated_text + "\n\n[Rate limit reached - response incomplete]",
+                        tool_calls=tool_calls,
+                        usage=usage
+                    )
+                
+                # Re-raise so caller can handle retry
+                raise
+            
+            # Other errors - log and emit
             print(f"ERROR: Claude streaming error: {e}")
             import traceback
             traceback.print_exc()
             
-            # Step 5.3: Emit error event so frontend can handle gracefully
+            # Emit streaming error event
             if self.event_emitter and conversation_id:
+                from app.models.events import ErrorType
                 await self.event_emitter.emit_app_error(
                     conversation_id,
-                    "llm_streaming_error",
-                    f"Error during LLM streaming: {str(e)}",
-                    details={"exception": str(e), "accumulated_text": accumulated_text[:200] if accumulated_text else ""},
+                    error_type=ErrorType.LLM_STREAMING_ERROR,
+                    error_message=f"Streaming error: {str(e)[:200]}",
+                    details={"error": str(e)},
                     recoverable=True
                 )
             
