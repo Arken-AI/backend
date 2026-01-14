@@ -2,18 +2,20 @@
 Chat API Endpoints
 
 REST API endpoints for chat interface:
-- POST /chat - Send a message
+- POST /chat - Send a message (synchronous - waits for response)
 - GET /chat/{conversation_id}/context - Get conversation state
 - DELETE /chat/{conversation_id} - Delete conversation
+
+Note: SSE streaming is still available for real-time tool progress updates,
+but the final response is returned directly in the HTTP response.
 """
 
-import asyncio
 import logging
 import uuid
 from datetime import datetime
 from typing import Dict, Any
 
-from fastapi import APIRouter, HTTPException, Depends, status, BackgroundTasks
+from fastapi import APIRouter, HTTPException, Depends, status
 from fastapi.responses import JSONResponse
 
 from app.models.requests import (
@@ -24,7 +26,8 @@ from app.models.requests import (
     ConversationListItem,
     MessageHistoryItem,
     ErrorResponse,
-    ToolExecution
+    ToolExecution,
+    TokenUsage
 )
 from app.services.orchestration_service import OrchestrationService
 from app.services.context_manager import ContextManager
@@ -38,49 +41,14 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
-async def process_message_background(
-    orchestration: OrchestrationService,
-    event_emitter: EventEmitter,
-    conversation_id: str,
-    message: str,
-    user_id: str
-):
-    """
-    Background task to process message asynchronously.
-    
-    This runs after the POST /chat endpoint returns, allowing
-    the frontend to connect to SSE immediately.
-    
-    Any errors are emitted as app_error events.
-    """
-    try:
-        logger.info(f"Background task started for {conversation_id}")
-        await orchestration.process_message(
-            conversation_id=conversation_id,
-            user_message=message,
-            user_id=user_id
-        )
-        logger.info(f"Background task completed for {conversation_id}")
-    except Exception as e:
-        logger.error(f"Background task error for {conversation_id}: {e}", exc_info=True)
-        # Emit error event so frontend knows something went wrong
-        if event_emitter:
-            await event_emitter.emit_app_error(
-                conversation_id,
-                error_type="processing_error",
-                error_message=str(e),
-                recoverable=False
-            )
-
-
 @router.post(
     "/chat",
     response_model=ChatResponse,
     summary="Send Chat Message",
-    description="Send a message to the assistant. Returns conversation_id and request_id for tracking.",
+    description="Send a message to the assistant. Waits for processing and returns the complete response.",
     responses={
         200: {
-            "description": "Message accepted and processing",
+            "description": "Message processed successfully",
             "model": ChatResponse
         },
         400: {
@@ -99,10 +67,10 @@ async def send_message(
     event_emitter: EventEmitter = Depends(get_event_emitter)
 ) -> ChatResponse:
     """
-    Send a chat message and start processing.
+    Send a chat message and wait for the complete response.
     
-    Returns immediately with conversation_id and request_id.
-    Processing happens in background - listen to SSE stream for events.
+    This endpoint processes the message synchronously and returns the final response.
+    Tool progress events are still emitted via SSE for real-time UI updates.
     
     For new conversations, leave conversation_id empty.
     For multi-turn conversations, provide the same conversation_id.
@@ -110,10 +78,10 @@ async def send_message(
     Args:
         request: Chat request with message and optional conversation_id
         orchestration: Orchestration service dependency
-        event_emitter: Event emitter for error handling
+        event_emitter: Event emitter for tool progress events
         
     Returns:
-        ChatResponse with conversation_id and request_id (status="processing")
+        ChatResponse with complete assistant response
     """
     try:
         # Generate conversation_id if new conversation
@@ -125,40 +93,54 @@ async def send_message(
         user_id = request.metadata.get("user_id", "default_user") if request.metadata else "default_user"
         
         logger.info(
-            f"Starting chat processing: conversation_id={conversation_id}, "
+            f"Processing chat message: conversation_id={conversation_id}, "
             f"request_id={request_id}, message_length={len(request.message)}"
         )
         
-        # Spawn background task - DON'T AWAIT
-        # This allows the endpoint to return immediately
-        asyncio.create_task(
-            process_message_background(
-                orchestration=orchestration,
-                event_emitter=event_emitter,
-                conversation_id=conversation_id,
-                message=request.message,
-                user_id=user_id
-            )
+        # Process message synchronously - wait for complete response
+        result = await orchestration.process_message(
+            conversation_id=conversation_id,
+            user_message=request.message,
+            user_id=user_id
         )
         
         logger.info(
-            f"Background task spawned: conversation_id={conversation_id}, "
-            f"request_id={request_id}"
+            f"Chat processing completed: conversation_id={conversation_id}, "
+            f"status={result.get('status', 'unknown')}"
         )
         
-        # Return immediately - frontend should connect to SSE stream
+        # Build token usage if available
+        token_usage = None
+        if result.get("token_usage"):
+            token_usage = TokenUsage(
+                input_tokens=result["token_usage"].get("input_tokens", 0),
+                output_tokens=result["token_usage"].get("output_tokens", 0),
+                total_tokens=result["token_usage"].get("total_tokens", 0)
+            )
+        
+        # Build tool executions list
+        tool_executions = []
+        for tool_call in result.get("tool_calls", []):
+            tool_executions.append(ToolExecution(
+                tool_name=tool_call.get("tool_name", "unknown"),
+                status=tool_call.get("status", "success"),
+                duration_ms=tool_call.get("duration_ms"),
+                result_summary=tool_call.get("summary")
+            ))
+        
+        # Return complete response
         return ChatResponse(
             conversation_id=conversation_id,
             request_id=request_id,
-            status="processing",
-            message=None,  # Response will come via SSE events
-            token_usage=None,
-            run_ids=[],
-            tool_executions=[]
+            status="completed" if result.get("status") == "success" else "error",
+            message=result.get("message", ""),
+            token_usage=token_usage,
+            run_ids=result.get("run_ids", []),
+            tool_executions=tool_executions
         )
         
     except Exception as e:
-        logger.error(f"Error starting chat processing: {e}", exc_info=True)
+        logger.error(f"Error processing chat message: {e}", exc_info=True)
         
         # Return error response
         error_conversation_id = request.conversation_id or f"conv_{uuid.uuid4().hex[:16]}"

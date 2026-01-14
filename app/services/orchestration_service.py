@@ -261,7 +261,7 @@ class OrchestrationService:
             # AGENTIC LOOP: Continue until LLM stops calling tools
             # =====================================================
             for iteration in range(MAX_ITERATIONS):
-                # Call LLM with conversation history (streaming with message_delta events)
+                # Call LLM with conversation history (non-streaming, response via HTTP)
                 # Retry logic for rate limits
                 max_retries = 2
                 retry_delay = 60  # seconds
@@ -337,12 +337,7 @@ class OrchestrationService:
                     # Emit thinking end
                     if self.event_emitter:
                         await self.event_emitter.emit_thinking_end(conversation_id, thinking_duration_ms)
-                        await self.event_emitter.emit_message_final(
-                            conversation_id,
-                            message_text,
-                            role="assistant",
-                            metadata={"iterations": iteration + 1, "tool_calls": len(all_tool_results)}
-                        )
+                    # Response returned via HTTP (no emit_message_final needed)
                     
                     # Get updated context with run_ids
                     final_context = await self.context_manager.get_context(conversation_id)
@@ -377,21 +372,8 @@ class OrchestrationService:
                 # =====================================================
                 # TOOL EXECUTION: Process each tool call
                 # =====================================================
-                # Step 1.3: Emit intermediate message BEFORE executing tools
-                # Claude often sends text like "I'll validate your inputs now..." before tool calls
-                # We need to emit this as a message_final so it appears in the chat!
-                if message_text and message_text.strip() and self.event_emitter:
-                    # Emit as message_final so it persists in the chat UI
-                    await self.event_emitter.emit_message_final(
-                        conversation_id,
-                        message_text,
-                        role="assistant",
-                        metadata={
-                            "is_intermediate": True,  # Flag to indicate more coming
-                            "iteration": iteration + 1,
-                            "has_tool_calls": True
-                        }
-                    )
+                # Intermediate text before tool calls is now included in final HTTP response
+                # (No need to emit separately)
                 
                 # Add assistant message with BOTH text and tool calls to history
                 assistant_msg = {"role": "assistant", "tool_calls": tool_calls_list}
@@ -497,10 +479,13 @@ class OrchestrationService:
                         "result": result
                     })
                     
+                    # Track tool execution with proper status
                     all_tool_results.append({
-                        "tool": tool_name,
-                        "status": "executed",
-                        "result": result
+                        "name": tool_name,
+                        "tool": tool_name,  # For backward compatibility
+                        "result": result,
+                        "duration_ms": tool_duration_ms,
+                        "status": "success" if result.get("status") != "error" else "error"
                     })
                 
                 # =====================================================
@@ -530,13 +515,7 @@ class OrchestrationService:
             
             if self.event_emitter:
                 await self.event_emitter.emit_thinking_end(conversation_id, 0)
-                # Always emit message_final so frontend knows we're done
-                await self.event_emitter.emit_message_final(
-                    conversation_id,
-                    error_message,
-                    role="assistant",
-                    metadata={"max_iterations_reached": True}
-                )
+            # Response returned via HTTP (no emit_message_final needed)
             
             # Get context for run_ids
             final_context = await self.context_manager.get_context(conversation_id)
@@ -598,13 +577,7 @@ class OrchestrationService:
                     details={"exception": str(e)},
                     recoverable=True
                 )
-                # Always emit message_final so frontend knows we're done
-                await self.event_emitter.emit_message_final(
-                    conversation_id,
-                    error_msg,
-                    role="assistant",
-                    metadata={"error": True}
-                )
+                # Response returned via HTTP (no emit_message_final needed)
             
             print(f"ERROR: Error processing message: {e}"); import traceback; traceback.print_exc()
             return {
@@ -641,7 +614,7 @@ class OrchestrationService:
         - Tool results (success and errors)
         
         The LLM sees the full history and decides what to do next.
-        Now uses streaming to emit message_delta events in real-time.
+        Uses non-streaming API - response delivered via HTTP.
         """
         # Build system prompt - Claude is naturally agentic, minimal prompting needed
         system_parts = [
@@ -670,8 +643,8 @@ class OrchestrationService:
         # Optimize conversation history using sliding window
         optimized_history = self._prepare_conversation_for_llm(conversation_history)
         
-        # Use streaming to emit real-time message deltas
-        return await self._call_llm_streaming(
+        # Call LLM (non-streaming - response delivered via HTTP)
+        return await self._call_llm(
             optimized_history,
             tools,
             system,
@@ -679,7 +652,7 @@ class OrchestrationService:
             assistant_message_id
         )
     
-    async def _call_llm_streaming(
+    async def _call_llm(
         self,
         messages: List[Dict[str, Any]],
         tools: List[Any],
@@ -688,126 +661,98 @@ class OrchestrationService:
         assistant_message_id: Optional[str] = None
     ) -> "StreamingLLMResponse":
         """
-        Call LLM with streaming and emit message_delta events.
+        Call LLM and return response.
         
-        Processes the Claude stream and:
-        1. Emits message_delta for each text chunk (typing effect)
-        2. Accumulates text and tool calls
-        3. Returns a response object compatible with non-streaming interface
+        Uses non-streaming API call. Tool progress events are still
+        emitted via SSE, but the final response is returned directly.
         
         Args:
             messages: Prepared conversation history
             tools: Available tools
             system: System prompt
-            conversation_id: For emitting events (optional)
+            conversation_id: For context (optional)
+            assistant_message_id: For error recovery (optional)
             
         Returns:
-            StreamingLLMResponse with accumulated text, tool_calls, usage
+            StreamingLLMResponse with text, tool_calls, usage
         """
-        accumulated_text = ""
-        accumulated_length = 0
-        tool_calls = []
-        current_tool_call = None
-        current_tool_input_json = ""
-        usage = {"input_tokens": 0, "output_tokens": 0}
-        
         try:
-            async for event in self.llm.create_message_stream(
+            # Call LLM (non-streaming)
+            response = await self.llm.create_message(
                 messages=messages,
                 tools=tools,
                 system=system
-            ):
-                # Handle different event types from Claude stream
-                if event.type == "message_start":
-                    # Message metadata (usage will be updated at end)
-                    if hasattr(event, 'message') and hasattr(event.message, 'usage'):
-                        usage["input_tokens"] = event.message.usage.input_tokens
-                
-                elif event.type == "content_block_start":
-                    # New content block starting
-                    if hasattr(event, 'content_block'):
-                        if event.content_block.type == "text":
-                            # Text block starting - nothing to do yet
-                            pass
-                        elif event.content_block.type == "tool_use":
-                            # Tool call starting
-                            current_tool_call = {
-                                "id": event.content_block.id,
-                                "name": event.content_block.name,
-                                "input": {}
-                            }
-                            current_tool_input_json = ""
-                
-                elif event.type == "content_block_delta":
-                    if hasattr(event, 'delta'):
-                        if event.delta.type == "text_delta":
-                            # TEXT CHUNK - emit message_delta for typing effect
-                            chunk = event.delta.text
-                            accumulated_text += chunk
-                            accumulated_length += len(chunk)
-                            
-                            # Emit message_delta event for real-time streaming
-                            if self.event_emitter and conversation_id:
-                                await self.event_emitter.emit_message_delta(
-                                    conversation_id,
-                                    delta=chunk,
-                                    accumulated_length=accumulated_length
-                                )
-                        
-                        elif event.delta.type == "input_json_delta":
-                            # Tool input being streamed (JSON chunks)
-                            if current_tool_call:
-                                current_tool_input_json += event.delta.partial_json
-                
-                elif event.type == "content_block_stop":
-                    # Content block finished
-                    if current_tool_call:
-                        # Parse accumulated tool input JSON
-                        try:
-                            if current_tool_input_json:
-                                current_tool_call["input"] = json.loads(current_tool_input_json)
-                        except json.JSONDecodeError:
-                            current_tool_call["input"] = {}
-                        
-                        tool_calls.append(current_tool_call)
-                        current_tool_call = None
-                        current_tool_input_json = ""
-                
-                elif event.type == "message_delta":
-                    # Final message metadata (stop_reason, usage)
-                    if hasattr(event, 'usage'):
-                        usage["output_tokens"] = event.usage.output_tokens
-                
-                elif event.type == "message_stop":
-                    # Stream complete
-                    pass
+            )
+            
+            # Extract tool calls in expected format
+            tool_calls = []
+            if response.has_tool_calls:
+                for call in response.tool_calls:
+                    tool_calls.append({
+                        "id": call.get("id", ""),
+                        "name": call["name"],
+                        "input": call.get("input", call.get("arguments", {}))
+                    })
             
             # Return response object compatible with existing code
             return StreamingLLMResponse(
-                text=accumulated_text,
+                text=response.text,
                 tool_calls=tool_calls,
-                usage=usage
+                usage={
+                    "input_tokens": response.usage.input_tokens if hasattr(response.usage, 'input_tokens') else 0,
+                    "output_tokens": response.usage.output_tokens if hasattr(response.usage, 'output_tokens') else 0
+                }
             )
             
         except Exception as e:
-            # Check if it's a rate limit error
             error_message = str(e)
-            is_rate_limit = "rate_limit_error" in error_message or "429" in error_message
             
-            if is_rate_limit:
-                # PHASE 2.4: Save partial response to DB before handling error
-                if assistant_message_id and accumulated_text:
+            # Check for different types of API errors
+            is_rate_limit = "rate_limit_error" in error_message or "429" in error_message
+            is_usage_limit = "API usage limits" in error_message or "You have reached your specified" in error_message
+            
+            if is_usage_limit:
+                # API usage limit reached (monthly/daily limit)
+                if assistant_message_id:
                     try:
                         from app.services.context_manager import MessageStatus
-                        partial_with_error = accumulated_text + "\n\n[Rate limit reached - response incomplete]"
                         await self.context_manager.update_message(
                             conversation_id,
                             assistant_message_id,
-                            content=partial_with_error,
+                            content="[API usage limit reached - service will resume after limit resets]",
                             status=MessageStatus.ERROR,
-                            metadata={"error": "rate_limit", "partial": True}
+                            metadata={"error": "usage_limit"}
                         )
-                    except Exception as save_error:
+                    except Exception:
+                        pass
+                
+                # Emit user-friendly usage limit error
+                if self.event_emitter and conversation_id:
+                    from app.models.events import ErrorType
+                    await self.event_emitter.emit_app_error(
+                        conversation_id,
+                        error_type=ErrorType.RATE_LIMIT_ERROR,
+                        error_message="API usage limit reached. Please try again later.",
+                        details={
+                            "error": "Monthly API usage limit exceeded",
+                            "suggestion": "Service will resume after the usage limit resets",
+                            "raw_error": error_message[:200]
+                        }
+                    )
+            
+            elif is_rate_limit:
+                # Rate limit (requests per minute)
+                if assistant_message_id:
+                    try:
+                        from app.services.context_manager import MessageStatus
+                        await self.context_manager.update_message(
+                            conversation_id,
+                            assistant_message_id,
+                            content="[Rate limit reached - please try again in a moment]",
+                            status=MessageStatus.ERROR,
+                            metadata={"error": "rate_limit"}
+                        )
+                    except Exception:
                         pass
                 
                 # Emit user-friendly rate limit error
@@ -823,55 +768,8 @@ class OrchestrationService:
                             "limit": "30,000 tokens per minute"
                         }
                     )
-                
-                # Return partial response if we have text
-                if accumulated_text:
-                    return StreamingLLMResponse(
-                        text=accumulated_text + "\n\n[Rate limit reached - response incomplete]",
-                        tool_calls=tool_calls,
-                        usage=usage
-                    )
-                
-                # Re-raise so caller can handle retry
-                raise
             
-            # Other errors - emit event
-            # PHASE 2.4: Save partial response to DB before handling error
-            if assistant_message_id and accumulated_text:
-                try:
-                    from app.services.context_manager import MessageStatus
-                    partial_with_error = accumulated_text + "\n\n_[Response was interrupted due to an error]_"
-                    await self.context_manager.update_message(
-                        conversation_id,
-                        assistant_message_id,
-                        content=partial_with_error,
-                        status=MessageStatus.ERROR,
-                        metadata={"error": str(e)[:200], "partial": True}
-                    )
-                except Exception as save_error:
-                    print(f"Failed to save partial response: {save_error}")
-            
-            print(f"ERROR: Claude streaming error: {e}")
-            
-            # Emit streaming error event
-            if self.event_emitter and conversation_id:
-                from app.models.events import ErrorType
-                await self.event_emitter.emit_app_error(
-                    conversation_id,
-                    error_type=ErrorType.LLM_STREAMING_ERROR,
-                    error_message=f"Streaming error: {str(e)[:200]}",
-                    details={"error": str(e)},
-                    recoverable=True
-                )
-            
-            # If we have partial text, return it so user sees something
-            if accumulated_text:
-                return StreamingLLMResponse(
-                    text=accumulated_text + "\n\n_[Response was interrupted due to an error]_",
-                    tool_calls=tool_calls,
-                    usage=usage
-                )
-            
+            print(f"ERROR: LLM API error: {e}")
             raise
     
     # =========================================================================
@@ -1012,47 +910,6 @@ class OrchestrationService:
             parts.append(f"Results: {success_count} success, {error_count} errors")
         
         return " | ".join(parts) if parts else "Previous conversation"
-    
-    async def _call_llm(
-        self,
-        user_message: str,
-        tools: List[Dict[str, Any]],
-        context: Dict[str, Any]
-    ) -> Dict[str, Any]:
-        """
-        Send a single message to LLM with available tools.
-        
-        DEPRECATED: Use _call_llm_with_history for agentic loop.
-        Kept for backward compatibility.
-        """
-        messages = self._build_message_history(user_message, context)
-        response = await self.llm.create_message(messages, tools)
-        return response
-    
-    def _build_message_history(
-        self,
-        user_message: str,
-        context: Dict[str, Any]
-    ) -> List[Dict[str, str]]:
-        """
-        Build message history for LLM (simple version).
-        
-        DEPRECATED: The agentic loop builds history dynamically.
-        Kept for backward compatibility.
-        """
-        messages = [{"role": "user", "content": user_message}]
-        
-        if context.get("current_industry") or context.get("current_process"):
-            context_info = []
-            if context.get("current_industry"):
-                context_info.append(f"Industry: {context['current_industry']}")
-            if context.get("current_process"):
-                context_info.append(f"Process: {context['current_process']}")
-            
-            system_msg = "Context: " + ", ".join(context_info)
-            messages.insert(0, {"role": "system", "content": system_msg})
-        
-        return messages
     
     # =========================================================================
     # Context Management
