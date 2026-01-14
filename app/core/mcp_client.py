@@ -146,11 +146,9 @@ class MCPClient:
             RuntimeError: If connection fails
         """
         if self.state == ConnectionState.CONNECTED:
-            print(f"WARNING: " + str("MCP client already connected"))
             return
         
         self.state = ConnectionState.CONNECTING
-        print(f"Connecting to MCP server: {self.config.command} {self.config.args}")
         
         try:
             # Prepare environment
@@ -176,14 +174,12 @@ class MCPClient:
             # Initialize MCP protocol
             await self._initialize_protocol()
             
-            print("MCP client connected successfully")
-            
             # Start health checks
             self._health_task = asyncio.create_task(self._health_check_loop())
             
         except Exception as e:
             self.state = ConnectionState.FAILED
-            print(f"ERROR: " + str(f"Failed to connect to MCP server: {e}"))
+            print(f"ERROR: Failed to connect to MCP server: {e}")
             await self._cleanup()
             raise RuntimeError(f"MCP connection failed: {e}")
     
@@ -192,11 +188,9 @@ class MCPClient:
         if self.state == ConnectionState.DISCONNECTED:
             return
         
-        print("Disconnecting MCP client")
         self.state = ConnectionState.DISCONNECTED
         
         await self._cleanup()
-        print("MCP client disconnected")
     
     async def _cleanup(self) -> None:
         """Clean up resources"""
@@ -225,7 +219,7 @@ class MCPClient:
                 self._process.kill()
                 await self._process.wait()
             except Exception as e:
-                print(f"WARNING: " + str(f"Error terminating MCP process: {e}"))
+                print(f"WARNING: Error terminating MCP process: {e}")
         
         # Clear state
         self._process = None
@@ -262,7 +256,6 @@ class MCPClient:
             }
         })
         
-        print(f"MCP server initialized: {response.get('serverInfo', {}).get('name')}")
         
         # Send initialized notification
         await self._send_notification("notifications/initialized")
@@ -307,8 +300,6 @@ class MCPClient:
             self._process.stdin.write(request_json.encode())
             await self._process.stdin.drain()
             
-            print(f"Sent MCP request: {method} (id={msg_id})")
-            
             # Wait for response (with timeout)
             response = await asyncio.wait_for(future, timeout=300.0)
             
@@ -341,8 +332,6 @@ class MCPClient:
         notification_json = json.dumps(notification) + "\n"
         self._process.stdin.write(notification_json.encode())
         await self._process.stdin.drain()
-        
-        print(f"Sent MCP notification: {method}")
     
     async def _read_loop(self) -> None:
         """Read and process messages from MCP server stdout"""
@@ -356,14 +345,14 @@ class MCPClient:
                     message = json.loads(line.decode())
                     await self._handle_message(message)
                 except json.JSONDecodeError as e:
-                    print(f"ERROR: " + str(f"Invalid JSON from MCP server: {e}"))
+                    print(f"ERROR: Invalid JSON from MCP server: {e}")
                 except Exception as e:
-                    print(f"ERROR: " + str(f"Error handling MCP message: {e}"))
+                    print(f"ERROR: Error handling MCP message: {e}")
         
         except asyncio.CancelledError:
-            print("MCP reader loop cancelled")
+            pass
         except Exception as e:
-            print(f"ERROR: " + str(f"MCP reader loop error: {e}"))
+            print(f"ERROR: MCP reader loop error: {e}")
             if self.state == ConnectionState.CONNECTED:
                 await self._handle_disconnect()
     
@@ -378,9 +367,7 @@ class MCPClient:
         
         # Notification (log progress, etc.)
         elif "method" in message:
-            method = message["method"]
-            params = message.get("params", {})
-            print(f"MCP notification: {method} - {params}")
+            pass
     
     # -------------------------------------------------------------------------
     # Tool Operations
@@ -410,7 +397,6 @@ class MCPClient:
             ))
         
         self._tools = tools
-        print(f"Discovered {len(tools)} MCP tools")
         
         return tools
     
@@ -430,8 +416,6 @@ class MCPClient:
         """
         # Use lock to serialize tool calls (MCP servers typically aren't thread-safe)
         async with self._tool_lock:
-            print(f"Calling MCP tool: {name}")
-            
             response = await self._send_request("tools/call", {
                 "name": name,
                 "arguments": arguments
@@ -470,7 +454,6 @@ class MCPClient:
             return True
             
         except Exception as e:
-            print(f"WARNING: " + str(f"MCP health check failed: {e}"))
             return False
     
     async def _health_check_loop(self) -> None:
@@ -480,20 +463,18 @@ class MCPClient:
                 await asyncio.sleep(self.health_check_interval)
                 
                 if not await self.health_check():
-                    print(f"ERROR: " + str("MCP health check failed - triggering restart"))
                     await self._handle_disconnect()
                     break
         
         except asyncio.CancelledError:
-            print("Health check loop cancelled")
+            pass
     
     async def _handle_disconnect(self) -> None:
         """Handle unexpected disconnect - attempt restart"""
         if self.state == ConnectionState.DISCONNECTED:
             return
         
-        print(f"WARNING: " + str("MCP server disconnected unexpectedly"))
-        
+        print(f"WARNING: MCP server disconnected unexpectedly")
         # Check restart limits
         now = time.time()
         if now - self._last_restart < 60:  # Within 1 minute
@@ -502,14 +483,13 @@ class MCPClient:
             self._restart_count = 1
         
         if self._restart_count > self.max_retries:
-            print(f"ERROR: " + str(f"Max restart attempts reached ({self.max_retries})"))
             self.state = ConnectionState.FAILED
+            print(f"ERROR: Max restart attempts reached ({self.max_retries})")
             await self._cleanup()
             return
         
         # Attempt restart
         self.state = ConnectionState.RESTARTING
-        print(f"Restarting MCP server (attempt {self._restart_count}/{self.max_retries})")
         
         await self._cleanup()
         await asyncio.sleep(self.restart_delay)
@@ -517,7 +497,6 @@ class MCPClient:
         try:
             self._last_restart = now
             await self.connect()
-            print("MCP server restarted successfully")
         except Exception as e:
-            print(f"ERROR: " + str(f"Failed to restart MCP server: {e}"))
             self.state = ConnectionState.FAILED
+            print(f"ERROR: Failed to restart MCP server: {e}")

@@ -172,8 +172,10 @@ def convert_messages_to_anthropic(messages: List[Dict[str, Any]]) -> List[Dict[s
         role = msg.get("role")
         
         if role == "user":
-            # Simple user message
+            # Simple user message - skip empty content
             content = msg.get("content", "")
+            if isinstance(content, str) and not content.strip():
+                continue
             if isinstance(content, str):
                 converted.append({"role": "user", "content": content})
             else:
@@ -216,8 +218,10 @@ def convert_messages_to_anthropic(messages: List[Dict[str, Any]]) -> List[Dict[s
                     "content": content_blocks
                 })
             else:
-                # Regular text message
+                # Regular text message - skip empty content
                 content = msg.get("content", "")
+                if isinstance(content, str) and not content.strip():
+                    continue
                 if isinstance(content, str):
                     converted.append({"role": "assistant", "content": content})
                 else:
@@ -346,8 +350,6 @@ class ClaudeProvider:
             max_retries=max_retries,
             timeout=timeout
         )
-        
-        print(f"Claude provider initialized with model: {model}")
     
     async def create_message(
         self,
@@ -390,7 +392,6 @@ class ClaudeProvider:
         anthropic_tools = None
         if tools:
             anthropic_tools = convert_mcp_tools_to_anthropic(tools)
-            print(f"Converted {len(tools)} MCP tools to Anthropic format")
         
         # Convert messages to Anthropic format (handles tool calls and results)
         anthropic_messages = convert_messages_to_anthropic(messages)
@@ -411,27 +412,15 @@ class ClaudeProvider:
         
         # Make API call with retry logic
         try:
-            print(f"Sending message to Claude ({len(anthropic_messages)} messages)")
             message = await self.client.messages.create(**params)
             
             # Parse response
             parsed = ParsedResponse(message)
             
-            print(
-                f"Claude response: {parsed.usage.input_tokens} in, "
-                f"{parsed.usage.output_tokens} out, "
-                f"stop_reason={parsed.stop_reason}"
-            )
-            
-            if parsed.has_tool_calls:
-                print(f"Claude requested {len(parsed.tool_calls)} tool calls")
-                for call in parsed.tool_calls:
-                    print(f"  - {call['name']}: {list(call['input'].keys())}")
-            
             return parsed
             
         except Exception as e:
-            print(f"ERROR: " + str(f"Claude API error: {e}"))
+            print(f"ERROR: Claude API error: {e}")
             raise
     
     async def create_message_stream(
@@ -482,7 +471,6 @@ class ClaudeProvider:
         anthropic_tools = None
         if tools:
             anthropic_tools = convert_mcp_tools_to_anthropic(tools)
-            print(f"Converted {len(tools)} MCP tools for streaming")
         
         # Convert messages to Anthropic format (handles tool calls and results)
         anthropic_messages = convert_messages_to_anthropic(messages)
@@ -502,27 +490,17 @@ class ClaudeProvider:
             params["tools"] = anthropic_tools
         
         try:
-            print(f"Starting streaming message to Claude")
-            
             async with self.client.messages.stream(**params) as stream:
                 async for event in stream:
                     yield event
             
-            # Log final message stats
-            final_message = await stream.get_final_message()
-            print(
-                f"Stream complete: {final_message.usage.input_tokens} in, "
-                f"{final_message.usage.output_tokens} out"
-            )
-            
         except Exception as e:
-            print(f"ERROR: " + str(f"Claude streaming error: {e}"))
+            print(f"ERROR: Claude streaming error: {e}")
             raise
     
     async def close(self):
         """Close the Anthropic client connection."""
         await self.client.close()
-        print("Claude provider closed")
     
     def __repr__(self) -> str:
         return f"ClaudeProvider(model={self.model}, max_tokens={self.max_tokens})"

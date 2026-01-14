@@ -229,6 +229,8 @@ async def get_conversation_context(
                 role=msg.get("role", "user"),
                 content=msg.get("content", ""),
                 timestamp=datetime.fromisoformat(msg.get("timestamp")) if msg.get("timestamp") else datetime.now(),
+                status=msg.get("status", "complete"),  # Include message status
+                message_id=msg.get("message_id"),  # Include message_id
                 metadata=msg.get("metadata")
             ))
         

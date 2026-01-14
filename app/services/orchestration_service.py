@@ -124,7 +124,6 @@ class OrchestrationService:
         
         # Initialize Claude LLM provider
         self.llm = ClaudeProvider(api_key=anthropic_api_key)
-        print("Orchestration service initialized with Claude (claude-sonnet-4-20250514)")
     
     # =========================================================================
     # AGENTIC LOOP - Main Entry Point
@@ -173,12 +172,9 @@ class OrchestrationService:
         total_output_tokens = 0
         
         try:
-            print(f"Processing message for conversation {conversation_id}")
-            
             # Step 0: Health check - fail fast if MCP server is unavailable
             if not await self.mcp_client.health_check():
                 error_msg = "MCP server is unavailable. Please ensure the server is running and try again."
-                print(f"ERROR: {error_msg}")
                 
                 if self.event_emitter:
                     await self.event_emitter.emit_app_error(
@@ -217,10 +213,23 @@ class OrchestrationService:
             conversation_history = []
             
             # Add previous conversation turns (limit to last 10 for context window)
+            # IMPORTANT: Filter out empty messages and incomplete streaming messages
+            # to avoid Claude error "all messages must have non-empty content"
             for msg in previous_messages[-10:]:
+                content = msg.get("content", "")
+                status = msg.get("status", "complete")
+                
+                # Skip empty messages or incomplete streaming messages
+                if not content or not content.strip():
+                    continue
+                    
+                # Skip messages that are still streaming or have errors with no content
+                if status == "streaming":
+                    continue
+                
                 conversation_history.append({
                     "role": msg["role"],
-                    "content": msg["content"]
+                    "content": content
                 })
             
             # Add current user message
@@ -229,18 +238,29 @@ class OrchestrationService:
             # Save user message to context for future turns
             await self.context_manager.add_message(conversation_id, "user", user_message)
             
-            print(f"Conversation history has {len(conversation_history)} messages")
-            
             # Emit thinking start
             if self.event_emitter:
                 await self.event_emitter.emit_thinking_start(conversation_id)
+            
+            # =================================================================
+            # PHASE 2.1: Create empty assistant message BEFORE streaming
+            # This ensures message is persisted even if errors occur mid-stream
+            # =================================================================
+            from app.services.context_manager import MessageStatus
+            assistant_message_id = await self.context_manager.add_message(
+                conversation_id,
+                "assistant",
+                "",  # Empty initially, will be updated with streamed content
+                status=MessageStatus.STREAMING
+            )
+            
+            # Track accumulated text across all iterations for error recovery
+            total_accumulated_text = ""
             
             # =====================================================
             # AGENTIC LOOP: Continue until LLM stops calling tools
             # =====================================================
             for iteration in range(MAX_ITERATIONS):
-                print(f"=== Agentic Loop Iteration {iteration + 1} ===")
-                
                 # Call LLM with conversation history (streaming with message_delta events)
                 # Retry logic for rate limits
                 max_retries = 2
@@ -255,7 +275,8 @@ class OrchestrationService:
                             conversation_history, 
                             tools, 
                             context,
-                            conversation_id  # Pass conversation_id for streaming events
+                            conversation_id,  # Pass conversation_id for streaming events
+                            assistant_message_id  # Pass message_id for error recovery
                         )
                         break  # Success - exit retry loop
                         
@@ -264,7 +285,6 @@ class OrchestrationService:
                         is_rate_limit = "rate_limit_error" in error_message or "429" in error_message
                         
                         if is_rate_limit and retry < max_retries:
-                            print(f"Rate limit hit on attempt {retry + 1}/{max_retries + 1}, waiting {retry_delay}s...")
                             await asyncio.sleep(retry_delay)
                             continue
                         
@@ -302,13 +322,15 @@ class OrchestrationService:
                 # EXIT CONDITION: LLM has no more tool calls
                 # =====================================================
                 if not has_tools:
-                    print(f"LLM finished after {iteration + 1} iterations with text response")
+                    # Update accumulated text for final response
+                    total_accumulated_text = message_text
                     
-                    # Save assistant response to context for future turns
-                    await self.context_manager.add_message(
-                        conversation_id, 
-                        "assistant", 
-                        message_text,
+                    # PHASE 2.3: Update assistant message with final content and status=complete
+                    await self.context_manager.update_message(
+                        conversation_id,
+                        assistant_message_id,
+                        content=message_text,
+                        status=MessageStatus.COMPLETE,
                         metadata={"iterations": iteration + 1, "tool_calls": len(all_tool_results)}
                     )
                     
@@ -355,13 +377,10 @@ class OrchestrationService:
                 # =====================================================
                 # TOOL EXECUTION: Process each tool call
                 # =====================================================
-                print(f"LLM requested {len(tool_calls_list)} tool calls")
-                
                 # Step 1.3: Emit intermediate message BEFORE executing tools
                 # Claude often sends text like "I'll validate your inputs now..." before tool calls
                 # We need to emit this as a message_final so it appears in the chat!
                 if message_text and message_text.strip() and self.event_emitter:
-                    print(f"Emitting intermediate message before tools: {message_text[:50]}...")
                     # Emit as message_final so it persists in the chat UI
                     await self.event_emitter.emit_message_final(
                         conversation_id,
@@ -387,7 +406,6 @@ class OrchestrationService:
                     # Safety check: don't exceed tool call limit
                     total_tool_calls += 1
                     if total_tool_calls > MAX_TOOL_CALLS:
-                        print(f"WARNING: " + f"Tool call limit exceeded ({MAX_TOOL_CALLS})")
                         iteration_tool_results.append({
                             "name": "system",
                             "result": {
@@ -405,15 +423,11 @@ class OrchestrationService:
                         tool_name = tool_call.name
                         tool_params = tool_call.input if hasattr(tool_call, 'input') else tool_call.arguments
                     
-                    print(f"Executing tool: {tool_name}")
-                    
                     # Check policy
                     policy_result = await self._enforce_policy(tool_name, context, tool_params)
                     
                     if policy_result["decision"] != "allow":
                         # Policy denied - send error back to LLM (not to user!)
-                        print(f"WARNING: " + f"Policy DENIED: {tool_name} - {policy_result['reason']}")
-                        
                         if self.event_emitter:
                             await self.event_emitter.emit_app_error(
                                 conversation_id,
@@ -450,13 +464,6 @@ class OrchestrationService:
                     tool_start_time = datetime.now()
                     result = await self._execute_tool(tool_name, tool_params, conversation_id)
                     tool_duration_ms = int((datetime.now() - tool_start_time).total_seconds() * 1000)
-                    
-                    # DEBUG: Log the result keys and calc_run_id for simulation tools
-                    if tool_name in ["simulate_process", "simulate_equipment"]:
-                        print(f"[DEBUG] Simulation result keys: {list(result.keys())}")
-                        print(f"[DEBUG] calc_run_id: {result.get('calc_run_id')}")
-                        print(f"[DEBUG] run_id: {result.get('run_id')}")
-                        print(f"[DEBUG] status: {result.get('status')}")
                     
                     # Emit tool end
                     if self.event_emitter:
@@ -505,16 +512,21 @@ class OrchestrationService:
                     "tool_results": iteration_tool_results
                 })
                 
-                print(f"Sent {len(iteration_tool_results)} tool results back to LLM")
-                
                 # Continue loop - LLM will see results in next iteration
             
             # =====================================================
             # MAX ITERATIONS REACHED
             # =====================================================
-            print(f"WARNING: " + f"Max iterations ({MAX_ITERATIONS}) reached")
-            
             error_message = "I apologize, but I couldn't complete your request within the allowed iterations. Here's what I was able to do:\n\n" + self._format_results_for_user(all_tool_results)
+            
+            # PHASE 2.4: Update assistant message with error status
+            await self.context_manager.update_message(
+                conversation_id,
+                assistant_message_id,
+                content=error_message,
+                status=MessageStatus.ERROR,
+                metadata={"max_iterations_reached": True, "iterations": MAX_ITERATIONS}
+            )
             
             if self.event_emitter:
                 await self.event_emitter.emit_thinking_end(conversation_id, 0)
@@ -529,6 +541,7 @@ class OrchestrationService:
             # Get context for run_ids
             final_context = await self.context_manager.get_context(conversation_id)
             
+            print(f"WARNING: Max iterations ({MAX_ITERATIONS}) reached")
             # Format tool executions for response
             tool_executions = [
                 {
@@ -558,9 +571,24 @@ class OrchestrationService:
             }
             
         except Exception as e:
-            print(f"ERROR: " + f"Error processing message: {e}"); import traceback; traceback.print_exc()
-            
             error_msg = f"Error processing your request: {str(e)}"
+            
+            # PHASE 2.4: Update assistant message with error status and any partial content
+            # Use total_accumulated_text if available, otherwise just error message
+            try:
+                from app.services.context_manager import MessageStatus
+                partial_content = total_accumulated_text if total_accumulated_text else ""
+                final_content = partial_content + ("\n\n[Error: " + str(e)[:200] + "]" if partial_content else error_msg)
+                
+                await self.context_manager.update_message(
+                    conversation_id,
+                    assistant_message_id,
+                    content=final_content,
+                    status=MessageStatus.ERROR,
+                    metadata={"error": str(e)[:500]}
+                )
+            except Exception as update_error:
+                print(f"Failed to update message with error: {update_error}")
             
             if self.event_emitter:
                 await self.event_emitter.emit_app_error(
@@ -578,6 +606,7 @@ class OrchestrationService:
                     metadata={"error": True}
                 )
             
+            print(f"ERROR: Error processing message: {e}"); import traceback; traceback.print_exc()
             return {
                 "status": "error",
                 "message": f"Error processing your request: {str(e)}",
@@ -600,7 +629,8 @@ class OrchestrationService:
         conversation_history: List[Dict[str, Any]],
         tools: List[Any],
         context: Dict[str, Any],
-        conversation_id: Optional[str] = None
+        conversation_id: Optional[str] = None,
+        assistant_message_id: Optional[str] = None
     ) -> Any:
         """
         Call LLM with full conversation history using STREAMING.
@@ -634,23 +664,19 @@ class OrchestrationService:
             system_parts.append(f"\nLast simulation run_id: {latest_run_id} - use get_run tool if user asks about previous results.")
             if len(run_ids) > 1:
                 system_parts.append(f"Previous run_ids available: {run_ids[1:]} - use compare_runs to compare simulations.")
-            print(f"Including run_ids in prompt: latest={latest_run_id}, total={len(run_ids)}")
-        else:
-            print(f"No run_ids in context for follow-up")
         
         system = "\n".join(system_parts)
         
         # Optimize conversation history using sliding window
         optimized_history = self._prepare_conversation_for_llm(conversation_history)
         
-        print(f"Calling LLM with {len(optimized_history)} messages (original: {len(conversation_history)})")
-        
         # Use streaming to emit real-time message deltas
         return await self._call_llm_streaming(
             optimized_history,
             tools,
             system,
-            conversation_id
+            conversation_id,
+            assistant_message_id
         )
     
     async def _call_llm_streaming(
@@ -658,7 +684,8 @@ class OrchestrationService:
         messages: List[Dict[str, Any]],
         tools: List[Any],
         system: str,
-        conversation_id: Optional[str] = None
+        conversation_id: Optional[str] = None,
+        assistant_message_id: Optional[str] = None
     ) -> "StreamingLLMResponse":
         """
         Call LLM with streaming and emit message_delta events.
@@ -683,8 +710,6 @@ class OrchestrationService:
         current_tool_call = None
         current_tool_input_json = ""
         usage = {"input_tokens": 0, "output_tokens": 0}
-        
-        print(f"Starting streaming message to Claude")
         
         try:
             async for event in self.llm.create_message_stream(
@@ -712,7 +737,6 @@ class OrchestrationService:
                                 "input": {}
                             }
                             current_tool_input_json = ""
-                            print(f"  Tool call starting: {event.content_block.name}")
                 
                 elif event.type == "content_block_delta":
                     if hasattr(event, 'delta'):
@@ -743,11 +767,9 @@ class OrchestrationService:
                             if current_tool_input_json:
                                 current_tool_call["input"] = json.loads(current_tool_input_json)
                         except json.JSONDecodeError:
-                            print(f"WARNING: Failed to parse tool input JSON: {current_tool_input_json[:100]}")
                             current_tool_call["input"] = {}
                         
                         tool_calls.append(current_tool_call)
-                        print(f"  Tool call complete: {current_tool_call['name']}")
                         current_tool_call = None
                         current_tool_input_json = ""
                 
@@ -758,7 +780,7 @@ class OrchestrationService:
                 
                 elif event.type == "message_stop":
                     # Stream complete
-                    print(f"Stream complete: {usage['input_tokens']} in, {usage['output_tokens']} out")
+                    pass
             
             # Return response object compatible with existing code
             return StreamingLLMResponse(
@@ -773,7 +795,20 @@ class OrchestrationService:
             is_rate_limit = "rate_limit_error" in error_message or "429" in error_message
             
             if is_rate_limit:
-                print(f"RATE LIMIT: Request exceeded API rate limits")
+                # PHASE 2.4: Save partial response to DB before handling error
+                if assistant_message_id and accumulated_text:
+                    try:
+                        from app.services.context_manager import MessageStatus
+                        partial_with_error = accumulated_text + "\n\n[Rate limit reached - response incomplete]"
+                        await self.context_manager.update_message(
+                            conversation_id,
+                            assistant_message_id,
+                            content=partial_with_error,
+                            status=MessageStatus.ERROR,
+                            metadata={"error": "rate_limit", "partial": True}
+                        )
+                    except Exception as save_error:
+                        pass
                 
                 # Emit user-friendly rate limit error
                 if self.event_emitter and conversation_id:
@@ -800,10 +835,23 @@ class OrchestrationService:
                 # Re-raise so caller can handle retry
                 raise
             
-            # Other errors - log and emit
+            # Other errors - emit event
+            # PHASE 2.4: Save partial response to DB before handling error
+            if assistant_message_id and accumulated_text:
+                try:
+                    from app.services.context_manager import MessageStatus
+                    partial_with_error = accumulated_text + "\n\n_[Response was interrupted due to an error]_"
+                    await self.context_manager.update_message(
+                        conversation_id,
+                        assistant_message_id,
+                        content=partial_with_error,
+                        status=MessageStatus.ERROR,
+                        metadata={"error": str(e)[:200], "partial": True}
+                    )
+                except Exception as save_error:
+                    print(f"Failed to save partial response: {save_error}")
+            
             print(f"ERROR: Claude streaming error: {e}")
-            import traceback
-            traceback.print_exc()
             
             # Emit streaming error event
             if self.event_emitter and conversation_id:
@@ -859,8 +907,6 @@ class OrchestrationService:
         
         # Extract summary from old messages
         summary = self._extract_summary_from_messages(old_messages)
-        
-        print(f"Context optimization: {len(old_messages)} old messages → summary, keeping {len(recent_messages)} recent")
         
         # Build optimized history with summary context
         optimized = []
@@ -980,7 +1026,6 @@ class OrchestrationService:
         Kept for backward compatibility.
         """
         messages = self._build_message_history(user_message, context)
-        print(f"Calling Claude with {len(tools)} tools")
         response = await self.llm.create_message(messages, tools)
         return response
     
@@ -1022,7 +1067,6 @@ class OrchestrationService:
         context = await self.context_manager.get_context(conversation_id)
         
         if not context:
-            print(f"Creating new context for conversation {conversation_id}")
             await self.context_manager.create_context(conversation_id, user_id)
             context = await self.context_manager.get_context(conversation_id)
         
@@ -1043,14 +1087,10 @@ class OrchestrationService:
             result
         )
         
-        print(f"[_update_context] tool_name={tool_name}, result_keys={list(result.keys())}")
-        
         # Update simulation params if this was a simulation
         if tool_name in ["simulate_process", "simulate_equipment"]:
             # Extract run_id - could be 'calc_run_id' or 'run_id' depending on the tool
             run_id = result.get("calc_run_id") or result.get("run_id")
-            
-            print(f"[_update_context] Simulation detected! run_id={run_id}, status={result.get('status')}")
             
             # Get current context to retrieve existing run_ids
             context = await self.context_manager.get_context(conversation_id)
@@ -1067,8 +1107,6 @@ class OrchestrationService:
                     "run_ids": updated_run_ids
                 }
             )
-            
-            print(f"[_update_context] Context updated with run_ids (latest={run_id}, total={len(updated_run_ids)})")
         
         # Update validation params if this was a validation
         if tool_name.startswith("validate_"):
@@ -1076,8 +1114,6 @@ class OrchestrationService:
                 conversation_id,
                 {"validation_params": params}
             )
-        
-        print(f"Context updated after {tool_name} execution")
     
     # =========================================================================
     # Tool Management
@@ -1101,7 +1137,6 @@ class OrchestrationService:
         all_tools = await self.mcp_client.list_tools()
         
         if context is None:
-            print(f"Retrieved {len(all_tools)} tools from MCP server (no filtering)")
             return all_tools
         
         # Determine which tool categories to include
@@ -1121,8 +1156,6 @@ class OrchestrationService:
             if self._get_tool_name(tool) in include_categories
         ]
         
-        print(f"Tool filtering: {len(all_tools)} → {len(filtered_tools)} tools (context: process={context.get('current_process')}, run_ids={len(context.get('run_ids', []))})")
-        
         return filtered_tools
     
     def _get_tool_name(self, tool: Any) -> str:
@@ -1138,8 +1171,6 @@ class OrchestrationService:
         conversation_id: Optional[str] = None
     ) -> Dict[str, Any]:
         """Execute tool via MCP client with progress tracking for simulations."""
-        print(f"Executing tool: {tool_name}")
-        
         try:
             # Quick health check before expensive tool execution
             if not await self.mcp_client.health_check():
@@ -1198,7 +1229,6 @@ class OrchestrationService:
                     "data": result
                 }
         except Exception as e:
-            print(f"ERROR: " + f"Tool execution error: {e}")
             return {
                 "status": "error",
                 "error": str(e),
@@ -1343,8 +1373,6 @@ class OrchestrationService:
         Useful when user wants to start fresh or if tool budget is exceeded.
         """
         await self.context_manager.clear_context(conversation_id)
-        
-        print(f"Conversation {conversation_id} reset")
         
         return {
             "status": "success",

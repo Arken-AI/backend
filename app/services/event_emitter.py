@@ -368,6 +368,7 @@ class EventEmitter:
             details=details,
             recoverable=recoverable
         )
+        print(f"ERROR: APP_ERROR - {error_type}: {error_message}")
         return await self._emit_event(request_id, event)
     
     # ========== Event Retrieval ==========

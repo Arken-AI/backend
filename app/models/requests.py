@@ -161,6 +161,14 @@ class MessageHistoryItem(BaseModel):
         ...,
         description="When the message was created"
     )
+    status: Optional[str] = Field(
+        default="complete",
+        description="Message status: streaming, complete, error, cancelled"
+    )
+    message_id: Optional[str] = Field(
+        default=None,
+        description="Unique message identifier"
+    )
     metadata: Optional[Dict[str, Any]] = Field(
         default=None,
         description="Optional metadata (tool calls, run_id, etc.)"

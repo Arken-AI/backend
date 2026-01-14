@@ -13,10 +13,20 @@ Key responsibilities:
 
 import json
 import traceback
+import uuid
 from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Tuple
 import redis
 from motor.motor_asyncio import AsyncIOMotorClient
+
+
+# Message status constants
+class MessageStatus:
+    """Status values for conversation messages."""
+    STREAMING = "streaming"  # Message is being generated
+    COMPLETE = "complete"    # Message finished successfully
+    ERROR = "error"          # Message generation failed
+    CANCELLED = "cancelled"  # Message was cancelled by user
 
 
 
@@ -119,7 +129,6 @@ class ContextManager:
         if context:
             # Re-cache in Redis for faster subsequent access
             await self._save_to_redis(conversation_id, context)
-            print(f"Context loaded from MongoDB and cached in Redis: {conversation_id}")
             return context
         
         return {}
@@ -144,18 +153,6 @@ class ContextManager:
             ...     "current_process": "sugar_production"
             ... })
         """
-        print(f"[update_context] Updating context for {conversation_id} with keys: {list(updates.keys())}")
-        
-        # Log simulation summary details if present
-        if "last_simulation_summary" in updates:
-            summary = updates.get("last_simulation_summary")
-            if summary:
-                print(f"[update_context] Simulation summary run_id: {summary.get('run_id')}")
-        if "run_ids" in updates:
-            run_ids = updates.get('run_ids', [])
-            latest = run_ids[0] if run_ids else None
-            print(f"[update_context] Updating run_ids: latest={latest}, total={len(run_ids)}")
-        
         # Get existing context
         context = await self.get_context(conversation_id)
         
@@ -168,13 +165,9 @@ class ContextManager:
         context.update(updates)
         context["updated_at"] = datetime.utcnow().isoformat()
         
-        print(f"[update_context] Context updated, saving to Redis and MongoDB...")
-        
         # Save to both storages
         await self._save_to_redis(conversation_id, context)
         await self._save_to_mongo_async(conversation_id, context)
-        
-        print(f"[update_context] Context saved successfully for {conversation_id}")
     
     async def add_tool_execution(
         self,
@@ -235,8 +228,9 @@ class ContextManager:
         conversation_id: str,
         role: str,
         content: str,
-        metadata: Optional[Dict[str, Any]] = None
-    ) -> None:
+        metadata: Optional[Dict[str, Any]] = None,
+        status: str = "complete"
+    ) -> str:
         """
         Add a message to conversation history for multi-turn support.
         
@@ -247,10 +241,14 @@ class ContextManager:
             role: Message role ("user" or "assistant")
             content: Message content
             metadata: Optional metadata (tool_calls, token_usage, etc.)
+            status: Message status (streaming, complete, error, cancelled)
+            
+        Returns:
+            message_id: Unique identifier for the created message
             
         Example:
-            >>> await add_message("conv_123", "user", "Simulate sugar factory")
-            >>> await add_message("conv_123", "assistant", "Here are the results...")
+            >>> msg_id = await add_message("conv_123", "user", "Simulate sugar factory")
+            >>> msg_id = await add_message("conv_123", "assistant", "", status="streaming")
         """
         context = await self.get_context(conversation_id)
         
@@ -261,10 +259,15 @@ class ContextManager:
         if "messages" not in context:
             context["messages"] = []
         
-        # Create message record
+        # Generate unique message ID
+        message_id = f"msg_{uuid.uuid4().hex[:12]}"
+        
+        # Create message record with message_id and status
         message = {
+            "message_id": message_id,
             "role": role,
             "content": content,
+            "status": status,
             "timestamp": datetime.utcnow().isoformat()
         }
         
@@ -277,7 +280,75 @@ class ContextManager:
         # Save to both storages
         await self._save_to_redis(conversation_id, context)
         await self._save_to_mongo_async(conversation_id, context)
+        
+        return message_id
     
+    async def update_message(
+        self,
+        conversation_id: str,
+        message_id: str,
+        content: Optional[str] = None,
+        status: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None
+    ) -> bool:
+        """
+        Update an existing message by message_id.
+        
+        Used for:
+        - Updating streaming message with final content
+        - Marking message as complete/error/cancelled
+        - Adding metadata after message creation
+        
+        Args:
+            conversation_id: Unique identifier for the conversation
+            message_id: Unique identifier for the message to update
+            content: New content (optional, keeps existing if not provided)
+            status: New status (optional, keeps existing if not provided)
+            metadata: Metadata to merge (optional)
+            
+        Returns:
+            True if message was found and updated, False otherwise
+            
+        Example:
+            >>> await update_message("conv_123", "msg_abc123", 
+            ...     content="Full response text", 
+            ...     status="complete")
+        """
+        context = await self.get_context(conversation_id)
+        
+        if not context or "messages" not in context:
+            return False
+        
+        # Find the message by message_id
+        message_found = False
+        for message in context["messages"]:
+            if message.get("message_id") == message_id:
+                # Update fields if provided
+                if content is not None:
+                    message["content"] = content
+                if status is not None:
+                    message["status"] = status
+                if metadata is not None:
+                    # Merge metadata
+                    existing_metadata = message.get("metadata", {})
+                    existing_metadata.update(metadata)
+                    message["metadata"] = existing_metadata
+                
+                message["updated_at"] = datetime.utcnow().isoformat()
+                message_found = True
+                break
+        
+        if not message_found:
+            return False
+        
+        context["updated_at"] = datetime.utcnow().isoformat()
+        
+        # Save to both storages
+        await self._save_to_redis(conversation_id, context)
+        await self._save_to_mongo_async(conversation_id, context)
+        
+        return True
+
     async def get_messages(self, conversation_id: str) -> List[Dict[str, Any]]:
         """
         Get conversation message history.
@@ -403,7 +474,7 @@ class ContextManager:
                 {"conversation_id": conversation_id}
             )
         except Exception as e:
-            print(f"Warning: Failed to delete context from MongoDB: {e}")
+            pass
     
     # Private helper methods
     
