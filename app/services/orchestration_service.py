@@ -949,27 +949,57 @@ class OrchestrationService:
             # Extract run_id - could be 'calc_run_id' or 'run_id' depending on the tool
             run_id = result.get("calc_run_id") or result.get("run_id")
             
-            # Get current context to retrieve existing run_ids
+            # Get current context to retrieve existing run_ids and params
             context = await self.context_manager.get_context(conversation_id)
             current_run_ids = context.get("run_ids", []) if context else []
             updated_run_ids = [run_id] + current_run_ids
             # Keep only last 10 run IDs
             updated_run_ids = updated_run_ids[:10]
             
-            # Store run_ids array - LLM will call get_run tool if needed
+            # MERGE parameters instead of overwriting
+            # This ensures resolved warnings from equipment simulations persist
+            # across multiple tool calls (e.g., heater params + centrifuge params)
+            existing_params = context.get("simulation_params", {}) if context else {}
+            
+            # Deep merge: equipment-level parameters
+            merged_params = existing_params.copy()
+            
+            # For simulate_equipment, params typically contain equipment-specific settings
+            # Merge nested dicts (like node_params, feeds, etc.)
+            for key, value in params.items():
+                if key in merged_params and isinstance(merged_params[key], dict) and isinstance(value, dict):
+                    # Merge nested dictionaries (e.g., node_params, operating_params)
+                    merged_params[key] = {**merged_params[key], **value}
+                else:
+                    # Overwrite for non-dict values or new keys
+                    merged_params[key] = value
+            
+            # Store merged params - LLM will call get_run tool if needed
             await self.context_manager.update_context(
                 conversation_id,
                 {
-                    "simulation_params": params,
+                    "simulation_params": merged_params,
                     "run_ids": updated_run_ids
                 }
             )
         
         # Update validation params if this was a validation
         if tool_name.startswith("validate_"):
+            # Get current context to merge validation params
+            context = await self.context_manager.get_context(conversation_id)
+            existing_validation_params = context.get("validation_params", {}) if context else {}
+            
+            # Merge validation parameters (same logic as simulation params)
+            merged_validation_params = existing_validation_params.copy()
+            for key, value in params.items():
+                if key in merged_validation_params and isinstance(merged_validation_params[key], dict) and isinstance(value, dict):
+                    merged_validation_params[key] = {**merged_validation_params[key], **value}
+                else:
+                    merged_validation_params[key] = value
+            
             await self.context_manager.update_context(
                 conversation_id,
-                {"validation_params": params}
+                {"validation_params": merged_validation_params}
             )
     
     # =========================================================================
