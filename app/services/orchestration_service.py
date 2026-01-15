@@ -40,7 +40,7 @@ MAX_RECENT_MESSAGES = 10  # Keep last N messages in full detail
 DISCOVERY_TOOLS = {"list_industries", "list_processes", "get_process", "get_equipment_types", "get_equipment_schema", "get_stream_schema"}
 VALIDATION_TOOLS = {"validate_process_inputs", "validate_connections", "validate_equipment_inputs"}
 SIMULATION_TOOLS = {"simulate_process", "simulate_equipment"}
-RUN_TOOLS = {"get_run", "compare_runs"}
+RUN_TOOLS = {"get_run", "compare_runs", "list_runs"}
 CORE_TOOLS = SIMULATION_TOOLS | VALIDATION_TOOLS  # Always include these
 from app.services.tool_registry import ToolRegistry
 from app.services.event_emitter import EventEmitter
@@ -630,13 +630,13 @@ class OrchestrationService:
                 context_info.append(f"Process: {context['current_process']}")
             system_parts.append("Current context: " + ", ".join(context_info))
         
-        # Add last run reference for follow-up questions
+        # Add run history reference for follow-up questions
         run_ids = context.get("run_ids", [])
         if run_ids:
-            latest_run_id = run_ids[0]  # Newest is always first
-            system_parts.append(f"\nLast simulation run_id: {latest_run_id} - use get_run tool if user asks about previous results.")
-            if len(run_ids) > 1:
-                system_parts.append(f"Previous run_ids available: {run_ids[1:]} - use compare_runs to compare simulations.")
+            system_parts.append(f"\n{len(run_ids)} simulation(s) in this conversation.")
+            system_parts.append(f"Use list_runs to see all run IDs, get_run to retrieve details, compare_runs to compare.")
+        else:
+            system_parts.append(f"\nNo simulations yet. Use list_runs to check history.")
         
         system = "\n".join(system_parts)
         
@@ -1036,6 +1036,10 @@ class OrchestrationService:
                     "error": "MCP server is unavailable",
                     "message": f"Cannot execute {tool_name}: MCP server connection lost"
                 }
+            
+            # Inject conversation_id for list_runs tool
+            if tool_name == "list_runs" and conversation_id:
+                params["conversation_id"] = conversation_id
             
             # For simulation tools, emit progress events to show user activity
             is_simulation = tool_name in ["simulate_process", "simulate_equipment"]

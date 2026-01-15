@@ -157,8 +157,8 @@ class MessageHistoryItem(BaseModel):
         ...,
         description="Message content"
     )
-    timestamp: datetime = Field(
-        ...,
+    timestamp: Optional[datetime] = Field(
+        default=None,
         description="When the message was created"
     )
     status: Optional[str] = Field(
@@ -266,8 +266,8 @@ class ConversationListItem(BaseModel):
     title: Optional[str] = Field(default=None, description="Conversation title (first user message)")
     message_count: int = Field(default=0, description="Number of messages in conversation")
     has_simulations: bool = Field(default=False, description="Whether any simulations were run")
-    created_at: datetime = Field(..., description="When the conversation was created")
-    updated_at: datetime = Field(..., description="When the conversation was last updated")
+    created_at: Optional[datetime] = Field(default=None, description="When the conversation was created")
+    updated_at: Optional[datetime] = Field(default=None, description="When the conversation was last updated")
 
 
 class ConversationListResponse(BaseModel):

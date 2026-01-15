@@ -692,3 +692,36 @@ class ToolRegistry:
             prerequisites=[],
             risk_level="safe"
         ))
+        
+        self.register_tool(ToolMetadata(
+            name="list_runs",
+            description="List all simulation runs in the current conversation",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "conversation_id": {
+                        "type": "string",
+                        "description": "Conversation identifier"
+                    }
+                },
+                "required": ["conversation_id"]
+            },
+            output_schema={
+                "type": "object",
+                "properties": {
+                    "status": {"type": "string"},
+                    "conversation_id": {"type": "string"},
+                    "run_ids": {
+                        "type": "array",
+                        "items": {"type": "string"}
+                    },
+                    "count": {"type": "integer"},
+                    "newest": {"type": "string"},
+                    "oldest": {"type": "string"}
+                }
+            },
+            domain="generic",
+            category="lookup",
+            prerequisites=[],
+            risk_level="safe"
+        ))
