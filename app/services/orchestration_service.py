@@ -36,11 +36,55 @@ from app.services.context_manager import ContextManager
 # =============================================================================
 MAX_RECENT_MESSAGES = 10  # Keep last N messages in full detail
 
+# =============================================================================
+# MCP Server Tool Mappings (Unique tool names per server)
+# =============================================================================
+
+# Tools belonging to MCP Process Server (Sugar Industry, etc.)
+PROCESS_SERVER_TOOLS = {
+    # Discovery
+    "list_industries", "list_processes", "get_process", 
+    "get_equipment_types", "get_process_equipment_schema", "get_stream_schema",
+    # Validation
+    "validate_process_inputs", "validate_process_connections", "validate_equipment_inputs",
+    # Simulation
+    "simulate_process", "simulate_equipment",
+    # Run Management (process-prefixed)
+    "get_process_run", "compare_process_runs", "list_process_runs"
+}
+
+# Tools belonging to MCP Dynamic Server (Generic Simulations)
+DYNAMIC_SERVER_TOOLS = {
+    # Discovery
+    "list_dynamic_processes", "get_process_template", "get_dynamic_equipment_schema",
+    # Validation
+    "validate_compounds", "validate_equipment_params", 
+    "validate_feed_streams", "validate_dynamic_connections", "validate_flowsheet",
+    # Simulation
+    "simulate_dynamic", "build_flowsheet",
+    # Run Management (dynamic-prefixed)
+    "get_dynamic_run", "compare_dynamic_runs", "list_dynamic_runs"
+}
+
+# Industries handled by Process Server
+PROCESS_SERVER_INDUSTRIES = {"sugar"}
+
 # Tool categories for context-aware filtering
-DISCOVERY_TOOLS = {"list_industries", "list_processes", "get_process", "get_equipment_types", "get_equipment_schema", "get_stream_schema"}
-VALIDATION_TOOLS = {"validate_process_inputs", "validate_connections", "validate_equipment_inputs"}
-SIMULATION_TOOLS = {"simulate_process", "simulate_equipment"}
-RUN_TOOLS = {"get_run", "compare_runs", "list_runs"}
+DISCOVERY_TOOLS = {
+    "list_industries", "list_processes", "get_process", "get_equipment_types", 
+    "get_process_equipment_schema", "get_stream_schema",
+    "list_dynamic_processes", "get_process_template", "get_dynamic_equipment_schema"
+}
+VALIDATION_TOOLS = {
+    "validate_process_inputs", "validate_process_connections", "validate_equipment_inputs",
+    "validate_compounds", "validate_equipment_params", "validate_feed_streams",
+    "validate_dynamic_connections", "validate_flowsheet"
+}
+SIMULATION_TOOLS = {"simulate_process", "simulate_equipment", "simulate_dynamic"}
+RUN_TOOLS = {
+    "get_process_run", "compare_process_runs", "list_process_runs",
+    "get_dynamic_run", "compare_dynamic_runs", "list_dynamic_runs"
+}
 CORE_TOOLS = SIMULATION_TOOLS | VALIDATION_TOOLS  # Always include these
 from app.services.tool_registry import ToolRegistry
 from app.services.event_emitter import EventEmitter
@@ -94,6 +138,10 @@ class OrchestrationService:
     - Backend executes tools and returns results
     - LLM sees results (success AND errors) and decides next action
     - Loop continues until LLM provides final text response
+    
+    Supports two MCP servers:
+    - Process Server: Industry-specific simulations (sugar, etc.)
+    - Dynamic Server: Generic dynamic simulations (distillation, IPA recovery, etc.)
     """
     
     def __init__(
@@ -102,6 +150,7 @@ class OrchestrationService:
         tool_registry: ToolRegistry,
         policy_engine: PolicyEngine,
         mcp_client: MCPClient,
+        mcp_dynamic_client: MCPClient = None,
         event_emitter: Optional[EventEmitter] = None,
         anthropic_api_key: str = None
     ):
@@ -112,14 +161,16 @@ class OrchestrationService:
             context_manager: Context tracking service
             tool_registry: Tool metadata registry
             policy_engine: Policy enforcement engine
-            mcp_client: MCP client for tool execution
+            mcp_client: MCP Process Server client (sugar industry, etc.)
+            mcp_dynamic_client: MCP Dynamic Server client (generic simulations)
             event_emitter: Event emitter for real-time updates (optional)
             anthropic_api_key: Anthropic API key for Claude
         """
         self.context_manager = context_manager
         self.tool_registry = tool_registry
         self.policy_engine = policy_engine
-        self.mcp_client = mcp_client
+        self.mcp_client = mcp_client  # Process Server (sugar)
+        self.mcp_dynamic_client = mcp_dynamic_client  # Dynamic Server (generic)
         self.event_emitter = event_emitter
         
         # Initialize Claude LLM provider
@@ -444,7 +495,7 @@ class OrchestrationService:
                         )
                     
                     tool_start_time = datetime.now()
-                    result = await self._execute_tool(tool_name, tool_params, conversation_id)
+                    result = await self._execute_tool(tool_name, tool_params, conversation_id, context)
                     tool_duration_ms = int((datetime.now() - tool_start_time).total_seconds() * 1000)
                     
                     # Emit tool end
@@ -634,9 +685,9 @@ class OrchestrationService:
         run_ids = context.get("run_ids", [])
         if run_ids:
             system_parts.append(f"\n{len(run_ids)} simulation(s) in this conversation.")
-            system_parts.append(f"Use list_runs to see all run IDs, get_run to retrieve details, compare_runs to compare.")
+            system_parts.append(f"Use list_process_runs or list_dynamic_runs to see run IDs, get_process_run/get_dynamic_run to retrieve details, compare_process_runs/compare_dynamic_runs to compare.")
         else:
-            system_parts.append(f"\nNo simulations yet. Use list_runs to check history.")
+            system_parts.append(f"\nNo simulations yet. Use list_process_runs or list_dynamic_runs to check history.")
         
         system = "\n".join(system_parts)
         
@@ -944,8 +995,55 @@ class OrchestrationService:
             result
         )
         
+        # Update industry context from discovery tools
+        if tool_name == "list_industries" and result.get("status") == "success":
+            # User is exploring industries - no change yet
+            pass
+        
+        if tool_name in ["list_processes", "get_process"] and result.get("industry_id"):
+            # Update current industry and MCP server from result
+            await self.context_manager.update_context(
+                conversation_id,
+                {
+                    "current_industry": result.get("industry_id"),
+                    "current_mcp_server": "process"  # Process server handles industry-specific
+                }
+            )
+        
+        if tool_name == "list_dynamic_processes" and result.get("industry_id"):
+            # Dynamic server - update industry context and server
+            await self.context_manager.update_context(
+                conversation_id,
+                {
+                    "current_industry": result.get("industry_id"),
+                    "current_mcp_server": "dynamic"  # Dynamic server for generic simulations
+                }
+            )
+        
+        if tool_name == "get_process_template" and result.get("industry_id"):
+            # Dynamic server - update industry and server from template
+            await self.context_manager.update_context(
+                conversation_id,
+                {
+                    "current_industry": result.get("industry_id"),
+                    "current_mcp_server": "dynamic"  # Dynamic server for templates
+                }
+            )
+        
         # Update simulation params if this was a simulation
-        if tool_name in ["simulate_process", "simulate_equipment"]:
+        if tool_name in ["simulate_process", "simulate_equipment", "simulate_dynamic"]:
+            # Track which server executed the simulation
+            if tool_name == "simulate_dynamic":
+                await self.context_manager.update_context(
+                    conversation_id,
+                    {"current_mcp_server": "dynamic"}
+                )
+            elif tool_name in ["simulate_process", "simulate_equipment"]:
+                await self.context_manager.update_context(
+                    conversation_id,
+                    {"current_mcp_server": "process"}
+                )
+            
             # Extract run_id - could be 'calc_run_id' or 'run_id' depending on the tool
             run_id = result.get("calc_run_id") or result.get("run_id")
             
@@ -1008,20 +1106,54 @@ class OrchestrationService:
     
     async def _get_available_tools(self, context: Dict[str, Any] = None) -> List[Dict[str, Any]]:
         """
-        Get available tools from MCP server, filtered by context.
+        Get available tools from both MCP servers, filtered by context.
         
-        Filters tools based on conversation state to reduce token usage:
-        - Always include: simulation and validation tools
-        - If last_run_id exists: include run tools (get_run, compare_runs)
-        - If no process context: include discovery tools
+        Routes to appropriate server based on:
+        - Industry context (sugar → process server, generic → dynamic server)
+        - If no context, provides tools from both servers
         
         Args:
             context: Current conversation context
             
         Returns:
-            Filtered list of tools
+            List of tools from appropriate server(s)
         """
-        all_tools = await self.mcp_client.list_tools()
+        current_industry = context.get("current_industry") if context else None
+        
+        # Determine which server(s) to use based on industry
+        if current_industry and current_industry.lower() in PROCESS_SERVER_INDUSTRIES:
+            # Sugar industry - use Process Server only
+            all_tools = await self.mcp_client.list_tools()
+            server_tag = "process"
+        elif current_industry and current_industry.lower() not in PROCESS_SERVER_INDUSTRIES:
+            # Non-sugar industry - use Dynamic Server only
+            if self.mcp_dynamic_client:
+                all_tools = await self.mcp_dynamic_client.list_tools()
+                server_tag = "dynamic"
+            else:
+                # Fallback to process server if dynamic not available
+                all_tools = await self.mcp_client.list_tools()
+                server_tag = "process"
+        else:
+            # No industry context - provide tools from both servers
+            process_tools = await self.mcp_client.list_tools()
+            
+            # Tag process server tools
+            for tool in process_tools:
+                if hasattr(tool, '__dict__'):
+                    tool._server = "process"
+            
+            if self.mcp_dynamic_client:
+                dynamic_tools = await self.mcp_dynamic_client.list_tools()
+                # Tag dynamic server tools
+                for tool in dynamic_tools:
+                    if hasattr(tool, '__dict__'):
+                        tool._server = "dynamic"
+                all_tools = process_tools + dynamic_tools
+            else:
+                all_tools = process_tools
+            
+            server_tag = None  # Mixed
         
         if context is None:
             return all_tools
@@ -1045,6 +1177,99 @@ class OrchestrationService:
         
         return filtered_tools
     
+    def _get_mcp_client_for_tool(self, tool_name: str, context: Dict[str, Any] = None) -> MCPClient:
+        """
+        Determine which MCP client to use for a given tool.
+        
+        With unique tool names per server, routing is now straightforward:
+        - Process Server tools have "process" prefix (e.g., get_process_run)
+        - Dynamic Server tools have "dynamic" prefix (e.g., get_dynamic_run)
+        - Or are unique to that server (e.g., simulate_process vs simulate_dynamic)
+        
+        Args:
+            tool_name: Name of the tool to execute
+            context: Current conversation context
+            
+        Returns:
+            Appropriate MCPClient instance
+        """
+        # Check if dynamic client is available
+        if not self.mcp_dynamic_client:
+            return self.mcp_client
+        
+        # Direct routing based on tool name membership (no overlap!)
+        if tool_name in PROCESS_SERVER_TOOLS:
+            return self.mcp_client
+        
+        if tool_name in DYNAMIC_SERVER_TOOLS:
+            return self.mcp_dynamic_client
+        
+        # Fallback: check industry context for unknown tools
+        current_industry = context.get("current_industry", "").lower() if context else ""
+        if current_industry in PROCESS_SERVER_INDUSTRIES:
+            return self.mcp_client
+        
+        # Default to dynamic server (more generic)
+        return self.mcp_dynamic_client
+    
+    async def _get_combined_industries(self) -> Dict[str, Any]:
+        """
+        Get industries from both MCP servers and combine them.
+        
+        Returns combined list with source server tagged.
+        """
+        combined_industries = []
+        
+        # Get from Process Server
+        try:
+            process_result = await self.mcp_client.call_tool("list_industries", {})
+            if isinstance(process_result, str):
+                import json
+                process_result = json.loads(process_result)
+            
+            if process_result.get("status") == "success":
+                for industry in process_result.get("industries", []):
+                    if isinstance(industry, dict):
+                        industry["_source"] = "process_server"
+                        combined_industries.append(industry)
+                    else:
+                        combined_industries.append({
+                            "industry_id": industry,
+                            "display_name": industry.replace("_", " ").title(),
+                            "_source": "process_server"
+                        })
+        except Exception as e:
+            print(f"Warning: Failed to get industries from Process Server: {e}")
+        
+        # Get from Dynamic Server
+        if self.mcp_dynamic_client:
+            try:
+                dynamic_result = await self.mcp_dynamic_client.call_tool("list_dynamic_processes", {})
+                if isinstance(dynamic_result, str):
+                    import json
+                    dynamic_result = json.loads(dynamic_result)
+                
+                # Dynamic server returns processes, but we extract the industry
+                if dynamic_result.get("status") == "success":
+                    industry_id = dynamic_result.get("industry_id", "dynamic_simulation")
+                    # Add as an industry option
+                    combined_industries.append({
+                        "industry_id": industry_id,
+                        "display_name": "Dynamic Simulation",
+                        "description": "Generic chemical process simulations (distillation, IPA recovery, etc.)",
+                        "process_count": dynamic_result.get("count", 0),
+                        "_source": "dynamic_server"
+                    })
+            except Exception as e:
+                print(f"Warning: Failed to get industries from Dynamic Server: {e}")
+        
+        return {
+            "status": "success",
+            "industries": combined_industries,
+            "count": len(combined_industries),
+            "hint": "Use list_processes with industry_id for sugar, or list_dynamic_processes for dynamic simulations."
+        }
+    
     def _get_tool_name(self, tool: Any) -> str:
         """Extract tool name from tool object or dict."""
         if isinstance(tool, dict):
@@ -1055,24 +1280,38 @@ class OrchestrationService:
         self,
         tool_name: str,
         params: Dict[str, Any],
-        conversation_id: Optional[str] = None
+        conversation_id: Optional[str] = None,
+        context: Dict[str, Any] = None
     ) -> Dict[str, Any]:
-        """Execute tool via MCP client with progress tracking for simulations."""
+        """
+        Execute tool via appropriate MCP client with progress tracking.
+        
+        Routes to correct MCP server based on tool name and context.
+        Special handling for discovery tools to combine results from both servers.
+        """
         try:
+            # Special case: list_industries should combine results from both servers
+            if tool_name == "list_industries" and self.mcp_dynamic_client:
+                return await self._get_combined_industries()
+            
+            # Get the appropriate MCP client for this tool
+            mcp_client = self._get_mcp_client_for_tool(tool_name, context)
+            
             # Quick health check before expensive tool execution
-            if not await self.mcp_client.health_check():
+            if not await mcp_client.health_check():
+                server_name = "Dynamic" if mcp_client == self.mcp_dynamic_client else "Process"
                 return {
                     "status": "error",
-                    "error": "MCP server is unavailable",
+                    "error": f"MCP {server_name} server is unavailable",
                     "message": f"Cannot execute {tool_name}: MCP server connection lost"
                 }
             
-            # Inject conversation_id for list_runs tool
-            if tool_name == "list_runs" and conversation_id:
+            # Inject conversation_id for list_runs tools (both process and dynamic)
+            if tool_name in ["list_process_runs", "list_dynamic_runs"] and conversation_id:
                 params["conversation_id"] = conversation_id
             
             # For simulation tools, emit progress events to show user activity
-            is_simulation = tool_name in ["simulate_process", "simulate_equipment"]
+            is_simulation = tool_name in ["simulate_process", "simulate_equipment", "simulate_dynamic"]
             if is_simulation and self.event_emitter and conversation_id:
                 # Emit initial progress - starting simulation
                 await self.event_emitter.emit_run_progress(
@@ -1082,7 +1321,7 @@ class OrchestrationService:
                     message=f"Starting {tool_name.replace('_', ' ')}..."
                 )
             
-            result = await self.mcp_client.call_tool(tool_name, params)
+            result = await mcp_client.call_tool(tool_name, params)
             
             # Emit completion progress for simulations
             if is_simulation and self.event_emitter and conversation_id:

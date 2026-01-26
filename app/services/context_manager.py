@@ -86,6 +86,7 @@ class ContextManager:
             "user_id": user_id,
             "current_industry": None,
             "current_process": None,
+            "current_mcp_server": None,  # "process" | "dynamic" - tracks which MCP server is active
             "simulation_params": {},
             "executed_tools": [],
             "messages": [],  # Conversation history for multi-turn
@@ -168,6 +169,48 @@ class ContextManager:
         # Save to both storages
         await self._save_to_redis(conversation_id, context)
         await self._save_to_mongo_async(conversation_id, context)
+    
+    async def update_mcp_server(
+        self,
+        conversation_id: str,
+        server: str
+    ) -> None:
+        """
+        Update the current MCP server for a conversation.
+        
+        This allows switching between process and dynamic servers mid-conversation
+        when a user asks about a different industry or process type.
+        
+        Args:
+            conversation_id: Unique identifier for the conversation
+            server: Server identifier ("process" or "dynamic")
+            
+        Raises:
+            ValueError: If server is not "process" or "dynamic"
+            
+        Example:
+            >>> await update_mcp_server("conv_123", "dynamic")
+        """
+        if server not in ("process", "dynamic"):
+            raise ValueError(f"Invalid MCP server: {server}. Must be 'process' or 'dynamic'")
+        
+        await self.update_context(
+            conversation_id,
+            {"current_mcp_server": server}
+        )
+    
+    async def get_mcp_server(self, conversation_id: str) -> Optional[str]:
+        """
+        Get the current MCP server for a conversation.
+        
+        Args:
+            conversation_id: Unique identifier for the conversation
+            
+        Returns:
+            Current MCP server ("process" or "dynamic") or None if not set
+        """
+        context = await self.get_context(conversation_id)
+        return context.get("current_mcp_server") if context else None
     
     async def add_tool_execution(
         self,
