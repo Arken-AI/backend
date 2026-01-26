@@ -61,15 +61,59 @@ class PolicyEngine:
     # Tool categorization (Manual for MVP simplicity)
     # These match the tools defined in Tool Registry
     # TODO: Switch to dynamic Tool Registry lookup post-MVP if tool count grows
-    VALIDATION_TOOLS = {
+    
+    # ========================================
+    # PROCESS SERVER - Validation Tools
+    # ========================================
+    PROCESS_VALIDATION_TOOLS = {
         "validate_process_inputs",
-        "validate_connections",
+        "validate_process_connections",
         "validate_equipment_inputs"
     }
     
-    SIMULATION_TOOLS = {
+    # ========================================
+    # DYNAMIC SERVER - Validation Tools
+    # ========================================
+    DYNAMIC_VALIDATION_TOOLS = {
+        "validate_compounds",
+        "validate_equipment_params",
+        "validate_feed_streams",
+        "validate_dynamic_connections",
+        "validate_flowsheet"
+    }
+    
+    # Combined validation tools (for backward compatibility)
+    VALIDATION_TOOLS = PROCESS_VALIDATION_TOOLS | DYNAMIC_VALIDATION_TOOLS
+    
+    # ========================================
+    # PROCESS SERVER - Simulation Tools
+    # ========================================
+    PROCESS_SIMULATION_TOOLS = {
         "simulate_process",
         "simulate_equipment"
+    }
+    
+    # ========================================
+    # DYNAMIC SERVER - Simulation Tools
+    # ========================================
+    DYNAMIC_SIMULATION_TOOLS = {
+        "simulate_dynamic"
+    }
+    
+    # Combined simulation tools (for backward compatibility)
+    SIMULATION_TOOLS = PROCESS_SIMULATION_TOOLS | DYNAMIC_SIMULATION_TOOLS
+    
+    # ========================================
+    # PREREQUISITE MAPPINGS
+    # Maps simulation tools to their required validation tools
+    # ========================================
+    PREREQUISITE_MAP = {
+        # Process Server: simulate_process requires validate_process_inputs
+        "simulate_process": ["validate_process_inputs"],
+        # Process Server: simulate_equipment requires validate_equipment_inputs
+        "simulate_equipment": ["validate_equipment_inputs"],
+        # Dynamic Server: simulate_dynamic requires validate_flowsheet (comprehensive)
+        "simulate_dynamic": ["validate_flowsheet"],
     }
     
     def __init__(self):
@@ -105,8 +149,8 @@ class PolicyEngine:
             if prereq_result.decision == PolicyDecision.DENY:
                 return prereq_result
             
-            # Check 3: Validation age (if validation exists)
-            age_result = self.check_validation_age(context)
+            # Check 3: Validation age (if validation exists) - pass tool_name for server-aware checking
+            age_result = self.check_validation_age(context, tool_name)
             if age_result.decision != PolicyDecision.ALLOW:
                 return age_result
             
@@ -119,7 +163,7 @@ class PolicyEngine:
         # All checks passed - include age_result metadata if available
         metadata = {}
         if tool_name in self.SIMULATION_TOOLS:
-            age_result = self.check_validation_age(context)
+            age_result = self.check_validation_age(context, tool_name)
             if age_result.metadata:
                 metadata = age_result.metadata
         
@@ -139,6 +183,13 @@ class PolicyEngine:
         
         Rule: Must run validation before simulation
         
+        Uses PREREQUISITE_MAP for precise tool-to-prerequisite mappings:
+        - simulate_process → validate_process_inputs
+        - simulate_equipment → validate_equipment_inputs
+        - simulate_dynamic → validate_flowsheet
+        
+        Falls back to server-level validation tool sets if not in map.
+        
         Args:
             tool_name: Tool to check prerequisites for
             context: Conversation context
@@ -153,10 +204,46 @@ class PolicyEngine:
                 reason="No prerequisites required"
             )
         
-        # Check if any validation tool was executed
+        # Check PREREQUISITE_MAP first for precise requirements
+        if tool_name in self.PREREQUISITE_MAP:
+            required_tools = self.PREREQUISITE_MAP[tool_name]
+            executed_tools = context.get("executed_tools", [])
+            executed_tool_names = {tool["tool_name"] for tool in executed_tools}
+            
+            # Check if ALL required prerequisites were executed
+            missing_prereqs = [t for t in required_tools if t not in executed_tool_names]
+            
+            if missing_prereqs:
+                return PolicyResult(
+                    decision=PolicyDecision.DENY,
+                    reason=(
+                        f"Cannot run {tool_name} without prerequisite validation. "
+                        f"Please run {', '.join(missing_prereqs)} first."
+                    ),
+                    metadata={"required_tools": required_tools, "missing": missing_prereqs}
+                )
+            
+            return PolicyResult(
+                decision=PolicyDecision.ALLOW,
+                reason=f"Prerequisite(s) {', '.join(required_tools)} found"
+            )
+        
+        # Fallback: Determine which validation tools are accepted based on server
+        if tool_name in self.PROCESS_SIMULATION_TOOLS:
+            required_validation_tools = self.PROCESS_VALIDATION_TOOLS
+            suggestion = "Please run validate_process_inputs first."
+        elif tool_name in self.DYNAMIC_SIMULATION_TOOLS:
+            required_validation_tools = self.DYNAMIC_VALIDATION_TOOLS
+            suggestion = "Please run validate_flowsheet first."
+        else:
+            # Fallback: accept any validation tool
+            required_validation_tools = self.VALIDATION_TOOLS
+            suggestion = "Please run validation first."
+        
+        # Check if appropriate validation tool was executed
         executed_tools = context.get("executed_tools", [])
         validation_executed = any(
-            tool["tool_name"] in self.VALIDATION_TOOLS
+            tool["tool_name"] in required_validation_tools
             for tool in executed_tools
         )
         
@@ -164,10 +251,10 @@ class PolicyEngine:
             return PolicyResult(
                 decision=PolicyDecision.DENY,
                 reason=(
-                    "Cannot simulate without validation. "
-                    "Please run validate_process_inputs first."
+                    f"Cannot run {tool_name} without validation. "
+                    f"{suggestion}"
                 ),
-                metadata={"required_tools": list(self.VALIDATION_TOOLS)}
+                metadata={"required_tools": list(required_validation_tools)}
             )
         
         return PolicyResult(
@@ -177,25 +264,39 @@ class PolicyEngine:
     
     def check_validation_age(
         self,
-        context: Dict[str, Any]
+        context: Dict[str, Any],
+        tool_name: str = None
     ) -> PolicyResult:
         """
         Check if validation is still fresh (< 10 minutes old).
         
         Rule: Validation expires after 10 minutes
         
+        Server-aware: Checks for validation from the appropriate server
+        based on the simulation tool being executed.
+        
         Args:
             context: Conversation context
+            tool_name: Optional simulation tool name for server-specific checking
             
         Returns:
             ALLOW if validation fresh, DENY if expired
         """
         executed_tools = context.get("executed_tools", [])
         
-        # Find most recent validation
+        # Determine which validation tools to look for based on simulation type
+        if tool_name and tool_name in self.PROCESS_SIMULATION_TOOLS:
+            target_validation_tools = self.PROCESS_VALIDATION_TOOLS
+        elif tool_name and tool_name in self.DYNAMIC_SIMULATION_TOOLS:
+            target_validation_tools = self.DYNAMIC_VALIDATION_TOOLS
+        else:
+            # Check any validation tool
+            target_validation_tools = self.VALIDATION_TOOLS
+        
+        # Find most recent validation from the appropriate server
         validation_tool = None
         for tool in reversed(executed_tools):
-            if tool["tool_name"] in self.VALIDATION_TOOLS:
+            if tool["tool_name"] in target_validation_tools:
                 validation_tool = tool
                 break
         
