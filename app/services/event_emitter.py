@@ -235,6 +235,10 @@ class EventEmitter:
         if isinstance(status, str):
             status = ToolStatus(status)
         
+        # Ensure error_message is a string (defensive conversion)
+        if error_message is not None and not isinstance(error_message, str):
+            error_message = str(error_message)
+        
         event = ToolEndEvent(
             request_id=request_id,
             tool_name=tool_name,

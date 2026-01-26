@@ -266,6 +266,10 @@ class OrchestrationService:
             all_tool_results = []
             total_tool_calls = 0
             
+            # Track repeated errors to stop loop early
+            recent_errors = []  # Store last N error messages
+            MAX_REPEATED_ERRORS = 2  # Stop if same error occurs this many times
+            
             # Build conversation history for multi-turn
             # Load previous messages from context for continuity
             previous_messages = await self.context_manager.get_messages(conversation_id)
@@ -513,6 +517,9 @@ class OrchestrationService:
                         status = "success" if result.get("status") == "success" else "error"
                         summary = result.get("message", f"{tool_name} completed")
                         error_msg = result.get("error") if status == "error" else None
+                        # Ensure error_message is always a string, not a list or other type
+                        if error_msg is not None and not isinstance(error_msg, str):
+                            error_msg = str(error_msg)
                         await self.event_emitter.emit_tool_end(
                             conversation_id,
                             tool_name,
@@ -535,6 +542,61 @@ class OrchestrationService:
                     
                     # Add to results - include BOTH success AND error results
                     # This is the key: LLM needs to see errors to recover!
+                    
+                    # If simulation failed and we have validated params, add recovery hint
+                    if tool_name in ["simulate_dynamic", "simulate_process"] and result.get("status") in ["error", "failed", "simulation_failed"]:
+                        validation_params = context.get("validation_params")
+                        if validation_params:
+                            result["recovery_hint"] = (
+                                "RECOVERY: Validation previously passed. Use the EXACT parameters from validation_params. "
+                                "Check that: 1) All equipment IDs match, 2) Edges only reference equipment IDs (not 'feed'), "
+                                "3) Feed streams use target_equipment to specify where they connect."
+                            )
+                            # Include the validated structure for easy reference
+                            result["validated_equipment_ids"] = [eq.get("id") for eq in validation_params.get("equipment", [])]
+                            result["validated_edge_count"] = len(validation_params.get("edges", []))
+                    
+                    # Track errors for repeated error detection
+                    if result.get("status") in ["error", "failed", "simulation_failed"]:
+                        error_key = f"{tool_name}:{result.get('error', '')[:100]}"  # Normalize error for comparison
+                        recent_errors.append(error_key)
+                        
+                        # Check for repeated errors
+                        if len(recent_errors) >= MAX_REPEATED_ERRORS:
+                            # Count occurrences of the latest error
+                            latest_error = recent_errors[-1]
+                            error_count = sum(1 for e in recent_errors if e == latest_error)
+                            
+                            if error_count >= MAX_REPEATED_ERRORS:
+                                # Same error repeated - stop the loop
+                                error_message = (
+                                    f"I encountered the same error {MAX_REPEATED_ERRORS} times and cannot proceed further. "
+                                    f"The error was: {result.get('error', 'Unknown error')}\n\n"
+                                    f"**Suggestion**: Please check your input parameters or try a different approach. "
+                                    f"The simulation may require different equipment configuration or feed stream setup."
+                                )
+                                
+                                # Update assistant message with error
+                                await self.context_manager.update_message(
+                                    conversation_id,
+                                    assistant_message_id,
+                                    content=error_message,
+                                    status=MessageStatus.ERROR,
+                                    metadata={"repeated_error": True, "error_count": error_count}
+                                )
+                                
+                                if self.event_emitter:
+                                    await self.event_emitter.emit_thinking_end(conversation_id, 0)
+                                
+                                return {
+                                    "status": "error",
+                                    "message": error_message,
+                                    "reason": "repeated_error",
+                                    "error_count": error_count,
+                                    "tool_calls": all_tool_results,
+                                    "conversation_id": conversation_id
+                                }
+                    
                     iteration_tool_results.append({
                         "name": tool_name,
                         "result": result
@@ -677,9 +739,21 @@ class OrchestrationService:
         The LLM sees the full history and decides what to do next.
         Uses non-streaming API - response delivered via HTTP.
         """
-        # Build system prompt - Claude is naturally agentic, minimal prompting needed
+        # Build system prompt with simulation rules and error recovery guidance
         system_parts = [
-            "You are a process simulation assistant with tools for industrial process simulation."
+            "You are a process simulation assistant with tools for industrial process simulation.",
+            "",
+            "CRITICAL SIMULATION RULES:",
+            "1. ALWAYS call validate_flowsheet BEFORE simulate_dynamic to check your configuration",
+            "2. If simulation fails AFTER validation passed, use the EXACT SAME parameters from validation",
+            "3. Feed streams connect DIRECTLY to equipment via target_equipment field - NOT through edges",
+            "4. Edges ONLY connect equipment to equipment (source and target must both be equipment IDs)",
+            "5. Never use 'feed' as a source in edges - feed_streams handle feed injection separately",
+            "",
+            "ERROR RECOVERY:",
+            "- If you see 'Source node X not found': Check that all edge sources are valid equipment IDs",
+            "- If validation passed but simulation failed: Use validation_params from context (shown below)",
+            "- Always ensure equipment, edges, and feed_streams are consistent across validate and simulate calls",
         ]
         
         # Add context if available
@@ -689,7 +763,23 @@ class OrchestrationService:
                 context_info.append(f"Industry: {context['current_industry']}")
             if context.get("current_process"):
                 context_info.append(f"Process: {context['current_process']}")
-            system_parts.append("Current context: " + ", ".join(context_info))
+            system_parts.append("\nCurrent context: " + ", ".join(context_info))
+        
+        # Add validated parameters if available (for error recovery)
+        validation_params = context.get("validation_params")
+        if validation_params:
+            system_parts.append("\n--- VALIDATED PARAMETERS (use these for simulate_dynamic if validation passed) ---")
+            # Include key structural info
+            if validation_params.get("equipment"):
+                eq_ids = [eq.get("id") for eq in validation_params.get("equipment", [])]
+                system_parts.append(f"Equipment IDs: {eq_ids}")
+            if validation_params.get("edges"):
+                edge_summary = [f"{e.get('source')} -> {e.get('target')}" for e in validation_params.get("edges", [])]
+                system_parts.append(f"Edges: {edge_summary}")
+            if validation_params.get("feed_streams"):
+                feed_summary = [f"{f.get('stream_id')} -> {f.get('target_equipment')}" for f in validation_params.get("feed_streams", [])]
+                system_parts.append(f"Feed streams: {feed_summary}")
+            system_parts.append("--- END VALIDATED PARAMETERS ---")
         
         # Add run history reference for follow-up questions
         run_ids = context.get("run_ids", [])
@@ -1402,10 +1492,11 @@ class OrchestrationService:
                     "data": result
                 }
         except Exception as e:
+            error_str = str(e)
             return {
                 "status": "error",
-                "error": str(e),
-                "message": f"Tool {tool_name} failed: {str(e)}"
+                "error": error_str,
+                "message": f"Tool {tool_name} failed: {error_str}"
             }
     
     # =========================================================================
