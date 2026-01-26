@@ -71,27 +71,51 @@ class Settings(BaseSettings):
     )
     
     # =============================================================================
-    # MCP Server Configuration
+    # MCP Process Server Configuration (Sugar Industry, etc.)
     # =============================================================================
     mcp_server_command: str = Field(
         ...,
-        description="Path to Python interpreter for MCP server"
+        description="Path to Python interpreter for MCP process server"
     )
     mcp_server_args: str = Field(
         ...,
-        description="Path to MCP server.py file"
+        description="Path to MCP process server.py file"
     )
     mcp_server_env_calc_engine_url: str = Field(
         default="http://localhost:8000",
-        description="Calculation engine API URL"
+        description="Calculation engine API URL for process server"
     )
     mcp_server_env_max_stored_runs: int = Field(
         default=1000,
-        description="Maximum stored runs in MCP server"
+        description="Maximum stored runs in MCP process server"
     )
     mcp_server_env_mongodb_uri: str = Field(
         ...,
-        description="MongoDB URI for MCP server"
+        description="MongoDB URI for MCP process server (arken_process_db)"
+    )
+    
+    # =============================================================================
+    # MCP Dynamic Server Configuration (Generic Simulations)
+    # =============================================================================
+    mcp_dynamic_server_command: str = Field(
+        ...,
+        description="Path to Python interpreter for MCP dynamic server"
+    )
+    mcp_dynamic_server_args: str = Field(
+        ...,
+        description="Path to MCP dynamic server.py file"
+    )
+    mcp_dynamic_server_env_calc_engine_url: str = Field(
+        default="http://localhost:8000",
+        description="Calculation engine API URL for dynamic server"
+    )
+    mcp_dynamic_server_env_max_stored_runs: int = Field(
+        default=1000,
+        description="Maximum stored runs in MCP dynamic server"
+    )
+    mcp_dynamic_server_env_mongodb_uri: str = Field(
+        ...,
+        description="MongoDB URI for MCP dynamic server (mcp_dynamic_server)"
     )
     
     # =============================================================================
