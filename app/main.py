@@ -9,7 +9,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api import stream, health, chat, test_stream
-from app.dependencies import close_redis_client
+from app.dependencies import close_redis_client, close_mcp_clients
 from app.config import settings
 
 
@@ -20,12 +20,13 @@ async def lifespan(app: FastAPI):
     
     Handles startup and shutdown events:
     - Startup: Initialize connections
-    - Shutdown: Close Redis, MongoDB, etc.
+    - Shutdown: Close Redis, MongoDB, MCP clients, etc.
     """
     # Startup
     yield
     
     # Shutdown
+    await close_mcp_clients()  # Close both MCP server connections
     await close_redis_client()
 
 
