@@ -224,15 +224,18 @@ class OrchestrationService:
         
         try:
             # Step 0: Health check - fail fast if MCP server is unavailable
-            if not await self.mcp_client.health_check():
-                error_msg = "MCP server is unavailable. Please ensure the server is running and try again."
+            process_server_healthy = await self.mcp_client.health_check()
+            dynamic_server_healthy = await self.mcp_dynamic_client.health_check() if self.mcp_dynamic_client else True
+            
+            if not process_server_healthy and not dynamic_server_healthy:
+                error_msg = "Both MCP servers are unavailable. Please ensure at least one server is running and try again."
                 
                 if self.event_emitter:
                     await self.event_emitter.emit_app_error(
                         conversation_id,
                         "mcp_server_unavailable",
                         error_msg,
-                        details={"check": "health_check"},
+                        details={"check": "health_check", "process_server": process_server_healthy, "dynamic_server": dynamic_server_healthy},
                         recoverable=False
                     )
                 
@@ -246,6 +249,12 @@ class OrchestrationService:
                         "total_tokens": 0
                     }
                 }
+            
+            # Log partial availability for debugging
+            if not process_server_healthy:
+                print(f"WARNING: Process server unavailable, using dynamic server only")
+            if not dynamic_server_healthy:
+                print(f"WARNING: Dynamic server unavailable, using process server only")
             
             # Step 1: Load or create context
             context = await self._get_or_create_context(conversation_id, user_id)
@@ -1050,9 +1059,14 @@ class OrchestrationService:
             # Get current context to retrieve existing run_ids and params
             context = await self.context_manager.get_context(conversation_id)
             current_run_ids = context.get("run_ids", []) if context else []
-            updated_run_ids = [run_id] + current_run_ids
-            # Keep only last 10 run IDs
-            updated_run_ids = updated_run_ids[:10]
+            
+            # Only add run_id if it's not None
+            if run_id:
+                updated_run_ids = [run_id] + current_run_ids
+                # Keep only last 10 run IDs
+                updated_run_ids = updated_run_ids[:10]
+            else:
+                updated_run_ids = current_run_ids
             
             # MERGE parameters instead of overwriting
             # This ensures resolved warnings from equipment simulations persist

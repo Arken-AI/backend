@@ -509,7 +509,10 @@ class ContextManager:
         """
         # Remove from Redis
         redis_key = self._redis_key(conversation_id)
-        self.redis.delete(redis_key)
+        try:
+            await self.redis.delete(redis_key)
+        except Exception as e:
+            print(f"Warning: Failed to delete context from Redis: {e}")
         
         # Remove from MongoDB
         try:
@@ -517,7 +520,7 @@ class ContextManager:
                 {"conversation_id": conversation_id}
             )
         except Exception as e:
-            pass
+            print(f"Warning: Failed to delete context from MongoDB: {e}")
     
     # Private helper methods
     
