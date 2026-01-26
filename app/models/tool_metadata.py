@@ -95,6 +95,13 @@ class ToolMetadata(BaseModel):
         examples=[["mill", "heater"], None]
     )
     
+    source_server: Optional[str] = Field(
+        default=None,
+        description="MCP server that provides this tool ('process', 'dynamic', or None for shared)",
+        pattern="^(process|dynamic)$",
+        examples=["process", "dynamic", None]
+    )
+    
     class Config:
         """Pydantic model configuration."""
         json_schema_extra = {
@@ -121,7 +128,8 @@ class ToolMetadata(BaseModel):
                 "category": "simulate",
                 "prerequisites": ["validate_process_inputs"],
                 "risk_level": "gated",
-                "equipment_types": None
+                "equipment_types": None,
+                "source_server": "process"
             }
         }
     
@@ -150,3 +158,23 @@ class ToolMetadata(BaseModel):
         if self.equipment_types is None:
             return True  # Applies to all equipment
         return equipment_type in self.equipment_types
+    
+    def is_from_server(self, server: str) -> bool:
+        """
+        Check if this tool is from a specific MCP server.
+        
+        Args:
+            server: Server to check ("process" or "dynamic")
+            
+        Returns:
+            True if tool is from the specified server
+        """
+        return self.source_server == server
+    
+    def is_process_server_tool(self) -> bool:
+        """Check if this tool is from the MCP Process Server."""
+        return self.source_server == "process"
+    
+    def is_dynamic_server_tool(self) -> bool:
+        """Check if this tool is from the MCP Dynamic Server."""
+        return self.source_server == "dynamic"
