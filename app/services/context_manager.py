@@ -101,7 +101,7 @@ class ContextManager:
         
         return context
     
-    async def get_context(self, conversation_id: str) -> Dict[str, Any]:
+    async def get_context(self, conversation_id: str) -> Optional[Dict[str, Any]]:
         """
         Retrieve conversation context.
         
@@ -111,11 +111,12 @@ class ContextManager:
             conversation_id: Unique identifier for the conversation
             
         Returns:
-            Context dictionary or empty dict if not found
+            Context dictionary or None if not found
             
         Example:
             >>> context = get_context("conv_123")
-            >>> print(context.get("current_industry"))
+            >>> if context:
+            ...     print(context.get("current_industry"))
             'sugar'
         """
         # Try Redis first (fast)
@@ -132,7 +133,7 @@ class ContextManager:
             await self._save_to_redis(conversation_id, context)
             return context
         
-        return {}
+        return None
     
     async def update_context(
         self,

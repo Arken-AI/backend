@@ -278,18 +278,19 @@ class OrchestrationService:
             for msg in previous_messages[-10:]:
                 content = msg.get("content", "")
                 status = msg.get("status", "complete")
+                has_tool_calls = bool(msg.get("tool_calls") or msg.get("metadata", {}).get("tool_calls"))
                 
-                # Skip empty messages or incomplete streaming messages
-                if not content or not content.strip():
-                    continue
-                    
-                # Skip messages that are still streaming or have errors with no content
+                # Skip messages that are still streaming
                 if status == "streaming":
+                    continue
+                
+                # Skip empty messages UNLESS they have tool_calls (valid intermediate state)
+                if (not content or not content.strip()) and not has_tool_calls:
                     continue
                 
                 conversation_history.append({
                     "role": msg["role"],
-                    "content": content
+                    "content": content if content and content.strip() else "[Tool execution in progress]"
                 })
             
             # Add current user message
@@ -1152,22 +1153,17 @@ class OrchestrationService:
             # No industry context - provide tools from both servers
             process_tools = await self.mcp_client.list_tools()
             
-            # Tag process server tools
-            for tool in process_tools:
-                if hasattr(tool, '__dict__'):
-                    tool._server = "process"
+            # Tag process server tools using tool name lookup (more reliable than runtime attributes)
+            # Tool routing is handled by _get_mcp_client_for_tool using PROCESS_SERVER_TOOLS/DYNAMIC_SERVER_TOOLS sets
+            # No need to tag individual tools - the sets define which server handles each tool
             
             if self.mcp_dynamic_client:
                 dynamic_tools = await self.mcp_dynamic_client.list_tools()
-                # Tag dynamic server tools
-                for tool in dynamic_tools:
-                    if hasattr(tool, '__dict__'):
-                        tool._server = "dynamic"
                 all_tools = process_tools + dynamic_tools
             else:
                 all_tools = process_tools
             
-            server_tag = None  # Mixed
+            server_tag = None  # Mixed - routing handled by tool name membership in PROCESS_SERVER_TOOLS/DYNAMIC_SERVER_TOOLS
         
         if context is None:
             return all_tools
@@ -1257,9 +1253,11 @@ class OrchestrationService:
                 if process_result.get("status") == "success":
                     for process in process_result.get("processes", []):
                         if isinstance(process, dict):
-                            process["_source"] = "process_server"
-                            process["_industry"] = process_result.get("industry", "sugar")
-                            combined_processes.append(process)
+                            # Create copy to avoid mutating original cached dict
+                            process_copy = process.copy()
+                            process_copy["_source"] = "process_server"
+                            process_copy["_industry"] = process_result.get("industry", "sugar")
+                            combined_processes.append(process_copy)
                         else:
                             combined_processes.append({
                                 "process_id": process,
@@ -1285,9 +1283,11 @@ class OrchestrationService:
                 if dynamic_result.get("status") == "success":
                     for process in dynamic_result.get("processes", []):
                         if isinstance(process, dict):
-                            process["_source"] = "dynamic_server"
-                            process["_industry"] = dynamic_result.get("industry_id", "dynamic_simulation")
-                            combined_processes.append(process)
+                            # Create copy to avoid mutating original cached dict
+                            process_copy = process.copy()
+                            process_copy["_source"] = "dynamic_server"
+                            process_copy["_industry"] = dynamic_result.get("industry_id", "dynamic_simulation")
+                            combined_processes.append(process_copy)
                         else:
                             combined_processes.append({
                                 "process_id": process,
