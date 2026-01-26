@@ -1226,62 +1226,84 @@ class OrchestrationService:
         # Default to dynamic server (more generic)
         return self.mcp_dynamic_client
     
-    async def _get_combined_industries(self) -> Dict[str, Any]:
+    async def _get_combined_processes(self, industry_id: Optional[str] = None) -> Dict[str, Any]:
         """
-        Get industries from both MCP servers and combine them.
+        Get processes from both MCP servers and combine them.
         
-        Returns combined list with source server tagged.
-        """
-        combined_industries = []
+        If industry_id is provided, filters to that industry.
+        If no industry_id, returns processes from all industries/servers.
         
-        # Get from Process Server
-        try:
-            process_result = await self.mcp_client.call_tool("list_industries", {})
-            if isinstance(process_result, str):
-                import json
-                process_result = json.loads(process_result)
+        Args:
+            industry_id: Optional industry filter (e.g., "sugar", "dynamic_simulation")
             
-            if process_result.get("status") == "success":
-                for industry in process_result.get("industries", []):
-                    if isinstance(industry, dict):
-                        industry["_source"] = "process_server"
-                        combined_industries.append(industry)
-                    else:
-                        combined_industries.append({
-                            "industry_id": industry,
-                            "display_name": industry.replace("_", " ").title(),
-                            "_source": "process_server"
-                        })
-        except Exception as e:
-            print(f"Warning: Failed to get industries from Process Server: {e}")
+        Returns:
+            Combined list of processes with source server tagged.
+        """
+        combined_processes = []
+        
+        # Determine which servers to query based on industry_id
+        query_process_server = industry_id is None or industry_id.lower() in PROCESS_SERVER_INDUSTRIES
+        query_dynamic_server = industry_id is None or industry_id.lower() not in PROCESS_SERVER_INDUSTRIES
+        
+        # Get from Process Server (sugar industry)
+        if query_process_server:
+            try:
+                params = {"industry_id": industry_id} if industry_id and industry_id.lower() in PROCESS_SERVER_INDUSTRIES else {"industry_id": "sugar"}
+                process_result = await self.mcp_client.call_tool("list_processes", params)
+                if isinstance(process_result, str):
+                    import json
+                    process_result = json.loads(process_result)
+                
+                if process_result.get("status") == "success":
+                    for process in process_result.get("processes", []):
+                        if isinstance(process, dict):
+                            process["_source"] = "process_server"
+                            process["_industry"] = process_result.get("industry", "sugar")
+                            combined_processes.append(process)
+                        else:
+                            combined_processes.append({
+                                "process_id": process,
+                                "display_name": process.replace("_", " ").title(),
+                                "_source": "process_server",
+                                "_industry": "sugar"
+                            })
+            except Exception as e:
+                print(f"Warning: Failed to get processes from Process Server: {e}")
         
         # Get from Dynamic Server
-        if self.mcp_dynamic_client:
+        if query_dynamic_server and self.mcp_dynamic_client:
             try:
-                dynamic_result = await self.mcp_dynamic_client.call_tool("list_dynamic_processes", {})
+                params = {}
+                if industry_id and industry_id.lower() not in PROCESS_SERVER_INDUSTRIES:
+                    params["industry_id"] = industry_id
+                
+                dynamic_result = await self.mcp_dynamic_client.call_tool("list_dynamic_processes", params)
                 if isinstance(dynamic_result, str):
                     import json
                     dynamic_result = json.loads(dynamic_result)
                 
-                # Dynamic server returns processes, but we extract the industry
                 if dynamic_result.get("status") == "success":
-                    industry_id = dynamic_result.get("industry_id", "dynamic_simulation")
-                    # Add as an industry option
-                    combined_industries.append({
-                        "industry_id": industry_id,
-                        "display_name": "Dynamic Simulation",
-                        "description": "Generic chemical process simulations (distillation, IPA recovery, etc.)",
-                        "process_count": dynamic_result.get("count", 0),
-                        "_source": "dynamic_server"
-                    })
+                    for process in dynamic_result.get("processes", []):
+                        if isinstance(process, dict):
+                            process["_source"] = "dynamic_server"
+                            process["_industry"] = dynamic_result.get("industry_id", "dynamic_simulation")
+                            combined_processes.append(process)
+                        else:
+                            combined_processes.append({
+                                "process_id": process,
+                                "display_name": process.replace("_", " ").title(),
+                                "_source": "dynamic_server",
+                                "_industry": "dynamic_simulation"
+                            })
             except Exception as e:
-                print(f"Warning: Failed to get industries from Dynamic Server: {e}")
+                print(f"Warning: Failed to get processes from Dynamic Server: {e}")
         
         return {
             "status": "success",
-            "industries": combined_industries,
-            "count": len(combined_industries),
-            "hint": "Use list_processes with industry_id for sugar, or list_dynamic_processes for dynamic simulations."
+            "processes": combined_processes,
+            "count": len(combined_processes),
+            "industries_included": list(set(p.get("_industry", "unknown") for p in combined_processes)),
+            "hint": "Use get_process for sugar processes or get_process_template for dynamic processes to see full details."
         }
     
     def _get_tool_name(self, tool: Any) -> str:
@@ -1304,9 +1326,16 @@ class OrchestrationService:
         Special handling for discovery tools to combine results from both servers.
         """
         try:
-            # Special case: list_industries should combine results from both servers
-            if tool_name == "list_industries" and self.mcp_dynamic_client:
-                return await self._get_combined_industries()
+            # Special case: list_processes without specific industry should combine both servers
+            # If industry_id is not provided or is None, show processes from all servers
+            if tool_name == "list_processes" and self.mcp_dynamic_client:
+                industry_id = params.get("industry_id")
+                # If no industry specified, combine from both servers
+                if not industry_id:
+                    return await self._get_combined_processes()
+                # If industry is not sugar-specific, redirect to dynamic server
+                elif industry_id.lower() not in PROCESS_SERVER_INDUSTRIES:
+                    return await self._get_combined_processes(industry_id)
             
             # Get the appropriate MCP client for this tool
             mcp_client = self._get_mcp_client_for_tool(tool_name, context)
