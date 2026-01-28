@@ -268,7 +268,7 @@ class OrchestrationService:
             
             # Track repeated errors to stop loop early
             recent_errors = []  # Store last N error messages
-            MAX_REPEATED_ERRORS = 2  # Stop if same error occurs this many times
+            MAX_REPEATED_ERRORS = 3  # Stop if same error occurs this many times
             
             # Build conversation history for multi-turn
             # Load previous messages from context for continuity
@@ -541,20 +541,7 @@ class OrchestrationService:
                     context = await self.context_manager.get_context(conversation_id)
                     
                     # Add to results - include BOTH success AND error results
-                    # This is the key: LLM needs to see errors to recover!
-                    
-                    # If simulation failed and we have validated params, add recovery hint
-                    if tool_name in ["simulate_dynamic", "simulate_process"] and result.get("status") in ["error", "failed", "simulation_failed"]:
-                        validation_params = context.get("validation_params")
-                        if validation_params:
-                            result["recovery_hint"] = (
-                                "RECOVERY: Validation previously passed. Use the EXACT parameters from validation_params. "
-                                "Check that: 1) All equipment IDs match, 2) Edges only reference equipment IDs (not 'feed'), "
-                                "3) Feed streams use target_equipment to specify where they connect."
-                            )
-                            # Include the validated structure for easy reference
-                            result["validated_equipment_ids"] = [eq.get("id") for eq in validation_params.get("equipment", [])]
-                            result["validated_edge_count"] = len(validation_params.get("edges", []))
+                    # Claude sees errors and decides how to recover based on tool descriptions
                     
                     # Track errors for repeated error detection
                     if result.get("status") in ["error", "failed", "simulation_failed"]:
@@ -568,34 +555,12 @@ class OrchestrationService:
                             error_count = sum(1 for e in recent_errors if e == latest_error)
                             
                             if error_count >= MAX_REPEATED_ERRORS:
-                                # Same error repeated - stop the loop
-                                error_message = (
-                                    f"I encountered the same error {MAX_REPEATED_ERRORS} times and cannot proceed further. "
-                                    f"The error was: {result.get('error', 'Unknown error')}\n\n"
-                                    f"**Suggestion**: Please check your input parameters or try a different approach. "
-                                    f"The simulation may require different equipment configuration or feed stream setup."
+                                # Same error repeated - add hint to result and let Claude respond
+                                # Don't force exit - let the loop continue so Claude can generate response
+                                result["repeated_error_notice"] = (
+                                    f"This same error has occurred {error_count} times. "
+                                    f"Please explain the issue to the user and ask for clarification or suggest alternatives."
                                 )
-                                
-                                # Update assistant message with error
-                                await self.context_manager.update_message(
-                                    conversation_id,
-                                    assistant_message_id,
-                                    content=error_message,
-                                    status=MessageStatus.ERROR,
-                                    metadata={"repeated_error": True, "error_count": error_count}
-                                )
-                                
-                                if self.event_emitter:
-                                    await self.event_emitter.emit_thinking_end(conversation_id, 0)
-                                
-                                return {
-                                    "status": "error",
-                                    "message": error_message,
-                                    "reason": "repeated_error",
-                                    "error_count": error_count,
-                                    "tool_calls": all_tool_results,
-                                    "conversation_id": conversation_id
-                                }
                     
                     iteration_tool_results.append({
                         "name": tool_name,
@@ -655,9 +620,9 @@ class OrchestrationService:
                 for tc in all_tool_results
             ]
             
-            # Return partial results
+            # Return success - agentic loop completed, Claude's message explains partial results
             return {
-                "status": "error",
+                "status": "success",
                 "message": error_message,
                 "tool_calls": all_tool_results,
                 "tool_executions": tool_executions,
