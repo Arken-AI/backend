@@ -729,7 +729,7 @@ class OrchestrationService:
         assistant_message_id: Optional[str] = None
     ) -> Any:
         """
-        Call LLM with full conversation history using STREAMING.
+        Call LLM with full conversation history.
         
         This enables the agentic loop by preserving:
         - User message
@@ -737,57 +737,28 @@ class OrchestrationService:
         - Tool results (success and errors)
         
         The LLM sees the full history and decides what to do next.
-        Uses non-streaming API - response delivered via HTTP.
+        Claude will learn from tool descriptions and error messages to determine workflow.
         """
-        # Build system prompt with simulation rules and error recovery guidance
+        # Build minimal system prompt - let Claude learn from tool descriptions and errors
         system_parts = [
-            "You are a process simulation assistant with tools for industrial process simulation.",
-            "",
-            "CRITICAL SIMULATION RULES:",
-            "1. ALWAYS call validate_flowsheet BEFORE simulate_dynamic to check your configuration",
-            "2. If simulation fails AFTER validation passed, use the EXACT SAME parameters from validation",
-            "3. Feed streams connect DIRECTLY to equipment via target_equipment field - NOT through edges",
-            "4. Edges ONLY connect equipment to equipment (source and target must both be equipment IDs)",
-            "5. Never use 'feed' as a source in edges - feed_streams handle feed injection separately",
-            "",
-            "ERROR RECOVERY:",
-            "- If you see 'Source node X not found': Check that all edge sources are valid equipment IDs",
-            "- If validation passed but simulation failed: Use validation_params from context (shown below)",
-            "- Always ensure equipment, edges, and feed_streams are consistent across validate and simulate calls",
+            "You are a process simulation assistant with access to tools for industrial process simulation.",
+            "Use the available tools to help users. If a tool fails, read the error message to understand what went wrong.",
+            "If you need more information from the user to proceed, ask them directly.",
         ]
         
-        # Add context if available
+        # Add current context if available (industry, process)
         if context.get("current_industry") or context.get("current_process"):
             context_info = []
             if context.get("current_industry"):
                 context_info.append(f"Industry: {context['current_industry']}")
             if context.get("current_process"):
                 context_info.append(f"Process: {context['current_process']}")
-            system_parts.append("\nCurrent context: " + ", ".join(context_info))
-        
-        # Add validated parameters if available (for error recovery)
-        validation_params = context.get("validation_params")
-        if validation_params:
-            system_parts.append("\n--- VALIDATED PARAMETERS (use these for simulate_dynamic if validation passed) ---")
-            # Include key structural info
-            if validation_params.get("equipment"):
-                eq_ids = [eq.get("id") for eq in validation_params.get("equipment", [])]
-                system_parts.append(f"Equipment IDs: {eq_ids}")
-            if validation_params.get("edges"):
-                edge_summary = [f"{e.get('source')} -> {e.get('target')}" for e in validation_params.get("edges", [])]
-                system_parts.append(f"Edges: {edge_summary}")
-            if validation_params.get("feed_streams"):
-                feed_summary = [f"{f.get('stream_id')} -> {f.get('target_equipment')}" for f in validation_params.get("feed_streams", [])]
-                system_parts.append(f"Feed streams: {feed_summary}")
-            system_parts.append("--- END VALIDATED PARAMETERS ---")
+            system_parts.append(f"\nCurrent context: {', '.join(context_info)}")
         
         # Add run history reference for follow-up questions
         run_ids = context.get("run_ids", [])
         if run_ids:
-            system_parts.append(f"\n{len(run_ids)} simulation(s) in this conversation.")
-            system_parts.append(f"Use list_process_runs or list_dynamic_runs to see run IDs, get_process_run/get_dynamic_run to retrieve details, compare_process_runs/compare_dynamic_runs to compare.")
-        else:
-            system_parts.append(f"\nNo simulations yet. Use list_process_runs or list_dynamic_runs to check history.")
+            system_parts.append(f"\n{len(run_ids)} previous simulation(s) available in this conversation.")
         
         system = "\n".join(system_parts)
         
