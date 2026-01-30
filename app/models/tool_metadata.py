@@ -97,9 +97,9 @@ class ToolMetadata(BaseModel):
     
     source_server: Optional[str] = Field(
         default=None,
-        description="MCP server that provides this tool ('process', 'dynamic', or None for shared)",
-        pattern="^(process|dynamic)$",
-        examples=["process", "dynamic", None]
+        description="MCP server that provides this tool ('process' or None for shared)",
+        pattern="^(process)$",
+        examples=["process", None]
     )
     
     class Config:
@@ -164,7 +164,7 @@ class ToolMetadata(BaseModel):
         Check if this tool is from a specific MCP server.
         
         Args:
-            server: Server to check ("process" or "dynamic")
+            server: Server to check ("process")
             
         Returns:
             True if tool is from the specified server
@@ -174,7 +174,3 @@ class ToolMetadata(BaseModel):
     def is_process_server_tool(self) -> bool:
         """Check if this tool is from the MCP Process Server."""
         return self.source_server == "process"
-    
-    def is_dynamic_server_tool(self) -> bool:
-        """Check if this tool is from the MCP Dynamic Server."""
-        return self.source_server == "dynamic"

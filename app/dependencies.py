@@ -133,52 +133,13 @@ async def get_mcp_client() -> MCPClient:
     return _mcp_client
 
 
-# =============================================================================
-# MCP Dynamic Server Client (Generic Simulations)
-# =============================================================================
-
-_mcp_dynamic_client: MCPClient | None = None
-
-
-async def get_mcp_dynamic_client() -> MCPClient:
-    """
-    Dependency to get MCP Dynamic Server client instance (singleton).
-    
-    Used for generic dynamic simulations (distillation, IPA recovery, etc.)
-    
-    Returns:
-        MCPClient: MCP dynamic server client
-    """
-    global _mcp_dynamic_client
-    
-    if _mcp_dynamic_client is None:
-        config = MCPServerConfig(
-            command=settings.mcp_dynamic_server_command,
-            args=[settings.mcp_dynamic_server_args],
-            env={
-                "CALC_ENGINE_API_URL": settings.mcp_dynamic_server_env_calc_engine_url,
-                "MAX_STORED_RUNS": str(settings.mcp_dynamic_server_env_max_stored_runs),
-                "MONGODB_URI": settings.mcp_dynamic_server_env_mongodb_uri
-            }
-        )
-        _mcp_dynamic_client = MCPClient(config)
-        # Initialize connection
-        await _mcp_dynamic_client.connect()
-    
-    return _mcp_dynamic_client
-
-
 async def close_mcp_clients():
-    """Close both MCP clients on application shutdown."""
-    global _mcp_client, _mcp_dynamic_client
+    """Close MCP client on application shutdown."""
+    global _mcp_client
     
     if _mcp_client:
         await _mcp_client.disconnect()
         _mcp_client = None
-    
-    if _mcp_dynamic_client:
-        await _mcp_dynamic_client.disconnect()
-        _mcp_dynamic_client = None
 
 
 # =============================================================================
@@ -189,14 +150,12 @@ async def get_orchestration_service(
     redis_client: redis.Redis = Depends(get_redis_client),
     mongo_client: MongoClient = Depends(get_mongo_client),
     mcp_client: MCPClient = Depends(get_mcp_client),
-    mcp_dynamic_client: MCPClient = Depends(get_mcp_dynamic_client),
     event_emitter: EventEmitter = Depends(get_event_emitter)
 ) -> OrchestrationService:
     """
     Dependency to get OrchestrationService instance.
     
     Creates a new instance per request with all required dependencies.
-    Injects both MCP clients for routing based on industry/process type.
     
     Returns:
         OrchestrationService: Orchestration service instance
@@ -210,13 +169,12 @@ async def get_orchestration_service(
     tool_registry = ToolRegistry()
     policy_engine = PolicyEngine()  # PolicyEngine takes no arguments
     
-    # Create orchestration service with both MCP clients
+    # Create orchestration service with MCP client
     orchestration = OrchestrationService(
         context_manager=context_manager,
         tool_registry=tool_registry,
         policy_engine=policy_engine,
         mcp_client=mcp_client,
-        mcp_dynamic_client=mcp_dynamic_client,
         event_emitter=event_emitter,
         anthropic_api_key=settings.anthropic_api_key
     )

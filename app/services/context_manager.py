@@ -86,7 +86,7 @@ class ContextManager:
             "user_id": user_id,
             "current_industry": None,
             "current_process": None,
-            "current_mcp_server": None,  # "process" | "dynamic" - tracks which MCP server is active
+            "current_mcp_server": None,  # "process" - tracks which MCP server is active
             "simulation_params": {},
             "executed_tools": [],
             "messages": [],  # Conversation history for multi-turn
@@ -179,21 +179,20 @@ class ContextManager:
         """
         Update the current MCP server for a conversation.
         
-        This allows switching between process and dynamic servers mid-conversation
-        when a user asks about a different industry or process type.
+        Currently only supports 'process' server (MCP Process Server).
         
         Args:
             conversation_id: Unique identifier for the conversation
-            server: Server identifier ("process" or "dynamic")
+            server: Server identifier ("process")
             
         Raises:
-            ValueError: If server is not "process" or "dynamic"
+            ValueError: If server is not "process"
             
         Example:
-            >>> await update_mcp_server("conv_123", "dynamic")
+            >>> await update_mcp_server("conv_123", "process")
         """
-        if server not in ("process", "dynamic"):
-            raise ValueError(f"Invalid MCP server: {server}. Must be 'process' or 'dynamic'")
+        if server != "process":
+            raise ValueError(f"Invalid MCP server: {server}. Must be 'process'")
         
         await self.update_context(
             conversation_id,
@@ -208,7 +207,7 @@ class ContextManager:
             conversation_id: Unique identifier for the conversation
             
         Returns:
-            Current MCP server ("process" or "dynamic") or None if not set
+            Current MCP server ("process") or None if not set
         """
         context = await self.get_context(conversation_id)
         return context.get("current_mcp_server") if context else None

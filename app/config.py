@@ -95,30 +95,6 @@ class Settings(BaseSettings):
     )
     
     # =============================================================================
-    # MCP Dynamic Server Configuration (Generic Simulations)
-    # =============================================================================
-    mcp_dynamic_server_command: str = Field(
-        ...,
-        description="Path to Python interpreter for MCP dynamic server"
-    )
-    mcp_dynamic_server_args: str = Field(
-        ...,
-        description="Path to MCP dynamic server.py file"
-    )
-    mcp_dynamic_server_env_calc_engine_url: str = Field(
-        default="http://localhost:8000",
-        description="Calculation engine API URL for dynamic server"
-    )
-    mcp_dynamic_server_env_max_stored_runs: int = Field(
-        default=1000,
-        description="Maximum stored runs in MCP dynamic server"
-    )
-    mcp_dynamic_server_env_mongodb_uri: str = Field(
-        ...,
-        description="MongoDB URI for MCP dynamic server (mcp_dynamic_server)"
-    )
-    
-    # =============================================================================
     # LLM Provider Configuration
     # =============================================================================
     anthropic_api_key: Optional[str] = Field(
