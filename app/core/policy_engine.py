@@ -71,8 +71,15 @@ class PolicyEngine:
         "validate_equipment_inputs"
     }
     
+    # ========================================
+    # CALC ENGINE SERVER - Validation Tools
+    # ========================================
+    CALC_ENGINE_VALIDATION_TOOLS = {
+        "validate_parameters"
+    }
+    
     # All validation tools
-    VALIDATION_TOOLS = PROCESS_VALIDATION_TOOLS
+    VALIDATION_TOOLS = PROCESS_VALIDATION_TOOLS | CALC_ENGINE_VALIDATION_TOOLS
     
     # ========================================
     # PROCESS SERVER - Simulation Tools
@@ -82,8 +89,42 @@ class PolicyEngine:
         "simulate_equipment"
     }
     
+    # ========================================
+    # CALC ENGINE SERVER - Simulation Tools
+    # ========================================
+    CALC_ENGINE_SIMULATION_TOOLS = {
+        "calc_simulate_process"
+    }
+    
     # All simulation tools
-    SIMULATION_TOOLS = PROCESS_SIMULATION_TOOLS
+    SIMULATION_TOOLS = PROCESS_SIMULATION_TOOLS | CALC_ENGINE_SIMULATION_TOOLS
+    
+    # ========================================
+    # CALC ENGINE SERVER - Parameter Editing Tools
+    # ========================================
+    CALC_ENGINE_PARAMETER_TOOLS = {
+        "get_editable_parameters",
+        "edit_parameters",
+        "get_user_parameters",
+        "switch_parameter_version",
+        "compare_parameters"
+    }
+    
+    # ========================================
+    # CALC ENGINE SERVER - Discovery Tools
+    # ========================================
+    CALC_ENGINE_DISCOVERY_TOOLS = {
+        "calc_list_processes",
+        "calc_get_process"
+    }
+    
+    # ========================================
+    # CALC ENGINE SERVER - Run Management Tools
+    # ========================================
+    CALC_ENGINE_RUN_TOOLS = {
+        "calc_get_run",
+        "calc_list_runs"
+    }
     
     # ========================================
     # PREREQUISITE MAPPINGS
@@ -94,6 +135,17 @@ class PolicyEngine:
         "simulate_process": ["validate_process_inputs"],
         # Process Server: simulate_equipment requires validate_equipment_inputs
         "simulate_equipment": ["validate_equipment_inputs"],
+        # Calc Engine: calc_simulate_process requires validate_parameters
+        "calc_simulate_process": ["validate_parameters"],
+    }
+    
+    # ========================================
+    # PARAMETER TOOL PREREQUISITES
+    # Maps parameter tools to their required discovery tools
+    # ========================================
+    PARAMETER_PREREQ_MAP = {
+        # Must get editable parameters before editing
+        "edit_parameters": ["get_editable_parameters"],
     }
     
     def __init__(self):
@@ -123,18 +175,24 @@ class PolicyEngine:
         if budget_result.decision == PolicyDecision.DENY:
             return budget_result
         
-        # Check 2: Prerequisite check (only for simulation tools)
+        # Check 2: Parameter tool prerequisites (for calc engine edit tools)
+        if tool_name in self.PARAMETER_PREREQ_MAP:
+            prereq_result = self.check_parameter_tool_prerequisite(tool_name, context)
+            if prereq_result.decision == PolicyDecision.DENY:
+                return prereq_result
+        
+        # Check 3: Prerequisite check (only for simulation tools)
         if tool_name in self.SIMULATION_TOOLS:
             prereq_result = self.check_prerequisite(tool_name, context)
             if prereq_result.decision == PolicyDecision.DENY:
                 return prereq_result
             
-            # Check 3: Validation age (if validation exists) - pass tool_name for server-aware checking
+            # Check 4: Validation age (if validation exists) - pass tool_name for server-aware checking
             age_result = self.check_validation_age(context, tool_name)
             if age_result.decision != PolicyDecision.ALLOW:
                 return age_result
             
-            # Check 4: Parameter changes (if params provided)
+            # Check 5: Parameter changes (if params provided)
             if params:
                 param_result = self.check_parameters_changed(context, params)
                 if param_result.decision == PolicyDecision.DENY:
@@ -151,6 +209,50 @@ class PolicyEngine:
             decision=PolicyDecision.ALLOW,
             reason=f"All policy checks passed for tool: {tool_name}",
             metadata=metadata if metadata else None
+        )
+    
+    def check_parameter_tool_prerequisite(
+        self,
+        tool_name: str,
+        context: Dict[str, Any]
+    ) -> PolicyResult:
+        """
+        Check if parameter editing tools have their prerequisites met.
+        
+        Rule: Must call get_editable_parameters before edit_parameters
+        
+        Args:
+            tool_name: Tool to check prerequisites for
+            context: Conversation context
+            
+        Returns:
+            ALLOW if prerequisites met, DENY otherwise
+        """
+        if tool_name not in self.PARAMETER_PREREQ_MAP:
+            return PolicyResult(
+                decision=PolicyDecision.ALLOW,
+                reason="No parameter tool prerequisites required"
+            )
+        
+        required_tools = self.PARAMETER_PREREQ_MAP[tool_name]
+        executed_tools = context.get("executed_tools", [])
+        executed_tool_names = {tool["tool_name"] for tool in executed_tools}
+        
+        missing_prereqs = [t for t in required_tools if t not in executed_tool_names]
+        
+        if missing_prereqs:
+            return PolicyResult(
+                decision=PolicyDecision.DENY,
+                reason=(
+                    f"Cannot run {tool_name} without first calling {', '.join(missing_prereqs)}. "
+                    f"This ensures you know what parameters are available to edit."
+                ),
+                metadata={"missing_prerequisites": missing_prereqs}
+            )
+        
+        return PolicyResult(
+            decision=PolicyDecision.ALLOW,
+            reason="Parameter tool prerequisites met"
         )
     
     def check_prerequisite(
