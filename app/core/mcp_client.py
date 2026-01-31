@@ -72,8 +72,15 @@ class MCPServerConfig:
     @classmethod
     def from_env_process_server(cls) -> "MCPServerConfig":
         """Load MCP process server config from environment variables"""
+        # Check if process server is enabled (default: true if command is set)
         command = os.getenv("MCP_SERVER_COMMAND")
+        enabled = os.getenv("MCP_PROCESS_SERVER_ENABLED", "true").lower() == "true"
         args_str = os.getenv("MCP_SERVER_ARGS", "")
+        cwd = os.getenv("MCP_SERVER_CWD")
+        
+        # If no command configured, disable the server
+        if not command:
+            enabled = False
         
         # Parse args (single path or comma-separated)
         args = [args_str] if args_str and "," not in args_str else args_str.split(",")
@@ -87,10 +94,11 @@ class MCPServerConfig:
         
         return cls(
             name="process_server",
-            command=command,
+            command=command or "",  # Ensure command is never None
             args=args,
             env=env,
-            enabled=True
+            cwd=cwd,
+            enabled=enabled
         )
     
     @classmethod

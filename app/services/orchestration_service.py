@@ -69,6 +69,24 @@ RUN_TOOLS = {
     "get_process_run", "compare_process_runs", "list_process_runs"
 }
 CORE_TOOLS = SIMULATION_TOOLS | VALIDATION_TOOLS  # Always include these
+
+# Tools that require user_id to be injected from context
+TOOLS_REQUIRING_USER_ID = {
+    # Process Server tools (optional but useful for run tracking)
+    "simulate_process", "simulate_equipment",
+    "list_process_runs",  # Required for listing user's runs
+    # Calc Engine Phase 1 tools (calc_ prefixed)
+    "calc_get_process",  # Optional: merges user's active version
+    "calc_simulate_process",  # Required
+    "calc_get_run", "calc_list_runs",  # Required for run tracking
+    # Calc Engine Phase 2 tools (parameter versioning)
+    "get_editable_parameters",  # Required
+    "validate_parameters",  # Uses user overrides for validation context
+    "edit_parameters",  # Required: saves to user's version
+    "get_user_parameters",  # Required: retrieves user's versions
+    "switch_parameter_version",  # Required: changes user's active version
+    "compare_parameters",  # Required: compares user's versions
+}
 from app.services.tool_registry import ToolRegistry
 from app.services.event_emitter import EventEmitter
 from app.core.policy_engine import PolicyEngine, PolicyDecision
@@ -1292,8 +1310,15 @@ class OrchestrationService:
                     "user_friendly": True
                 }
             
-            # Inject conversation_id for list_runs tools
-            if tool_name == "list_process_runs" and conversation_id:
+            # Inject user_id and conversation_id for tools that need them
+            if tool_name in TOOLS_REQUIRING_USER_ID:
+                # Get user_id from context if not already provided
+                if "user_id" not in params or not params["user_id"]:
+                    user_id = context.get("user_id", "default_user") if context else "default_user"
+                    params["user_id"] = user_id
+            
+            # Inject conversation_id for list_runs tools (for filtering)
+            if tool_name in ("list_process_runs", "calc_list_runs") and conversation_id:
                 params["conversation_id"] = conversation_id
             
             # For simulation tools, emit progress events to show user activity
