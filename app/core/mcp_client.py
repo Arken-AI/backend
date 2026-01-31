@@ -1,8 +1,8 @@
 """
 MCP Client Wrapper
 
-Manages connection to MCP Process Server via stdio transport.
-Replicates Claude Desktop's MCP client behavior.
+Manages connection to MCP servers via stdio transport.
+Supports multiple MCP servers (process server + calculation engine server).
 
 Key Features:
 - Subprocess management (launch, monitor, restart)
@@ -11,12 +11,17 @@ Key Features:
 - Supervisor pattern with health checks
 - Connection state management
 - Async locking for serialized tool calls
+- Multi-server registry for routing tool calls
 
 Architecture:
 ┌─────────────────────┐         stdio (JSON-RPC)        ┌──────────────────────┐
 │   FastAPI Backend   │ ←──────────────────────────────→ │   MCP Process Server │
-│  (This Client)      │    stdin: send requests         │   (subprocess)        │
+│  (MCP Clients)      │    stdin: send requests         │   (subprocess)        │
 │                     │    stdout: receive responses    │                      │
+│                     │                                  └──────────────────────┘
+│                     │         stdio (JSON-RPC)        ┌──────────────────────┐
+│                     │ ←──────────────────────────────→ │  MCP Calc Engine     │
+│                     │                                  │   (subprocess)        │
 └─────────────────────┘                                  └──────────────────────┘
 """
 
@@ -26,7 +31,7 @@ import traceback
 import os
 import time
 from asyncio import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Dict, List, Optional
 
@@ -51,18 +56,22 @@ class MCPTool:
     name: str
     description: str
     input_schema: Dict[str, Any]
+    server_name: str = ""  # Which server this tool belongs to
 
 
 @dataclass
 class MCPServerConfig:
     """MCP server configuration (from .env)"""
+    name: str  # Server identifier (e.g., "process_server", "calc_engine")
     command: str
     args: List[str]
     env: Dict[str, str]
+    cwd: Optional[str] = None  # Working directory
+    enabled: bool = True
     
     @classmethod
-    def from_env(cls) -> "MCPServerConfig":
-        """Load MCP server config from environment variables"""
+    def from_env_process_server(cls) -> "MCPServerConfig":
+        """Load MCP process server config from environment variables"""
         command = os.getenv("MCP_SERVER_COMMAND")
         args_str = os.getenv("MCP_SERVER_ARGS", "")
         
@@ -76,7 +85,45 @@ class MCPServerConfig:
                 env_key = key.replace("MCP_SERVER_ENV_", "")
                 env[env_key] = value
         
-        return cls(command=command, args=args, env=env)
+        return cls(
+            name="process_server",
+            command=command,
+            args=args,
+            env=env,
+            enabled=True
+        )
+    
+    @classmethod
+    def from_env_calc_engine(cls) -> "MCPServerConfig":
+        """Load MCP calculation engine server config from environment variables"""
+        enabled = os.getenv("MCP_CALC_ENGINE_ENABLED", "true").lower() == "true"
+        command = os.getenv("MCP_CALC_ENGINE_COMMAND", "python")
+        args_str = os.getenv("MCP_CALC_ENGINE_ARGS", "server.py")
+        cwd = os.getenv("MCP_CALC_ENGINE_CWD")
+        
+        # Parse args (single path or comma-separated)
+        args = [args_str] if args_str and "," not in args_str else args_str.split(",")
+        
+        # Parse environment variables (MCP_CALC_ENGINE_ENV_*)
+        env = {}
+        for key, value in os.environ.items():
+            if key.startswith("MCP_CALC_ENGINE_ENV_"):
+                env_key = key.replace("MCP_CALC_ENGINE_ENV_", "")
+                env[env_key] = value
+        
+        return cls(
+            name="calc_engine",
+            command=command,
+            args=args,
+            env=env,
+            cwd=cwd,
+            enabled=enabled
+        )
+    
+    @classmethod
+    def from_env(cls) -> "MCPServerConfig":
+        """Legacy method - returns process server config for backward compatibility"""
+        return cls.from_env_process_server()
 
 
 # =============================================================================
@@ -85,9 +132,10 @@ class MCPServerConfig:
 
 class MCPClient:
     """
-    MCP Client Wrapper - Manages connection to MCP Process Server
+    MCP Client Wrapper - Manages connection to an MCP Server
     
     Usage:
+        config = MCPServerConfig.from_env_process_server()
         client = MCPClient(config)
         await client.connect()
         tools = await client.list_tools()
@@ -112,6 +160,7 @@ class MCPClient:
             health_check_interval: Seconds between health checks
         """
         self.config = config
+        self.name = config.name  # Server identifier for logging/routing
         self.restart_delay = restart_delay
         self.max_retries = max_retries
         self.health_check_interval = health_check_interval
@@ -163,6 +212,7 @@ class MCPClient:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 env=env,
+                cwd=self.config.cwd,  # Support working directory
             )
             
             # Start reading stdout
@@ -177,11 +227,13 @@ class MCPClient:
             # Start health checks
             self._health_task = asyncio.create_task(self._health_check_loop())
             
+            print(f"INFO: MCP server '{self.name}' connected successfully")
+            
         except Exception as e:
             self.state = ConnectionState.FAILED
-            print(f"ERROR: Failed to connect to MCP server: {e}")
+            print(f"ERROR: Failed to connect to MCP server '{self.name}': {e}")
             await self._cleanup()
-            raise RuntimeError(f"MCP connection failed: {e}")
+            raise RuntimeError(f"MCP connection failed for '{self.name}': {e}")
     
     async def disconnect(self) -> None:
         """Gracefully disconnect from MCP server"""
@@ -394,6 +446,7 @@ class MCPClient:
                 name=tool_data["name"],
                 description=tool_data.get("description", ""),
                 input_schema=tool_data.get("inputSchema", {}),
+                server_name=self.name,  # Tag tool with server name
             ))
         
         self._tools = tools
@@ -474,7 +527,7 @@ class MCPClient:
         if self.state == ConnectionState.DISCONNECTED:
             return
         
-        print(f"WARNING: MCP server disconnected unexpectedly")
+        print(f"WARNING: MCP server '{self.name}' disconnected unexpectedly")
         # Check restart limits
         now = time.time()
         if now - self._last_restart < 60:  # Within 1 minute
@@ -484,7 +537,7 @@ class MCPClient:
         
         if self._restart_count > self.max_retries:
             self.state = ConnectionState.FAILED
-            print(f"ERROR: Max restart attempts reached ({self.max_retries})")
+            print(f"ERROR: Max restart attempts reached for '{self.name}' ({self.max_retries})")
             await self._cleanup()
             return
         
@@ -499,4 +552,200 @@ class MCPClient:
             await self.connect()
         except Exception as e:
             self.state = ConnectionState.FAILED
-            print(f"ERROR: Failed to restart MCP server: {e}")
+            print(f"ERROR: Failed to restart MCP server '{self.name}': {e}")
+
+
+# =============================================================================
+# MCP Client Registry - Manages Multiple MCP Servers
+# =============================================================================
+
+class MCPClientRegistry:
+    """
+    Registry for managing multiple MCP client connections.
+    
+    Provides:
+    - Centralized initialization of all MCP servers
+    - Tool routing based on tool name prefix
+    - Merged tool list for LLM
+    - Health status for all servers
+    
+    Usage:
+        registry = MCPClientRegistry()
+        await registry.initialize()
+        
+        # Get merged tools from all servers
+        tools = await registry.list_all_tools()
+        
+        # Call a tool (automatically routed to correct server)
+        result = await registry.call_tool("calc_simulate_process", {...})
+        
+        await registry.shutdown()
+    """
+    
+    # Tool prefix to server name mapping
+    TOOL_ROUTING = {
+        # Process server tools (sugar industry specific)
+        "list_industries": "process_server",
+        "list_processes": "process_server",
+        "get_process": "process_server",
+        "get_equipment_types": "process_server",
+        "get_process_equipment_schema": "process_server",
+        "get_stream_schema": "process_server",
+        "validate_process_inputs": "process_server",
+        "validate_process_connections": "process_server",
+        "validate_equipment_inputs": "process_server",
+        "simulate_process": "process_server",
+        "simulate_equipment": "process_server",
+        "get_process_run": "process_server",
+        "compare_process_runs": "process_server",
+        "list_process_runs": "process_server",
+        # All other tools (including calc_* prefix) go to calc_engine (default)
+    }
+    
+    DEFAULT_SERVER = "calc_engine"  # Default server for unmatched tools
+    
+    def __init__(self):
+        """Initialize empty registry"""
+        self._clients: Dict[str, MCPClient] = {}
+        self._initialized = False
+    
+    async def initialize(self) -> None:
+        """
+        Initialize all configured MCP servers.
+        
+        Loads configuration from environment and connects to enabled servers.
+        """
+        if self._initialized:
+            return
+        
+        # Load process server config
+        process_config = MCPServerConfig.from_env_process_server()
+        if process_config.enabled and process_config.command:
+            client = MCPClient(process_config)
+            try:
+                await client.connect()
+                self._clients["process_server"] = client
+                print(f"INFO: Process server connected with {len(await client.list_tools())} tools")
+            except Exception as e:
+                print(f"ERROR: Failed to connect process server: {e}")
+        
+        # Load calc engine config
+        calc_config = MCPServerConfig.from_env_calc_engine()
+        if calc_config.enabled and calc_config.command:
+            client = MCPClient(calc_config)
+            try:
+                await client.connect()
+                self._clients["calc_engine"] = client
+                print(f"INFO: Calc engine server connected with {len(await client.list_tools())} tools")
+            except Exception as e:
+                print(f"WARNING: Failed to connect calc engine server: {e}")
+                # Calc engine is optional, don't fail startup
+        
+        self._initialized = True
+        print(f"INFO: MCP Registry initialized with {len(self._clients)} server(s)")
+    
+    async def shutdown(self) -> None:
+        """Disconnect all MCP servers"""
+        for name, client in self._clients.items():
+            try:
+                await client.disconnect()
+                print(f"INFO: Disconnected MCP server '{name}'")
+            except Exception as e:
+                print(f"WARNING: Error disconnecting '{name}': {e}")
+        
+        self._clients.clear()
+        self._initialized = False
+    
+    def get_client(self, name: str) -> Optional[MCPClient]:
+        """Get a specific MCP client by name"""
+        return self._clients.get(name)
+    
+    def get_client_for_tool(self, tool_name: str) -> Optional[MCPClient]:
+        """
+        Get the appropriate MCP client for a tool based on naming convention.
+        
+        Routing rules:
+        - Explicit process_server tools → process_server
+        - All other tools (including calc_* prefix) → calc_engine (default)
+        
+        Args:
+            tool_name: Name of the tool
+            
+        Returns:
+            MCPClient for the tool, or None if no matching server
+        """
+        # Check explicit tool routing
+        if tool_name in self.TOOL_ROUTING:
+            server_name = self.TOOL_ROUTING[tool_name]
+            return self._clients.get(server_name)
+        
+        # Default to calc_engine server
+        return self._clients.get(self.DEFAULT_SERVER)
+    
+    async def list_all_tools(self, force_refresh: bool = False) -> List[MCPTool]:
+        """
+        List tools from all connected servers.
+        
+        Returns merged list with server_name tagged on each tool.
+        """
+        all_tools = []
+        
+        for name, client in self._clients.items():
+            if client.is_connected():
+                try:
+                    tools = await client.list_tools(force_refresh)
+                    all_tools.extend(tools)
+                except Exception as e:
+                    print(f"WARNING: Failed to list tools from '{name}': {e}")
+        
+        return all_tools
+    
+    async def call_tool(self, tool_name: str, arguments: Dict[str, Any]) -> Any:
+        """
+        Call a tool, automatically routing to the correct server.
+        
+        Args:
+            tool_name: Name of the tool to call
+            arguments: Tool arguments
+            
+        Returns:
+            Tool result
+            
+        Raises:
+            RuntimeError: If no server available for the tool
+        """
+        client = self.get_client_for_tool(tool_name)
+        
+        if not client:
+            raise RuntimeError(f"No MCP server available for tool: {tool_name}")
+        
+        if not client.is_connected():
+            raise RuntimeError(f"MCP server '{client.name}' is not connected")
+        
+        return await client.call_tool(tool_name, arguments)
+    
+    def get_health_status(self) -> Dict[str, Dict[str, Any]]:
+        """
+        Get health status of all registered servers.
+        
+        Returns:
+            Dict mapping server name to status info
+        """
+        status = {}
+        for name, client in self._clients.items():
+            status[name] = {
+                "connected": client.is_connected(),
+                "state": client.state.value,
+                "tools_count": len(client._tools) if client._tools else 0
+            }
+        return status
+    
+    @property
+    def is_initialized(self) -> bool:
+        """Check if registry has been initialized"""
+        return self._initialized
+    
+    @property
+    def connected_servers(self) -> List[str]:
+        """List of connected server names"""
+        return [name for name, client in self._clients.items() if client.is_connected()]
