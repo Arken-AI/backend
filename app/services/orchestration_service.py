@@ -73,7 +73,7 @@ from app.services.tool_registry import ToolRegistry
 from app.services.event_emitter import EventEmitter
 from app.core.policy_engine import PolicyEngine, PolicyDecision
 from app.core.llm_provider import ClaudeProvider
-from app.core.mcp_client import MCPClient, MCPServerConfig
+from app.core.mcp_client import MCPClient, MCPServerConfig, MCPClientRegistry
 
 
 # =============================================================================
@@ -121,6 +121,10 @@ class OrchestrationService:
     - Backend executes tools and returns results
     - LLM sees results (success AND errors) and decides next action
     - Loop continues until LLM provides final text response
+    
+    Supports multiple MCP servers:
+    - process_server: Sugar industry simulations
+    - calc_engine: Dynamic flowsheet simulations (IPA recovery, distillation, etc.)
     """
     
     def __init__(
@@ -128,7 +132,8 @@ class OrchestrationService:
         context_manager: ContextManager,
         tool_registry: ToolRegistry,
         policy_engine: PolicyEngine,
-        mcp_client: MCPClient,
+        mcp_client: MCPClient = None,  # Legacy: single client (deprecated)
+        mcp_registry: MCPClientRegistry = None,  # New: multi-server registry
         event_emitter: Optional[EventEmitter] = None,
         anthropic_api_key: str = None
     ):
@@ -139,15 +144,28 @@ class OrchestrationService:
             context_manager: Context tracking service
             tool_registry: Tool metadata registry
             policy_engine: Policy enforcement engine
-            mcp_client: MCP Process Server client (sugar industry, etc.)
+            mcp_client: Legacy single MCP client (deprecated, use mcp_registry)
+            mcp_registry: MCP client registry for multiple servers
             event_emitter: Event emitter for real-time updates (optional)
             anthropic_api_key: Anthropic API key for Claude
         """
         self.context_manager = context_manager
         self.tool_registry = tool_registry
         self.policy_engine = policy_engine
-        self.mcp_client = mcp_client  # Process Server (sugar)
         self.event_emitter = event_emitter
+        
+        # Support both legacy single client and new registry
+        if mcp_registry:
+            self.mcp_registry = mcp_registry
+            # For backward compatibility, set mcp_client to process_server
+            self.mcp_client = mcp_registry.get_client("process_server")
+        elif mcp_client:
+            # Legacy mode: wrap single client in a minimal registry-like interface
+            self.mcp_client = mcp_client
+            self.mcp_registry = None
+        else:
+            self.mcp_client = None
+            self.mcp_registry = None
         
         # Initialize Claude LLM provider
         self.llm = ClaudeProvider(api_key=anthropic_api_key)
@@ -199,31 +217,63 @@ class OrchestrationService:
         total_output_tokens = 0
         
         try:
-            # Step 0: Health check - fail fast if MCP server is unavailable
-            process_server_healthy = await self.mcp_client.health_check()
-            
-            if not process_server_healthy:
-                error_msg = "MCP Process Server is unavailable. Please ensure the server is running and try again."
+            # Step 0: Health check - fail fast if no MCP servers available
+            if self.mcp_registry:
+                # Check if at least one server is available
+                health_status = self.mcp_registry.get_health_status()
+                any_server_healthy = any(s["connected"] for s in health_status.values())
+                connected_servers = self.mcp_registry.connected_servers
                 
-                if self.event_emitter:
-                    await self.event_emitter.emit_app_error(
-                        conversation_id,
-                        "mcp_server_unavailable",
-                        error_msg,
-                        details={"check": "health_check", "process_server": process_server_healthy},
-                        recoverable=False
-                    )
-                
-                return {
-                    "status": "error",
-                    "message": error_msg,
-                    "conversation_id": conversation_id,
-                    "token_usage": {
-                        "input_tokens": 0,
-                        "output_tokens": 0,
-                        "total_tokens": 0
+                if not any_server_healthy:
+                    error_msg = "No MCP servers are available. Please ensure at least one server is running."
+                    
+                    if self.event_emitter:
+                        await self.event_emitter.emit_app_error(
+                            conversation_id,
+                            "mcp_server_unavailable",
+                            error_msg,
+                            details={"health_status": health_status},
+                            recoverable=False
+                        )
+                    
+                    return {
+                        "status": "error",
+                        "message": error_msg,
+                        "conversation_id": conversation_id,
+                        "token_usage": {
+                            "input_tokens": 0,
+                            "output_tokens": 0,
+                            "total_tokens": 0
+                        }
                     }
-                }
+                
+                print(f"INFO: MCP servers available: {connected_servers}")
+            else:
+                # Legacy single client mode
+                process_server_healthy = await self.mcp_client.health_check() if self.mcp_client else False
+                
+                if not process_server_healthy:
+                    error_msg = "MCP Process Server is unavailable. Please ensure the server is running and try again."
+                    
+                    if self.event_emitter:
+                        await self.event_emitter.emit_app_error(
+                            conversation_id,
+                            "mcp_server_unavailable",
+                            error_msg,
+                            details={"check": "health_check", "process_server": process_server_healthy},
+                            recoverable=False
+                        )
+                    
+                    return {
+                        "status": "error",
+                        "message": error_msg,
+                        "conversation_id": conversation_id,
+                        "token_usage": {
+                            "input_tokens": 0,
+                            "output_tokens": 0,
+                            "total_tokens": 0
+                        }
+                    }
             
             # Step 1: Load or create context
             context = await self._get_or_create_context(conversation_id, user_id)
@@ -1083,54 +1133,59 @@ class OrchestrationService:
     
     async def _get_available_tools(self, context: Dict[str, Any] = None) -> List[Dict[str, Any]]:
         """
-        Get available tools from both MCP servers, filtered by context.
+        Get available tools from all connected MCP servers, filtered by context.
         
-        Get available tools from MCP Process Server, filtered by context.
+        Merges tools from:
+        - process_server: Sugar industry tools
+        - calc_engine: Dynamic flowsheet tools (IPA recovery, distillation, etc.)
         
         Args:
             context: Current conversation context
             
         Returns:
-            List of tools from process server
+            List of tools from all connected servers
         """
-        # Get tools from Process Server
-        all_tools = await self.mcp_client.list_tools()
+        # Get tools from all connected servers
+        if self.mcp_registry:
+            all_tools = await self.mcp_registry.list_all_tools()
+        elif self.mcp_client:
+            all_tools = await self.mcp_client.list_tools()
+        else:
+            all_tools = []
         
         if context is None:
             return all_tools
         
-        # Determine which tool categories to include
-        include_categories = set(CORE_TOOLS)  # Always include simulation + validation
-        
-        # Include run tools if we have previous runs
-        if context.get("run_ids"):
-            include_categories |= RUN_TOOLS
-        
-        # Include discovery tools if no process context established
-        if not context.get("current_process") and not context.get("current_industry"):
-            include_categories |= DISCOVERY_TOOLS
-        
-        # Filter tools
-        filtered_tools = [
-            tool for tool in all_tools
-            if self._get_tool_name(tool) in include_categories
-        ]
-        
-        return filtered_tools
+        # For now, return all tools without filtering
+        # The LLM will choose the appropriate tool based on descriptions
+        # TODO: Implement smarter context-based filtering if needed
+        return all_tools
     
     def _get_mcp_client_for_tool(self, tool_name: str, context: Dict[str, Any] = None) -> MCPClient:
         """
         Get MCP client for tool execution.
         
-        Since we only have Process Server now, always returns the single MCP client.
+        Uses MCPClientRegistry to route tools to the correct server:
+        - Process server tools (sugar industry) → process_server
+        - All other tools (including calc_* prefix) → calc_engine (default)
         
         Args:
             tool_name: Name of the tool to execute
             context: Current conversation context
             
         Returns:
-            MCPClient instance (Process Server)
+            MCPClient instance for the appropriate server
         """
+        if self.mcp_registry:
+            # Use registry routing
+            client = self.mcp_registry.get_client_for_tool(tool_name)
+            if client:
+                return client
+            # Fallback to any available client
+            for server_name in self.mcp_registry.connected_servers:
+                return self.mcp_registry.get_client(server_name)
+        
+        # Legacy: return single mcp_client
         return self.mcp_client
     
     async def _get_combined_processes(self, industry_id: Optional[str] = None) -> Dict[str, Any]:

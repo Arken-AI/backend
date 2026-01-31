@@ -11,7 +11,7 @@ from fastapi import Depends
 from app.config import settings
 from app.services.event_emitter import EventEmitter
 from app.core.mongo_client import MongoClient
-from app.core.mcp_client import MCPClient, MCPServerConfig
+from app.core.mcp_client import MCPClient, MCPServerConfig, MCPClientRegistry
 from app.core.policy_engine import PolicyEngine
 from app.services.context_manager import ContextManager
 from app.services.tool_registry import ToolRegistry
@@ -99,9 +99,34 @@ async def get_mongo_client() -> MongoClient:
 
 
 # =============================================================================
-# MCP Process Server Client (Sugar Industry)
+# MCP Client Registry (Multiple Servers)
 # =============================================================================
 
+_mcp_registry: MCPClientRegistry | None = None
+
+
+async def get_mcp_registry() -> MCPClientRegistry:
+    """
+    Dependency to get MCP Client Registry instance (singleton).
+    
+    Manages connections to multiple MCP servers:
+    - process_server: Sugar industry simulations
+    - calc_engine: Dynamic flowsheet simulations
+    
+    Returns:
+        MCPClientRegistry: Registry managing all MCP server connections
+    """
+    global _mcp_registry
+    
+    if _mcp_registry is None:
+        _mcp_registry = MCPClientRegistry()
+        await _mcp_registry.initialize()
+        print(f"INFO: MCP Registry initialized with servers: {_mcp_registry.connected_servers}")
+    
+    return _mcp_registry
+
+
+# Legacy: Keep get_mcp_client for backward compatibility
 _mcp_client: MCPClient | None = None
 
 
@@ -109,7 +134,8 @@ async def get_mcp_client() -> MCPClient:
     """
     Dependency to get MCP Process Server client instance (singleton).
     
-    Used for industry-specific simulations (sugar, etc.)
+    DEPRECATED: Use get_mcp_registry() instead for multi-server support.
+    This is kept for backward compatibility.
     
     Returns:
         MCPClient: MCP process server client
@@ -117,26 +143,23 @@ async def get_mcp_client() -> MCPClient:
     global _mcp_client
     
     if _mcp_client is None:
-        config = MCPServerConfig(
-            command=settings.mcp_server_command,
-            args=[settings.mcp_server_args],
-            env={
-                "CALC_ENGINE_API_URL": settings.mcp_server_env_calc_engine_url,
-                "MAX_STORED_RUNS": str(settings.mcp_server_env_max_stored_runs),
-                "MONGODB_URI": settings.mcp_server_env_mongodb_uri
-            }
-        )
+        config = MCPServerConfig.from_env_process_server()
         _mcp_client = MCPClient(config)
-        # Initialize connection
         await _mcp_client.connect()
     
     return _mcp_client
 
 
 async def close_mcp_clients():
-    """Close MCP client on application shutdown."""
-    global _mcp_client
+    """Close all MCP clients on application shutdown."""
+    global _mcp_client, _mcp_registry
     
+    # Close registry (preferred)
+    if _mcp_registry:
+        await _mcp_registry.shutdown()
+        _mcp_registry = None
+    
+    # Close legacy single client
     if _mcp_client:
         await _mcp_client.disconnect()
         _mcp_client = None
@@ -149,13 +172,14 @@ async def close_mcp_clients():
 async def get_orchestration_service(
     redis_client: redis.Redis = Depends(get_redis_client),
     mongo_client: MongoClient = Depends(get_mongo_client),
-    mcp_client: MCPClient = Depends(get_mcp_client),
+    mcp_registry: MCPClientRegistry = Depends(get_mcp_registry),
     event_emitter: EventEmitter = Depends(get_event_emitter)
 ) -> OrchestrationService:
     """
     Dependency to get OrchestrationService instance.
     
     Creates a new instance per request with all required dependencies.
+    Uses MCPClientRegistry for multi-server support.
     
     Returns:
         OrchestrationService: Orchestration service instance
@@ -169,12 +193,12 @@ async def get_orchestration_service(
     tool_registry = ToolRegistry()
     policy_engine = PolicyEngine()  # PolicyEngine takes no arguments
     
-    # Create orchestration service with MCP client
+    # Create orchestration service with MCP registry (multi-server)
     orchestration = OrchestrationService(
         context_manager=context_manager,
         tool_registry=tool_registry,
         policy_engine=policy_engine,
-        mcp_client=mcp_client,
+        mcp_registry=mcp_registry,  # Use registry instead of single client
         event_emitter=event_emitter,
         anthropic_api_key=settings.anthropic_api_key
     )
