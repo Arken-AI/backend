@@ -161,7 +161,7 @@ async def get_run_results(
         HTTPException: 404 if run_id not found
     """
     try:
-        db = mongo_client.db
+        db = mongo_client._client[mongo_client.database_name]
         
         # Try calc_engine collection first
         doc = await db.calc_simulation_runs.find_one({"run_id": run_id})
@@ -252,7 +252,7 @@ async def list_runs(
         RunListResponse with list of runs and has_more flag
     """
     try:
-        db = mongo_client.db
+        db = mongo_client._client[mongo_client.database_name]
         
         # Build filter query
         filter_query = {}
