@@ -551,7 +551,10 @@ class OrchestrationService:
                     
                     # Emit tool end
                     if self.event_emitter:
-                        status = "success" if result.get("status") == "success" else "error"
+                        # Treat 'not_converged' as success - simulation ran, just didn't converge
+                        # Only 'error', 'failed', 'simulation_failed' are actual tool failures
+                        result_status = result.get("status", "")
+                        status = "error" if result_status in ["error", "failed", "simulation_failed"] else "success"
                         summary = result.get("message", f"{tool_name} completed")
                         error_msg = result.get("error") if status == "error" else None
                         # Ensure error_message is always a string, not a list or other type
@@ -581,6 +584,7 @@ class OrchestrationService:
                     # Claude sees errors and decides how to recover based on tool descriptions
                     
                     # Track errors for repeated error detection
+                    # Only track actual failures, not 'not_converged' (which is a valid simulation result)
                     if result.get("status") in ["error", "failed", "simulation_failed"]:
                         error_key = f"{tool_name}:{result.get('error', '')[:100]}"  # Normalize error for comparison
                         recent_errors.append(error_key)
@@ -605,12 +609,15 @@ class OrchestrationService:
                     })
                     
                     # Track tool execution with proper status
+                    # 'not_converged' is a successful tool call - simulation ran and returned results
+                    result_status = result.get("status", "")
+                    tool_status = "error" if result_status in ["error", "failed", "simulation_failed"] else "success"
                     all_tool_results.append({
                         "name": tool_name,
                         "tool": tool_name,  # For backward compatibility
                         "result": result,
                         "duration_ms": tool_duration_ms,
-                        "status": "success" if result.get("status") != "error" else "error"
+                        "status": tool_status
                     })
                 
                 # =====================================================
