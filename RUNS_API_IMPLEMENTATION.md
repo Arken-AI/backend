@@ -31,7 +31,33 @@ Both MCP servers share the **same MongoDB database** (`arken_process_db`) but us
 | MCP Server | Collection | Document Schema | Response Field |
 |------------|------------|-----------------|----------------|
 | `mcp_calculation_engine_server` | `calc_simulation_runs` | `SimulationRunDocument` | `result` |
-| `mcp_process_server` | `runs` | `RunDocument` | `outputs` |
+| `mcp_process_server` | `runs` | `RunDocument` | `outputs` (FULL result after fix) |
+
+### Unified Response Format
+
+**Both MCP servers return the SAME flowsheet format** (see `frontend/src/data/response.json`):
+
+| MCP Server | Endpoint Called | Response Format |
+|------------|-----------------|-----------------|
+| `mcp_calculation_engine_server` | `/simulate/dynamic` | Flowsheet format ✓ |
+| `mcp_process_server` | `/simulate/{industry}/plant` | Flowsheet format ✓ (unified) |
+
+**Flowsheet Format** (used by BOTH servers):
+```json
+{
+  "status": "success",
+  "input": { "equipment": [...], "edges": [...], "feed_streams": [...] },
+  "result": {
+    "node_results": { "mill": { "outlets": {...}, "warnings": [...] }, ... },
+    "stream_results": {...},
+    "equipment_inputs": {...},
+    "execution_order": [...],
+    "warnings": [...]
+  }
+}
+```
+
+The frontend `transformEquipmentData()` function works for **BOTH** sources - no separate transformer needed.
 
 ### Schema Comparison
 
@@ -196,6 +222,42 @@ Both MCP servers use the **same database** (`arken_process_db`), so the existing
 
 ---
 
+### Step 1.5: Add MongoDB Indexes for Query Performance
+
+**CRITICAL**: Without proper indexes, merged queries across collections will be slow at scale.
+
+**File**: `backend/app/api/runs.py` (add to router startup or separate migration)
+
+**Create indexes on both collections**:
+
+```python
+async def create_run_indexes(db):
+    """Create indexes for efficient run queries. Call once on startup."""
+    # calc_simulation_runs indexes
+    await db.calc_simulation_runs.create_index("run_id", unique=True)
+    await db.calc_simulation_runs.create_index([("user_id", 1), ("created_at", -1)])
+    await db.calc_simulation_runs.create_index([("process_id", 1), ("created_at", -1)])
+    await db.calc_simulation_runs.create_index("created_at", expireAfterSeconds=2592000)  # 30-day TTL
+    
+    # runs collection indexes
+    await db.runs.create_index("run_id", unique=True)
+    await db.runs.create_index([("user_id", 1), ("created_at", -1)])
+    await db.runs.create_index([("process_id", 1), ("created_at", -1)])
+    await db.runs.create_index("created_at", expireAfterSeconds=2592000)  # 30-day TTL
+```
+
+**Index justification**:
+| Index | Query Pattern | Performance Gain |
+|-------|---------------|------------------|
+| `run_id` (unique) | GET /runs/{run_id} | O(1) lookup vs O(n) scan |
+| `(user_id, created_at)` | GET /runs?user_id=X | Sorted by date, no in-memory sort |
+| `(process_id, created_at)` | GET /runs?process_id=X | Filtered + sorted efficiently |
+| `created_at` (TTL) | Automatic cleanup | Prevents unbounded collection growth |
+
+**When to create**: Call `create_run_indexes()` once during backend startup or as a migration script.
+
+---
+
 ## Phase 2: Frontend API Client
 
 ### Step 2.1: Add API Function
@@ -249,79 +311,118 @@ Both MCP servers use the **same database** (`arken_process_db`), so the existing
 
 **File**: `frontend/src/pages/ResultsPage.jsx`
 
+**IMPORTANT DISCOVERY**: After investigating the actual data flow:
+
+1. **Both MCP servers call the same calculation engine** (`/simulate/dynamic` or `/simulate/{industry}/plant`)
+2. **Both return the same `response.json` format** with: `input`, `result`, `node_results`, `stream_results`, `equipment_inputs`, `edges`, etc.
+3. **The existing `transformEquipmentData()` function works for BOTH** - no separate transformer needed!
+
+The only issue was that `mcp_process_server` was storing only `result.get("outputs", {})` in MongoDB instead of the full result. This needs to be fixed (see Step 0.1 below).
+
 **Changes**:
 
 1. Remove import of `mockEquipmentData` and `mockWarningsData`
-2. Keep import of `transformEquipmentData` and `getWarningsData` functions
+2. Keep import of `transformEquipmentData` and `getWarningsData` functions (works for both sources!)
 3. Add import of `getRunResults` from API client
-4. Add import of `transformProcessServerData` (new function, see Step 3.3b)
-5. Use `useMemo` to derive `equipmentData` from `apiResponse`:
+4. Use `useMemo` to derive `equipmentData` from `apiResponse`:
    ```javascript
    const equipmentData = useMemo(() => {
      if (!apiResponse?.data) return [];
-     // Use appropriate transformer based on source
-     return apiResponse.source === 'calc_engine'
-       ? transformEquipmentData(apiResponse.data)
-       : transformProcessServerData(apiResponse.data);
+     // Same transformer works for both sources since they use same format
+     return transformEquipmentData(apiResponse.data);
    }, [apiResponse]);
    ```
-6. Use `useMemo` to derive `warningsData` from `equipmentData` and `apiResponse` using `getWarningsData()`
-7. Return empty arrays/objects when `apiResponse` is null
+5. Use `useMemo` to derive `warningsData` from `equipmentData` and `apiResponse` using `getWarningsData()`
+6. Return empty arrays/objects when `apiResponse` is null
 
 ---
 
-### Step 3.3b: Add Process Server Data Transformer
+## Phase 0: Fix MCP Process Server Storage (PREREQUISITE)
 
-**File**: `frontend/src/data/mockSimulationData.js`
+### Step 0.1: Store Full Result in MongoDB
 
-**Add new function**:
+**File**: `mcp_process_server/server.py`
 
-```javascript
-/**
- * Transform process_server (sugar industry) outputs to equipment display format.
- * The structure differs from calc_engine flowsheet format.
- */
-export function transformProcessServerData(outputs) {
-  if (!outputs) return [];
-  
-  // Process server outputs have industry-specific structure
-  // Example for sugar: { mill_results: {...}, evaporator_results: {...}, ... }
-  const equipment = [];
-  
-  // Map each equipment result to display format
-  Object.entries(outputs).forEach(([key, value]) => {
-    if (typeof value === 'object' && value !== null) {
-      equipment.push({
-        id: key,
-        type: inferEquipmentType(key),  // e.g., 'mill_results' -> 'mill'
-        name: formatEquipmentName(key),
-        data: value,
-        // Add any warnings from the equipment result
-        warnings: value.warnings || []
-      });
-    }
-  });
+**Problem**: Currently stores only `outputs` field, but frontend needs full result structure.
+
+**Location**: `handle_simulate_process()` function, around line 520
+
+**Change**:
+```python
+# BEFORE (incomplete):
+run_doc_data = {
+    ...
+    "outputs": result.get("outputs", {}),  # Only outputs!
+    ...
+}
+
+# AFTER (full result):
+run_doc_data = {
+    ...
+    "outputs": result,  # Store FULL simulation result
+    ...
+}
+```
+
+**Why this matters**: The frontend's `transformEquipmentData()` needs:
+- `result.input.equipment` - equipment definitions
+- `result.input.edges` - stream connections  
+- `result.input.feed_streams` - feed stream IDs
+- `result.result.node_results` - equipment calculations
+- `result.result.stream_results` - stream data
+- `result.result.equipment_inputs` - applied parameters
+
+Without this fix, process_server runs fetched from MongoDB will be missing critical data.
+
+---
+
+### Step 3.3b: No Separate Transformer Needed!
+
+**SIMPLIFIED**: Since both MCP servers return the same `response.json` format (full flowsheet with `input`, `result`, `node_results`, etc.), we do NOT need a separate `transformProcessServerData()` function.
+
+The existing `transformEquipmentData()` in `mockSimulationData.js` already handles:
+- Equipment with `node_results` containing `outlets`, `warnings`, `metadata`
+- Streams via `equipment_inputs.inlet_ports` and `edges`
+- Parameters via `equipment_inputs.applied_parameters` and `parameter_constraints`
+- Energy streams via `node_results.energy_streams`
+
+**No changes needed to `mockSimulationData.js`** - just ensure Step 0.1 is implemented so MongoDB stores the full result.
   
   return equipment;
 }
 
 function inferEquipmentType(key) {
-  // Remove common suffixes to get equipment type
-  return key.replace(/_results?$|_output$|_data$/i, '');
+  // Remove common suffixes and normalize
+  return key
+    .replace(/_results?$|_output$|_data$|_\d+$/i, '')
+    .toLowerCase();
 }
 
 function formatEquipmentName(key) {
-  // Convert snake_case to Title Case
   return key
     .replace(/_results?$|_output$|_data$/i, '')
     .split('_')
     .map(word => word.charAt(0).toUpperCase() + word.slice(1))
     .join(' ');
 }
-```
 
-**Note**: This transformer may need adjustment based on actual `process_server` output structure. Review the `outputs` field from `mcp_process_server` runs to refine the mapping.
-
+/**
+ * Extract stream-like data from sugar equipment results.
+ * Maps fields ending in _in/_out to inlet/outlet streams.
+ */
+function extractStreams(data, direction) {
+  const streams = [];
+  const suffix = direction === 'in' ? '_in' : '_out';
+  const altSuffix = direction === 'in' ? ['_in_kg_hr', '_in_tcd'] : ['_out_kg_hr', 'out_kg_hr'];
+  
+  Object.entries(data).forEach(([key, value]) => {
+    if (typeof value !== 'number') return;
+    
+    const isMatch = key.includes(suffix) || altSuffix.some(s => key.includes(s));
+    if (isMatch) {
+      streams.push({
+        streamId: key,
+        name: formatStreamName(key),
 ---
 
 ### Step 3.4: Add Loading and Error UI
@@ -348,25 +449,89 @@ function formatEquipmentName(key) {
 
 ## Phase 4: Clickable Links in Chat
 
-### Step 4.1: Update System Prompt
+### Step 4.1: Programmatic Link Injection (Backend Fallback)
 
 **File**: `backend/app/services/orchestration_service.py`
 
-**Location**: `_build_system_prompt()` method or system prompt construction
+**Rationale**: Relying solely on LLM system prompt to add links is fragile - the LLM may not always follow instructions. Add programmatic injection as a **reliable fallback**.
 
-**Prerequisites**: Phase 6.1 must be completed first (add `frontend_url` to config)
+**Location**: After LLM response is finalized, before returning to frontend
 
-**Add instruction to system prompt**:
+**Implementation**: Add a post-processing step that injects links if the LLM didn't include them:
 
-Add guidance for the LLM to include clickable links when simulations complete:
+```python
+import re
+from app.config import settings
 
-- Import settings: `from app.config import settings`
-- When a simulation completes successfully and returns a run_id, always include a clickable link
-- Use markdown format: `[View Flowsheet Results]({settings.frontend_url}/results/{run_id})`
-- Replace `{run_id}` with the actual run_id from the simulation response
-- Example: "Your simulation completed successfully! [View Flowsheet Results](http://localhost:5173/results/run_20260129_143022_abc123)"
+def inject_result_links(message: str, run_ids: List[str]) -> str:
+    """
+    Inject clickable links for simulation results if LLM didn't include them.
+    
+    Args:
+        message: LLM's final response text
+        run_ids: List of run_ids from successful simulations in this response
+    
+    Returns:
+        Message with injected links (if needed)
+    """
+    if not run_ids:
+        return message
+    
+    # Check if LLM already included links for these runs
+    for run_id in run_ids:
+        link_pattern = rf'\[.*?\]\([^)]*{re.escape(run_id)}[^)]*\)'
+        if re.search(link_pattern, message):
+            continue  # LLM already added link for this run_id
+        
+        # Inject link at end of message
+        link = f"\n\n📊 [View Simulation Results]({settings.frontend_url}/results/{run_id})"
+        message += link
+    
+    return message
+```
 
-**Note**: The `frontend_url` comes from environment config, not hardcoded.
+**Integration point** (in `process_chat_message` return block):
+
+```python
+# Before returning final response:
+message_text = inject_result_links(
+    message_text, 
+    final_context.get("run_ids", [])
+)
+
+return {
+    "status": "success",
+    "message": message_text,  # Now includes injected links
+    # ... rest of response
+}
+```
+
+**Benefits**:
+- Guaranteed link presence after simulations (no LLM prompt reliance)
+- Non-destructive: preserves LLM's links if already present
+- Consistent UX across different LLM providers (Claude, Gemini, etc.)
+
+---
+
+### Step 4.1b: Update System Prompt (Optional Enhancement)
+
+**File**: `backend/app/services/orchestration_service.py`
+
+**Location**: `_build_system_prompt()` method
+
+**Add guidance** (optional, since backend now injects links anyway):
+
+```python
+# Add to system prompt:
+f"""
+When a simulation completes successfully, you may include a link to view results:
+[View Results]({settings.frontend_url}/results/{{run_id}})
+
+Replace {{run_id}} with the actual run_id from the simulation response.
+"""
+```
+
+**Note**: This is now optional since Step 4.1 handles it programmatically.
 
 ---
 
@@ -488,15 +653,16 @@ Add guidance for the LLM to include clickable links when simulations complete:
 
 | File | Action | Phase |
 |------|--------|-------|
+| `mcp_process_server/server.py` | **Fix**: Store full result instead of just `outputs` | 0.1 |
 | `backend/app/models/runs.py` | **Create new file** with 4 Pydantic models | 1.1 |
 | `backend/app/models/__init__.py` | Add exports for new models | 1.3 |
-| `backend/app/api/runs.py` | **Create new file** with router | 1.2 |
+| `backend/app/api/runs.py` | **Create new file** with router + indexes | 1.2, 1.5 |
 | `backend/app/main.py` | Add router import and registration | 1.3 |
 | `backend/app/config.py` | Add `frontend_url` setting | 6.1 |
 | `frontend/src/api/client.js` | Add `getRunResults()`, `listRuns()` | 2.1 |
 | `frontend/src/pages/ResultsPage.jsx` | Replace mock data with API integration | 3.1-3.4 |
-| `frontend/src/data/mockSimulationData.js` | Add `transformProcessServerData()` function | 3.3 |
-| `backend/app/services/orchestration_service.py` | Update system prompt for links | 4.1 |
+| ~~`frontend/src/data/mockSimulationData.js`~~ | ~~Add `transformProcessServerData()` function~~ **NOT NEEDED** - same format! | - |
+| `backend/app/services/orchestration_service.py` | Add `inject_result_links()` function | 4.1 |
 | `frontend/src/components/chat/ChatMessage.jsx` | Add custom link handler (if needed) | 4.2 |
 | `frontend/src/context/ChatContext.jsx` | Add `latestRunId` state | 5.1 |
 | `frontend/src/components/layout/Layout.jsx` | Add header Flowsheet button | 5.2 |
@@ -586,21 +752,20 @@ Frontend:
 
 4. **Frontend URL**: Using `localhost:5173` for development. Update `FRONTEND_URL` environment variable for production deployment. The system prompt should reference `settings.frontend_url`, not hardcoded values.
 
-5. **Data Transformation - IMPORTANT**: 
-   - The existing `transformEquipmentData()` function in `mockSimulationData.js` works with `calc_engine` responses (flowsheet format).
-   - For `process_server` responses (sugar industry format), you MUST add a `transformProcessServerData()` function.
-   - In `ResultsPage.jsx`, check `apiResponse.source` and call the appropriate transformer:
+5. **Unified Response Format**: 
+   - Both `/simulate/dynamic` and `/simulate/{industry}/plant` return the **same flowsheet format**
+   - The existing `transformEquipmentData()` function works for **BOTH** sources
+   - **No separate transformer needed**
+   - In `ResultsPage.jsx`, simply use:
      ```javascript
      const equipmentData = useMemo(() => {
-       if (!apiResponse) return [];
-       if (apiResponse.source === 'calc_engine') {
-         return transformEquipmentData(apiResponse.data);
-       } else {
-         return transformProcessServerData(apiResponse.data);
-       }
+       if (!apiResponse?.data) return [];
+       return transformEquipmentData(apiResponse.data);  // Same for both!
      }, [apiResponse]);
      ```
 
 6. **Pagination Strategy**: For efficiency, always use the `source` query parameter when listing runs. Merged queries (without source filter) work for small datasets but are not optimal for production with many runs.
 
 7. **Backward Compatibility**: Mock data files (`response.json`, `mockSimulationData.js`) can remain for development/testing purposes.
+
+8. **FIX APPLIED (Step 0.1)**: ✅ Fixed in `mcp_process_server/server.py` - now stores full `result` dict instead of `result.get("outputs", {})`. Both `handle_simulate_process` and `handle_simulate_equipment` updated.
