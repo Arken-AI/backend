@@ -34,6 +34,18 @@ from asyncio import subprocess
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Dict, List, Optional
+from pathlib import Path
+
+# Load .env file before any os.getenv() calls
+from dotenv import load_dotenv
+
+# Find the .env file (look in backend directory)
+_env_path = Path(__file__).parent.parent.parent / ".env"
+if _env_path.exists():
+    load_dotenv(_env_path)
+else:
+    # Fallback: try current directory
+    load_dotenv()
 
 
 
@@ -212,7 +224,9 @@ class MCPClient:
             env = os.environ.copy()
             env.update(self.config.env)
             
-            # Launch MCP server subprocess
+            # Launch MCP server subprocess with increased buffer limit
+            # Default is 64KB which is too small for large MCP responses
+            # Increase to 16MB to handle large process templates
             self._process = await asyncio.create_subprocess_exec(
                 self.config.command,
                 *self.config.args,
@@ -221,6 +235,7 @@ class MCPClient:
                 stderr=subprocess.PIPE,
                 env=env,
                 cwd=self.config.cwd,  # Support working directory
+                limit=16 * 1024 * 1024,  # 16MB buffer limit for large responses
             )
             
             # Start reading stdout
