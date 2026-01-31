@@ -46,6 +46,7 @@ class RunResultResponse(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
     
     run_id: str = Field(description="Unique identifier for the run")
+    conversation_id: Optional[str] = Field(default=None, description="Conversation that created this run")
     source: RunSource = Field(description="Which MCP server created this run")
     user_id: Optional[str] = Field(default=None, description="User who initiated the run")
     process_id: Optional[str] = Field(default=None, description="Process ID (sugar, ethanol, etc.)")
@@ -73,6 +74,7 @@ class RunListItem(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
     
     run_id: str = Field(description="Unique identifier for the run")
+    conversation_id: Optional[str] = Field(default=None, description="Conversation that created this run")
     source: RunSource = Field(description="Which MCP server created this run")
     user_id: Optional[str] = Field(default=None, description="User who initiated the run")
     process_id: Optional[str] = Field(default=None, description="Process ID (sugar, ethanol, etc.)")

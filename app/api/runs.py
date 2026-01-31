@@ -165,21 +165,32 @@ async def get_run_results(
         
         # Try calc_engine collection first
         doc = await db.calc_simulation_runs.find_one({"run_id": run_id})
+        source = None
         if doc:
             normalized = normalize_run(doc, "calc_engine")
-            return RunResultResponse(**normalized)
-        
-        # Try process_server collection
-        doc = await db.runs.find_one({"run_id": run_id})
-        if doc:
-            normalized = normalize_run(doc, "process_server")
-            return RunResultResponse(**normalized)
+            source = "calc_engine"
+        else:
+            # Try process_server collection
+            doc = await db.runs.find_one({"run_id": run_id})
+            if doc:
+                normalized = normalize_run(doc, "process_server")
+                source = "process_server"
         
         # Not found in either collection
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Run with ID '{run_id}' not found"
+        if not doc:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Run with ID '{run_id}' not found"
+            )
+        
+        # Lookup conversation_id from conversations collection
+        conversation = await db.conversations.find_one(
+            {"run_ids": run_id},
+            {"conversation_id": 1}
         )
+        normalized["conversation_id"] = conversation["conversation_id"] if conversation else None
+        
+        return RunResultResponse(**normalized)
         
     except HTTPException:
         raise
@@ -307,6 +318,25 @@ async def list_runs(
         
         # Take only the requested limit
         runs_to_return = all_runs[:limit]
+        
+        # Batch lookup conversation_ids for all runs
+        run_ids = [run["run_id"] for run in runs_to_return]
+        conversations_cursor = db.conversations.find(
+            {"run_ids": {"$in": run_ids}},
+            {"conversation_id": 1, "run_ids": 1}
+        )
+        
+        # Build lookup map: run_id -> conversation_id
+        conversation_map = {}
+        async for conv in conversations_cursor:
+            conv_id = conv.get("conversation_id")
+            for rid in conv.get("run_ids", []):
+                if rid in run_ids:
+                    conversation_map[rid] = conv_id
+        
+        # Add conversation_id to each run
+        for run in runs_to_return:
+            run["conversation_id"] = conversation_map.get(run["run_id"])
         
         # Convert to RunListItem models
         run_items = [RunListItem(**run) for run in runs_to_return]
