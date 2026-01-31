@@ -182,6 +182,11 @@ class Settings(BaseSettings):
         description="Comma-separated CORS origins"
     )
     
+    frontend_url: str = Field(
+        default="http://localhost:5173",
+        description="Frontend URL for generating result links in chat responses"
+    )
+    
     # =============================================================================
     # Worker Configuration (RQ)
     # =============================================================================

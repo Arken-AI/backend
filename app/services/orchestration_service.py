@@ -29,6 +29,7 @@ import asyncio
 from typing import Dict, Any, List, Optional
 from datetime import datetime
 
+from app.config import settings
 from app.services.context_manager import ContextManager
 
 # =============================================================================
@@ -92,6 +93,43 @@ from app.services.event_emitter import EventEmitter
 from app.core.policy_engine import PolicyEngine, PolicyDecision
 from app.core.llm_provider import ClaudeProvider
 from app.core.mcp_client import MCPClient, MCPServerConfig, MCPClientRegistry
+
+
+# =============================================================================
+# Helper Functions
+# =============================================================================
+
+def inject_result_links(message: str, run_ids: List[str], frontend_url: str) -> str:
+    """
+    Inject result links if LLM didn't include them.
+    
+    Fallback mechanism for when system prompt fails to generate links.
+    Checks if LLM already included links before injecting to avoid duplicates.
+    
+    Args:
+        message: LLM's response text
+        run_ids: List of run IDs from simulation tools
+        frontend_url: Base URL of frontend application
+    
+    Returns:
+        Message with injected links (if needed)
+    """
+    if not run_ids:
+        return message
+    
+    # Check if LLM already included links (avoid duplicates)
+    if "View Simulation Results" in message or "/results/" in message:
+        return message  # LLM already added links
+    
+    # Inject links programmatically
+    links = []
+    for run_id in run_ids:
+        url = f"{frontend_url}/results/{run_id}"
+        links.append(f"📊 [View Simulation Results]({url})")
+    
+    # Append links to message
+    link_section = "\n\n" + "\n".join(links)
+    return message + link_section
 
 
 # =============================================================================
@@ -443,6 +481,14 @@ class OrchestrationService:
                     
                     # Get updated context with run_ids
                     final_context = await self.context_manager.get_context(conversation_id)
+                    run_ids = final_context.get("run_ids", [])
+                    
+                    # Inject result links if LLM didn't include them (Phase 4.1)
+                    message_with_links = inject_result_links(
+                        message=message_text,
+                        run_ids=run_ids,
+                        frontend_url=settings.frontend_url
+                    )
                     
                     # Format tool executions for response
                     tool_executions = [
@@ -457,10 +503,10 @@ class OrchestrationService:
                     
                     return {
                         "status": "success",
-                        "message": message_text,
+                        "message": message_with_links,
                         "tool_calls": all_tool_results,
                         "tool_executions": tool_executions,
-                        "run_ids": final_context.get("run_ids", []),
+                        "run_ids": run_ids,
                         "iterations": iteration + 1,
                         "conversation_id": conversation_id,
                         "context": final_context,
