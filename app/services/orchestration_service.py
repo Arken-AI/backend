@@ -82,7 +82,7 @@ TOOLS_REQUIRING_USER_ID = {
     # Calc Engine Phase 2 tools (parameter versioning)
     "get_editable_parameters",  # Required
     "validate_parameters",  # Uses user overrides for validation context
-    "edit_parameters",  # Required: saves to user's version
+    # "edit_parameters",  # REMOVED: calc_simulate_process now auto-saves parameters on success
     "get_user_parameters",  # Required: retrieves user's versions
     "switch_parameter_version",  # Required: changes user's active version
     "compare_parameters",  # Required: compares user's versions

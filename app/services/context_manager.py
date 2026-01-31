@@ -323,7 +323,7 @@ class ContextManager:
         calc_engine_tools = {
             "calc_simulate_process", "calc_list_processes", "calc_get_process",
             "calc_get_run", "calc_list_runs", "get_editable_parameters",
-            "validate_parameters", "edit_parameters", "get_user_parameters",
+            "validate_parameters", "get_user_parameters",
             "switch_parameter_version", "compare_parameters"
         }
         

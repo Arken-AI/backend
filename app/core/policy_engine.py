@@ -104,7 +104,7 @@ class PolicyEngine:
     # ========================================
     CALC_ENGINE_PARAMETER_TOOLS = {
         "get_editable_parameters",
-        "edit_parameters",
+        # "edit_parameters",  # REMOVED: auto-saved by calc_simulate_process now
         "get_user_parameters",
         "switch_parameter_version",
         "compare_parameters"
@@ -145,7 +145,7 @@ class PolicyEngine:
     # ========================================
     PARAMETER_PREREQ_MAP = {
         # Must get editable parameters before editing
-        "edit_parameters": ["get_editable_parameters"],
+        # "edit_parameters": ["get_editable_parameters"],  # REMOVED: tool no longer needed
     }
     
     def __init__(self):
