@@ -1254,12 +1254,42 @@ class OrchestrationService:
             # Get the MCP client for this tool
             mcp_client = self._get_mcp_client_for_tool(tool_name, context)
             
+            # Check if we have a valid client for this tool
+            if mcp_client is None:
+                # Determine which capability is unavailable for user-friendly message
+                if tool_name in PROCESS_SERVER_TOOLS:
+                    capability = "Sugar industry simulations"
+                    alternatives = (
+                        "You can try other simulation types like IPA recovery, distillation, "
+                        "or generic flowsheet calculations which are currently available."
+                    )
+                else:
+                    capability = "Dynamic flowsheet simulations"
+                    alternatives = (
+                        "Sugar industry simulations may still be available. "
+                        "Try asking about sugar production or milling processes."
+                    )
+                
+                return {
+                    "status": "error",
+                    "error": "service_unavailable",
+                    "message": (
+                        f"{capability} are temporarily unavailable. {alternatives} "
+                        "If you need this specific feature, please try again in a few minutes."
+                    ),
+                    "user_friendly": True  # Flag for LLM to pass message directly to user
+                }
+            
             # Quick health check before expensive tool execution
             if not await mcp_client.health_check():
                 return {
                     "status": "error",
-                    "error": "MCP Process server is unavailable",
-                    "message": f"Cannot execute {tool_name}: MCP server connection lost"
+                    "error": "service_unavailable",
+                    "message": (
+                        "The simulation service temporarily lost connection. "
+                        "Please try your request again in a moment."
+                    ),
+                    "user_friendly": True
                 }
             
             # Inject conversation_id for list_runs tools
