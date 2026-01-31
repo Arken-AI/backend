@@ -86,11 +86,16 @@ class ContextManager:
             "user_id": user_id,
             "current_industry": None,
             "current_process": None,
-            "current_mcp_server": None,  # "process" - tracks which MCP server is active
+            "active_server": None,  # "process_server" or "calc_engine" - tracks which MCP server is active
+            "current_mcp_server": None,  # Deprecated: use active_server instead
             "simulation_params": {},
             "executed_tools": [],
             "messages": [],  # Conversation history for multi-turn
-            "run_ids": [],  # Array of run IDs, newest first (max 10)
+            "run_ids": [],  # Legacy: flat array of run IDs (deprecated)
+            "runs_by_server": {  # New: run IDs grouped by server
+                "process_server": [],  # Sugar industry runs
+                "calc_engine": []      # Dynamic flowsheet runs
+            },
             "last_simulation_summary": None,  # Condensed simulation results for follow-up questions
             "created_at": now,
             "updated_at": now
@@ -177,26 +182,36 @@ class ContextManager:
         server: str
     ) -> None:
         """
-        Update the current MCP server for a conversation.
+        Update the active MCP server for a conversation.
         
-        Currently only supports 'process' server (MCP Process Server).
+        Supports multiple servers:
+        - 'process_server': MCP Process Server (sugar industry)
+        - 'calc_engine': MCP Calculation Engine Server (dynamic flowsheets)
         
         Args:
             conversation_id: Unique identifier for the conversation
-            server: Server identifier ("process")
+            server: Server identifier ("process_server" or "calc_engine")
             
         Raises:
-            ValueError: If server is not "process"
+            ValueError: If server is not recognized
             
         Example:
-            >>> await update_mcp_server("conv_123", "process")
+            >>> await update_mcp_server("conv_123", "calc_engine")
         """
-        if server != "process":
-            raise ValueError(f"Invalid MCP server: {server}. Must be 'process'")
+        valid_servers = {"process_server", "calc_engine", "process"}  # "process" for legacy
+        
+        if server not in valid_servers:
+            raise ValueError(f"Invalid MCP server: {server}. Must be one of: {valid_servers}")
+        
+        # Normalize legacy "process" to "process_server"
+        normalized_server = "process_server" if server == "process" else server
         
         await self.update_context(
             conversation_id,
-            {"current_mcp_server": server}
+            {
+                "active_server": normalized_server,
+                "current_mcp_server": server  # Keep for backward compatibility
+            }
         )
     
     async def get_mcp_server(self, conversation_id: str) -> Optional[str]:
@@ -247,7 +262,8 @@ class ContextManager:
             "status": result.get("status", "unknown"),
             "process_id": result.get("process_id"),
             "valid": result.get("valid"),
-            "run_id": result.get("calc_run_id") or result.get("run_id")
+            "run_id": result.get("run_id"),
+            "server": result.get("server")  # Track which server executed this tool
         }
         
         # Append to executed_tools list
@@ -258,13 +274,63 @@ class ContextManager:
         context["updated_at"] = datetime.utcnow().isoformat()
         
         # Update last_run_id if present (check both calc_run_id and run_id)
-        run_id = result.get("calc_run_id") or result.get("run_id")
+        run_id = result.get("run_id")
         if run_id:
             context["last_run_id"] = run_id
+            
+            # Also store in runs_by_server for organized tracking
+            server_name = self._get_server_from_result(result, tool_name)
+            if "runs_by_server" not in context:
+                context["runs_by_server"] = {"process_server": [], "calc_engine": []}
+            
+            if server_name in context["runs_by_server"]:
+                # Add to front (newest first), limit to 10 per server
+                runs = context["runs_by_server"][server_name]
+                if run_id not in runs:  # Avoid duplicates
+                    runs.insert(0, run_id)
+                    context["runs_by_server"][server_name] = runs[:10]
+            
+            # Also update legacy run_ids for backward compatibility
+            if "run_ids" not in context:
+                context["run_ids"] = []
+            if run_id not in context["run_ids"]:
+                context["run_ids"].insert(0, run_id)
+                context["run_ids"] = context["run_ids"][:10]
         
         # Save to both storages
         await self._save_to_redis(conversation_id, context)
         await self._save_to_mongo_async(conversation_id, context)
+    
+    def _get_server_from_result(self, result: Dict[str, Any], tool_name: str) -> str:
+        """
+        Determine which server a result came from.
+        
+        Args:
+            result: Tool execution result
+            tool_name: Name of the tool that was executed
+            
+        Returns:
+            Server name ("process_server" or "calc_engine")
+        """
+        # Check if server field is in result
+        server = result.get("server", "")
+        if "calculation-engine" in server or "calc" in server.lower():
+            return "calc_engine"
+        if "process" in server.lower():
+            return "process_server"
+        
+        # Fallback: determine from tool name
+        calc_engine_tools = {
+            "calc_simulate_process", "calc_list_processes", "calc_get_process",
+            "calc_get_run", "calc_list_runs", "get_editable_parameters",
+            "validate_parameters", "edit_parameters", "get_user_parameters",
+            "switch_parameter_version", "compare_parameters"
+        }
+        
+        if tool_name in calc_engine_tools or tool_name.startswith("calc_"):
+            return "calc_engine"
+        
+        return "process_server"
     
     async def add_message(
         self,
@@ -496,6 +562,63 @@ class ContextManager:
             "valid": latest.get("valid", False),
             "process_id": latest.get("process_id")
         }
+    
+    async def get_run_ids_by_server(
+        self, 
+        conversation_id: str, 
+        server: Optional[str] = None
+    ) -> Dict[str, List[str]]:
+        """
+        Get run IDs from the conversation, optionally filtered by server.
+        
+        Args:
+            conversation_id: Unique identifier for the conversation
+            server: Optional server filter ("process" or "calc_engine")
+                   If None, returns all runs grouped by server
+        
+        Returns:
+            Dictionary with server keys and lists of run_ids:
+            - If server is None: {"process": [...], "calc_engine": [...]}
+            - If server specified: {server: [...]}
+            
+        Example:
+            >>> runs = await get_run_ids_by_server("conv_123")
+            {"process": ["run_001"], "calc_engine": ["run_002", "run_003"]}
+            
+            >>> runs = await get_run_ids_by_server("conv_123", server="calc_engine")
+            {"calc_engine": ["run_002", "run_003"]}
+        """
+        context = await self.get_context(conversation_id)
+        if not context:
+            return {"process": [], "calc_engine": []}
+        
+        run_ids_by_server = context.get("run_ids_by_server", {
+            "process": [],
+            "calc_engine": []
+        })
+        
+        if server:
+            if server not in ["process", "calc_engine"]:
+                return {"process": [], "calc_engine": []}
+            return {server: run_ids_by_server.get(server, [])}
+        
+        return run_ids_by_server
+    
+    async def get_active_server(self, conversation_id: str) -> Optional[str]:
+        """
+        Get the currently active MCP server for the conversation.
+        
+        Args:
+            conversation_id: Unique identifier for the conversation
+            
+        Returns:
+            Server name ("process" or "calc_engine") or None if not set
+        """
+        context = await self.get_context(conversation_id)
+        if not context:
+            return None
+        
+        return context.get("active_server")
     
     async def clear_context(self, conversation_id: str) -> None:
         """
