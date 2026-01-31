@@ -95,6 +95,34 @@ class Settings(BaseSettings):
     )
     
     # =============================================================================
+    # MCP Calculation Engine Server Configuration (Dynamic Flowsheets)
+    # =============================================================================
+    mcp_calc_engine_enabled: bool = Field(
+        default=True,
+        description="Enable MCP calculation engine server"
+    )
+    mcp_calc_engine_command: str = Field(
+        default="python",
+        description="Path to Python interpreter for MCP calc engine server"
+    )
+    mcp_calc_engine_args: str = Field(
+        default="server.py",
+        description="Path to MCP calc engine server.py file"
+    )
+    mcp_calc_engine_cwd: Optional[str] = Field(
+        default=None,
+        description="Working directory for MCP calc engine server"
+    )
+    mcp_calc_engine_env_calc_engine_url: str = Field(
+        default="http://localhost:8000",
+        description="Calculation engine API URL for calc engine server"
+    )
+    mcp_calc_engine_env_mongodb_uri: Optional[str] = Field(
+        default=None,
+        description="MongoDB URI for MCP calc engine server (uses MONGODB_URL if not set)"
+    )
+    
+    # =============================================================================
     # LLM Provider Configuration
     # =============================================================================
     anthropic_api_key: Optional[str] = Field(

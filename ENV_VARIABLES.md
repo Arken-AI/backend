@@ -83,6 +83,47 @@ This document explains all environment variables used in the MCP Chat Backend.
 
 ---
 
+## MCP Calculation Engine Server Configuration
+
+These settings configure the second MCP server that handles dynamic flowsheet simulations.
+
+### `MCP_CALC_ENGINE_ENABLED`
+- **Description**: Enable or disable the calculation engine MCP server
+- **Default**: `true`
+- **Options**: `true`, `false`
+- **Required**: No
+- **Note**: Set to `false` to run with only the process server
+
+### `MCP_CALC_ENGINE_COMMAND`
+- **Description**: Command to launch the calc engine MCP server
+- **Default**: `python`
+- **Required**: Yes (if enabled)
+
+### `MCP_CALC_ENGINE_ARGS`
+- **Description**: Arguments for the calc engine server command
+- **Default**: `server.py`
+- **Required**: Yes (if enabled)
+
+### `MCP_CALC_ENGINE_CWD`
+- **Description**: Working directory for the calc engine MCP server
+- **Example**: `/path/to/mcp_calculation_engine_server`
+- **Required**: Yes (if enabled)
+- **Important**: Set to absolute path where the server code is located
+
+### `MCP_CALC_ENGINE_ENV_CALC_ENGINE_URL`
+- **Description**: URL of the calculation engine API
+- **Default**: `http://localhost:8000`
+- **Required**: No (uses default if not set)
+- **Note**: Usually the same as the process server's calculation engine
+
+### `MCP_CALC_ENGINE_ENV_MONGODB_URI`
+- **Description**: MongoDB URI for the calc engine server
+- **Default**: Uses `MONGODB_URL` if not set
+- **Required**: No
+- **Note**: Both servers typically use the same database
+
+---
+
 ## API Configuration
 
 ### `CORS_ORIGINS`
