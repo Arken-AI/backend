@@ -8,7 +8,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api import stream, health, chat, test_stream
+from app.api import stream, health, chat, test_stream, runs
 from app.dependencies import close_redis_client, close_mcp_clients
 from app.config import settings
 
@@ -58,6 +58,7 @@ def create_app() -> FastAPI:
     app.include_router(chat.router, prefix="/api", tags=["chat"])
     app.include_router(stream.router, prefix="/api", tags=["streaming"])
     app.include_router(test_stream.router, prefix="/api", tags=["testing"])
+    app.include_router(runs.router, prefix="/api", tags=["runs"])
     
     return app
 
