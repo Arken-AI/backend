@@ -204,6 +204,30 @@ class Settings(BaseSettings):
     )
     
     # =============================================================================
+    # Report Generation Settings
+    # =============================================================================
+    report_storage_path: str = Field(
+        default="storage/reports",
+        description="Directory path for storing generated PDF reports"
+    )
+    report_max_streams_per_table: int = Field(
+        default=10,
+        description="Maximum number of streams to display per table (splits if exceeded)"
+    )
+    report_llm_model: str = Field(
+        default="claude-sonnet-4-20250514",
+        description="LLM model to use for report narrative generation"
+    )
+    report_llm_max_tokens: int = Field(
+        default=1500,
+        description="Maximum tokens for report narrative generation"
+    )
+    report_pdf_page_size: str = Field(
+        default="letter",
+        description="PDF page size: 'letter' or 'A4'"
+    )
+    
+    # =============================================================================
     # Application Settings
     # =============================================================================
     log_level: str = Field(
@@ -252,6 +276,14 @@ class Settings(BaseSettings):
         if not 0.0 <= v <= 2.0:
             raise ValueError("llm_temperature must be between 0.0 and 2.0")
         return v
+    
+    @validator("report_pdf_page_size")
+    def validate_pdf_page_size(cls, v):
+        """Ensure valid PDF page size."""
+        valid_sizes = ("letter", "a4", "A4")
+        if v.lower() not in valid_sizes:
+            raise ValueError("report_pdf_page_size must be 'letter' or 'A4'")
+        return v.lower()
     
     @validator("google_api_key", pre=True)
     def clean_google_api_key(cls, v):
