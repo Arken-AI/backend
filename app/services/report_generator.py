@@ -1,0 +1,246 @@
+"""
+Report Generator Service
+
+Main orchestration service for generating detailed simulation reports.
+Coordinates data collection, table formatting, and PDF generation.
+
+This service:
+- Creates report records in MongoDB
+- Manages report generation lifecycle
+- Tracks progress and status
+- Handles PDF storage and retrieval
+"""
+
+import asyncio
+import uuid
+import os
+from typing import Optional
+from datetime import datetime, timezone
+from pathlib import Path
+
+from motor.motor_asyncio import AsyncIOMotorDatabase
+from bson import ObjectId
+
+from app.config import settings
+from app.models.report import (
+    ReportStatus,
+    ReportOptions,
+    ReportRequest,
+    ReportResponse,
+    ReportStatusResponse,
+    ReportMetadata,
+    ReportData,
+    StreamTableData,
+    EquipmentTableData,
+    MassBalanceSummary,
+    EnergyBalanceSummary,
+)
+from app.services.report_data_collector import ReportDataCollector
+from app.services.table_formatter import StreamTableFormatter
+from app.services.pdf_generator import PDFReportGenerator
+
+
+class ReportGeneratorService:
+    """
+    Orchestrates the complete report generation process.
+    
+    Workflow:
+    1. Create report record (status: pending)
+    2. Collect simulation data from MongoDB
+    3. Format data into tables
+    4. Generate PDF report
+    5. Save PDF to storage
+    6. Update record (status: completed, download_url)
+    
+    Progress tracking:
+    - 0%: Started
+    - 10%: Collecting data
+    - 30%: Formatting tables
+    - 50%: Generating PDF
+    - 90%: Saving file
+    - 100%: Complete
+    """
+    
+    # Progress milestones
+    PROGRESS_STARTED = 0
+    PROGRESS_COLLECTING_DATA = 10
+    PROGRESS_FORMATTING_TABLES = 30
+    PROGRESS_GENERATING_PDF = 50
+    PROGRESS_SAVING_FILE = 90
+    PROGRESS_COMPLETE = 100
+    
+    def __init__(self, db: AsyncIOMotorDatabase):
+        """
+        Initialize the report generator service.
+        
+        Args:
+            db: AsyncIOMotorDatabase instance for MongoDB operations
+        """
+        self.db = db
+        self.reports_collection = db.reports
+        
+        # Initialize sub-services
+        self.data_collector = ReportDataCollector(db)
+        self.table_formatter = StreamTableFormatter(
+            max_streams_per_table=settings.report_max_streams_per_table
+        )
+        self.pdf_generator = PDFReportGenerator(
+            page_size=settings.report_pdf_page_size,
+            max_streams_per_table=settings.report_max_streams_per_table
+        )
+        
+        # Ensure storage directory exists
+        self.storage_path = Path(settings.report_storage_path)
+        self.storage_path.mkdir(parents=True, exist_ok=True)
+    
+    async def generate_report(
+        self,
+        run_id: str,
+        pfd_image_base64: str,
+        options: Optional[ReportOptions] = None
+    ) -> ReportResponse:
+        """
+        Start report generation process.
+        
+        Creates a report record and returns immediately.
+        Actual generation happens in background.
+        
+        Args:
+            run_id: ID of the simulation run
+            pfd_image_base64: Base64 encoded PFD image
+            options: Report generation options
+            
+        Returns:
+            ReportResponse with report_id and initial status
+        """
+        # TODO: Step 2 implementation
+        raise NotImplementedError("Step 2: generate_report()")
+    
+    async def _process_report(
+        self,
+        report_id: str,
+        run_id: str,
+        pfd_image_base64: str,
+        options: ReportOptions
+    ) -> None:
+        """
+        Process report generation in background.
+        
+        This method:
+        1. Collects simulation data
+        2. Formats tables
+        3. Generates PDF (without AI content for now)
+        4. Saves PDF to storage
+        5. Updates report status
+        
+        Args:
+            report_id: Unique report identifier
+            run_id: Simulation run ID
+            pfd_image_base64: Base64 encoded PFD image
+            options: Report generation options
+        """
+        # TODO: Step 3 implementation
+        raise NotImplementedError("Step 3: _process_report()")
+    
+    async def get_report_status(self, report_id: str) -> Optional[ReportStatusResponse]:
+        """
+        Get current status of a report.
+        
+        Args:
+            report_id: Unique report identifier
+            
+        Returns:
+            ReportStatusResponse or None if not found
+        """
+        # TODO: Step 4 implementation
+        raise NotImplementedError("Step 4: get_report_status()")
+    
+    async def get_report_file(self, report_id: str) -> Optional[tuple[bytes, str]]:
+        """
+        Get the generated PDF file.
+        
+        Args:
+            report_id: Unique report identifier
+            
+        Returns:
+            Tuple of (pdf_bytes, filename) or None if not found/not ready
+        """
+        # TODO: Step 5 implementation
+        raise NotImplementedError("Step 5: get_report_file()")
+    
+    async def _update_progress(
+        self,
+        report_id: str,
+        progress: int,
+        current_step: str,
+        status: ReportStatus = ReportStatus.PROCESSING
+    ) -> None:
+        """
+        Update report progress in MongoDB.
+        
+        Args:
+            report_id: Unique report identifier
+            progress: Progress percentage (0-100)
+            current_step: Description of current step
+            status: Report status
+        """
+        # TODO: Step 6 implementation
+        raise NotImplementedError("Step 6: _update_progress()")
+    
+    def _generate_filename(self, report_id: str, process_name: str) -> str:
+        """
+        Generate a unique filename for the PDF.
+        
+        Args:
+            report_id: Unique report identifier
+            process_name: Name of the process
+            
+        Returns:
+            Filename string
+        """
+        # TODO: Step 7 implementation
+        raise NotImplementedError("Step 7: _generate_filename()")
+    
+    async def _save_pdf_to_storage(
+        self,
+        pdf_bytes: bytes,
+        filename: str
+    ) -> str:
+        """
+        Save PDF to storage directory.
+        
+        Args:
+            pdf_bytes: PDF file content
+            filename: Filename to save as
+            
+        Returns:
+            Full file path
+        """
+        # TODO: Step 7 implementation
+        raise NotImplementedError("Step 7: _save_pdf_to_storage()")
+    
+    async def delete_report(self, report_id: str) -> bool:
+        """
+        Delete a report and its PDF file.
+        
+        Args:
+            report_id: Unique report identifier
+            
+        Returns:
+            True if deleted, False if not found
+        """
+        # TODO: Optional implementation
+        raise NotImplementedError("Optional: delete_report()")
+    
+    async def cleanup_old_reports(self, days: int = 7) -> int:
+        """
+        Clean up reports older than specified days.
+        
+        Args:
+            days: Number of days to retain reports
+            
+        Returns:
+            Number of reports deleted
+        """
+        # TODO: Step 8 implementation (optional)
+        raise NotImplementedError("Step 8: cleanup_old_reports()")
