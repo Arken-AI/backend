@@ -590,8 +590,9 @@ class ReportDataCollector:
         # Sum flow rates based on stream naming conventions
         # Inputs: feed, inlet, in, raw, input
         # Outputs: product, outlet, out, waste, output, distillate, bottoms
+        # Note: "cooler" removed from outputs to avoid counting intermediate streams like "column_to_cooler"
         input_keywords = ["feed", "inlet", "in", "raw", "input"]
-        output_keywords = ["product", "outlet", "out", "waste", "output", "distillate", "bottoms", "cooler"]
+        output_keywords = ["product", "outlet", "out", "waste", "output", "distillate", "bottoms"]
         
         for stream_id, data in stream_data.items():
             flow_rate = data.get("flow_rate", 0) or 0
@@ -601,16 +602,14 @@ class ReportDataCollector:
             is_input = any(kw in stream_lower for kw in input_keywords)
             is_output = any(kw in stream_lower for kw in output_keywords)
             
-            # Internal streams (e.g., column_to_cooler) should be skipped
-            is_internal = "_to_" in stream_lower and not is_output
+            # Internal streams (e.g., column_to_cooler) should always be skipped
+            is_internal = "_to_" in stream_lower
             
             if is_input and not is_internal:
                 total_mass_in += flow_rate
-            elif is_output or (not is_input and not is_internal):
-                # Only count terminal streams as outputs
-                # Skip intermediate streams
-                if is_output:
-                    total_mass_out += flow_rate
+            elif is_output and not is_internal:
+                # Only count terminal output streams
+                total_mass_out += flow_rate
         
         # If no categorization worked, use equipment-based approach
         if total_mass_in == 0 and total_mass_out == 0:

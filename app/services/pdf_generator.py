@@ -4,7 +4,7 @@ PDF Report Generator Service
 Responsible for generating professional PDF reports from simulation data
 using ReportLab library. Creates multi-page reports with:
 - Cover page
-- Table of contents
+- Table of contents (with accurate page numbers via two-pass generation)
 - Process descriptions (placeholder for AI content in Phase 2)
 - PFD image
 - Stream tables
@@ -15,7 +15,7 @@ using ReportLab library. Creates multi-page reports with:
 import io
 import re
 import base64
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Dict
 from datetime import datetime
 
 from reportlab.lib import colors
@@ -34,8 +34,10 @@ from reportlab.platypus import (
     KeepTogether,
     ListFlowable,
     ListItem,
+    Flowable,
 )
 from reportlab.platypus.flowables import HRFlowable
+from reportlab.platypus.doctemplate import BaseDocTemplate, PageTemplate, Frame
 from PIL import Image as PILImage
 
 from app.models.report import (
@@ -53,6 +55,34 @@ from app.services.table_formatter import (
     format_with_thousands_separator,
     create_balance_summary_table,
 )
+
+
+# =============================================================================
+# SECTION MARKER FOR PAGE TRACKING
+# =============================================================================
+
+class SectionMarker(Flowable):
+    """
+    Invisible flowable that marks the start of a section.
+    Used for tracking page numbers in two-pass generation.
+    """
+    
+    def __init__(self, section_id: str, page_tracker: Dict[str, int] = None):
+        Flowable.__init__(self)
+        self.section_id = section_id
+        self.page_tracker = page_tracker
+        self.width = 0
+        self.height = 0
+    
+    def draw(self):
+        """Record the current page number when this flowable is rendered."""
+        if self.page_tracker is not None:
+            # canv.getPageNumber() gives current page
+            self.page_tracker[self.section_id] = self.canv.getPageNumber()
+    
+    def wrap(self, availWidth, availHeight):
+        """This flowable takes no space."""
+        return (0, 0)
 
 
 # =============================================================================
@@ -645,10 +675,43 @@ class PDFReportGenerator:
     
     def generate_pdf(self, report_data: ReportData) -> bytes:
         """
-        Generate the complete PDF report.
+        Generate the complete PDF report using two-pass generation.
+        
+        Pass 1: Build PDF with placeholder TOC to determine actual page numbers
+        Pass 2: Rebuild PDF with accurate page numbers in TOC
         
         Args:
             report_data: ReportData object with all report content
+            
+        Returns:
+            PDF file as bytes
+        """
+        # Dictionary to track section page numbers
+        page_tracker: Dict[str, int] = {}
+        
+        # =================================================================
+        # PASS 1: Build PDF to determine actual page numbers
+        # =================================================================
+        self._build_pdf_pass(report_data, page_tracker, is_first_pass=True)
+        
+        # =================================================================
+        # PASS 2: Build final PDF with accurate page numbers
+        # =================================================================
+        return self._build_pdf_pass(report_data, page_tracker, is_first_pass=False)
+    
+    def _build_pdf_pass(
+        self, 
+        report_data: ReportData, 
+        page_tracker: Dict[str, int],
+        is_first_pass: bool = True
+    ) -> bytes:
+        """
+        Build the PDF document (used for both passes).
+        
+        Args:
+            report_data: ReportData object with all report content
+            page_tracker: Dictionary to track/use section page numbers
+            is_first_pass: If True, records page numbers; if False, uses them
             
         Returns:
             PDF file as bytes
@@ -672,59 +735,79 @@ class PDFReportGenerator:
         story = []
         
         # =============================================
-        # Build dynamic TOC based on available content
+        # Determine which sections are included
         # =============================================
+        sections_config = []
         section_number = 1
-        toc_entries = []
-        page_estimate = 3  # Start after cover and TOC
         
-        # Executive Summary - only if AI content available
+        # Executive Summary
         if report_data.executive_summary:
-            toc_entries.append((f"{section_number}. Executive Summary", str(page_estimate)))
+            sections_config.append({
+                "id": "executive_summary",
+                "number": section_number,
+                "title": "Executive Summary"
+            })
             section_number += 1
-            page_estimate += 1
-        
-        # Process Description - only if AI content available
-        if report_data.process_description_sections:
-            toc_entries.append((f"{section_number}. Process Description", str(page_estimate)))
-            section_number += 1
-            page_estimate += 1
         
         # PFD always included
-        pfd_section = section_number
-        toc_entries.append((f"{section_number}. Process Flow Diagram", str(page_estimate)))
+        sections_config.append({
+            "id": "pfd",
+            "number": section_number,
+            "title": "Process Flow Diagram"
+        })
         section_number += 1
-        page_estimate += 1
         
-        # Stream Tables - only if data available
-        stream_section = None
+        # Stream Tables
         if report_data.stream_table and report_data.stream_table.stream_ids:
-            stream_section = section_number
-            toc_entries.append((f"{section_number}. Stream Tables", str(page_estimate)))
+            sections_config.append({
+                "id": "stream_tables",
+                "number": section_number,
+                "title": "Stream Tables"
+            })
             section_number += 1
-            page_estimate += 2  # Tables take more space
         
-        # Equipment Summary - only if data available
-        equipment_section = None
+        # Equipment Summary
         if report_data.equipment_table and report_data.equipment_table.equipment_ids:
-            equipment_section = section_number
-            toc_entries.append((f"{section_number}. Equipment Summary", str(page_estimate)))
+            sections_config.append({
+                "id": "equipment_summary",
+                "number": section_number,
+                "title": "Equipment Summary"
+            })
             section_number += 1
-            page_estimate += 1
         
-        # Mass & Energy Balance - only if data available
-        balance_section = None
+        # Mass & Energy Balance
         if report_data.mass_balance or report_data.energy_balance:
-            balance_section = section_number
-            toc_entries.append((f"{section_number}. Mass & Energy Balance", str(page_estimate)))
+            sections_config.append({
+                "id": "balance",
+                "number": section_number,
+                "title": "Mass & Energy Balance"
+            })
             section_number += 1
-            page_estimate += 1
         
-        # Observations - only if AI content available
-        observations_section = None
+        # Observations
         if report_data.observations:
-            observations_section = section_number
-            toc_entries.append((f"{section_number}. Observations & Conclusions", str(page_estimate)))
+            sections_config.append({
+                "id": "observations",
+                "number": section_number,
+                "title": "Observations & Conclusions"
+            })
+        
+        # =============================================
+        # Build TOC entries
+        # =============================================
+        toc_entries = []
+        for section in sections_config:
+            if is_first_pass:
+                # First pass: use placeholder "..."
+                page_num = "..."
+            else:
+                # Second pass: use actual page numbers from first pass
+                page_num = str(page_tracker.get(section["id"], "?"))
+            
+            toc_entries.append((
+                f"{section['number']}. {section['title']}", 
+                page_num
+            ))
         
         # =============================================
         # 1. Cover Page
@@ -732,70 +815,58 @@ class PDFReportGenerator:
         self.add_cover_page(story, report_data.metadata)
         
         # =============================================
-        # 2. Table of Contents (dynamic)
+        # 2. Table of Contents
         # =============================================
         self.add_table_of_contents(story, toc_entries)
         
         # =============================================
-        # 3. Executive Summary (skip if None)
+        # 3. Content Sections
         # =============================================
         current_section = 1
+        
+        # Executive Summary
         if report_data.executive_summary:
+            # Add section marker for page tracking
+            story.append(SectionMarker("executive_summary", page_tracker if is_first_pass else None))
             self.add_section_header(story, str(current_section), "Executive Summary")
             self.add_paragraph(story, report_data.executive_summary)
-            story.append(Spacer(1, 0.3 * inch))
-            current_section += 1
-        
-        # =============================================
-        # 4. Process Description (skip if None)
-        # =============================================
-        if report_data.process_description_sections:
-            self.add_section_header(story, str(current_section), "Process Description")
-            for section in report_data.process_description_sections:
-                self.add_subsection_header(story, section.section_number, section.title)
-                self.add_paragraph(story, section.content)
             story.append(PageBreak())
             current_section += 1
         
-        # =============================================
-        # 5. Process Flow Diagram (always included)
-        # =============================================
+        # PFD
+        story.append(SectionMarker("pfd", page_tracker if is_first_pass else None))
         self.add_section_header(story, str(current_section), "Process Flow Diagram")
         self.add_pfd_image(story, report_data.pfd_image_base64)
         story.append(PageBreak())
         current_section += 1
         
-        # =============================================
-        # 6. Stream Tables (skip if no data)
-        # =============================================
+        # Stream Tables
         if report_data.stream_table and report_data.stream_table.stream_ids:
+            story.append(SectionMarker("stream_tables", page_tracker if is_first_pass else None))
             self.add_section_header(story, str(current_section), "Stream Tables")
             self.add_stream_table(story, report_data.stream_table, table_number=1)
             story.append(PageBreak())
             current_section += 1
         
-        # =============================================
-        # 7. Equipment Summary (skip if no data)
-        # =============================================
+        # Equipment Summary
         if report_data.equipment_table and report_data.equipment_table.equipment_ids:
+            story.append(SectionMarker("equipment_summary", page_tracker if is_first_pass else None))
             self.add_section_header(story, str(current_section), "Equipment Summary")
             self.add_equipment_table(story, report_data.equipment_table, table_number=2)
-            story.append(Spacer(1, 0.5 * inch))
+            story.append(PageBreak())
             current_section += 1
         
-        # =============================================
-        # 8. Mass & Energy Balance (skip if no data)
-        # =============================================
+        # Mass & Energy Balance
         if report_data.mass_balance or report_data.energy_balance:
+            story.append(SectionMarker("balance", page_tracker if is_first_pass else None))
             self.add_section_header(story, str(current_section), "Mass & Energy Balance")
             self.add_balance_summary(story, report_data.mass_balance, report_data.energy_balance)
             story.append(PageBreak())
             current_section += 1
         
-        # =============================================
-        # 9. Observations & Conclusions (skip if None)
-        # =============================================
+        # Observations & Conclusions
         if report_data.observations:
+            story.append(SectionMarker("observations", page_tracker if is_first_pass else None))
             self.add_section_header(story, str(current_section), "Observations & Conclusions")
             self.add_paragraph(story, report_data.observations)
         

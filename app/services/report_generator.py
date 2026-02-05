@@ -252,7 +252,7 @@ class ReportGeneratorService:
                 await self._update_progress(
                     report_id,
                     self.PROGRESS_GENERATING_AI,
-                    "Generating AI narratives"
+                    "Generating executive summary..."
                 )
                 
                 # Generate executive summary
@@ -264,6 +264,13 @@ class ReportGeneratorService:
                     energy_balance=energy_balance,
                 )
                 
+                # Update progress after executive summary
+                await self._update_progress(
+                    report_id,
+                    58,  # Intermediate progress
+                    "Generating observations and recommendations..."
+                )
+                
                 # Generate observations
                 observations = await self.narrative_generator.generate_observations(
                     run_data=run_data,
@@ -271,6 +278,13 @@ class ReportGeneratorService:
                     energy_balance=energy_balance,
                     equipment_table=equipment_table,
                     stream_table=stream_table,
+                )
+                
+                # Update progress after observations
+                await self._update_progress(
+                    report_id,
+                    65,  # Intermediate progress
+                    "AI narratives complete"
                 )
             
             # ========================================
