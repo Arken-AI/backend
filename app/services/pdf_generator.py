@@ -286,26 +286,28 @@ class PDFReportGenerator:
         # Page break after cover
         story.append(PageBreak())
     
-    def add_table_of_contents(self, story: List):
+    def add_table_of_contents(self, story: List, toc_entries: Optional[List[Tuple[str, str]]] = None):
         """
         Add table of contents to the report.
         
         Args:
             story: List of flowables to append to
+            toc_entries: Optional list of (title, page) tuples. If None, uses default entries.
         """
         story.append(Paragraph("Table of Contents", self.styles['heading1']))
         story.append(Spacer(1, 0.3 * inch))
         
-        # Static TOC entries (page numbers are approximate)
-        toc_entries = [
-            ("1. Executive Summary", "3"),
-            ("2. Process Description", "4"),
-            ("3. Process Flow Diagram", "5"),
-            ("4. Stream Tables", "6"),
-            ("5. Equipment Summary", "8"),
-            ("6. Mass & Energy Balance", "9"),
-            ("7. Observations & Conclusions", "10"),
-        ]
+        # Use provided entries or fall back to defaults
+        if toc_entries is None:
+            toc_entries = [
+                ("1. Executive Summary", "3"),
+                ("2. Process Description", "4"),
+                ("3. Process Flow Diagram", "5"),
+                ("4. Stream Tables", "6"),
+                ("5. Equipment Summary", "8"),
+                ("6. Mass & Energy Balance", "9"),
+                ("7. Observations & Conclusions", "10"),
+            ]
         
         for entry, page in toc_entries:
             # Create a two-column table for TOC entry
@@ -613,74 +615,133 @@ class PDFReportGenerator:
         # Build story (list of flowables)
         story = []
         
+        # =============================================
+        # Build dynamic TOC based on available content
+        # =============================================
+        section_number = 1
+        toc_entries = []
+        page_estimate = 3  # Start after cover and TOC
+        
+        # Executive Summary - only if AI content available
+        if report_data.executive_summary:
+            toc_entries.append((f"{section_number}. Executive Summary", str(page_estimate)))
+            section_number += 1
+            page_estimate += 1
+        
+        # Process Description - only if AI content available
+        if report_data.process_description_sections:
+            toc_entries.append((f"{section_number}. Process Description", str(page_estimate)))
+            section_number += 1
+            page_estimate += 1
+        
+        # PFD always included
+        pfd_section = section_number
+        toc_entries.append((f"{section_number}. Process Flow Diagram", str(page_estimate)))
+        section_number += 1
+        page_estimate += 1
+        
+        # Stream Tables - only if data available
+        stream_section = None
+        if report_data.stream_table and report_data.stream_table.stream_ids:
+            stream_section = section_number
+            toc_entries.append((f"{section_number}. Stream Tables", str(page_estimate)))
+            section_number += 1
+            page_estimate += 2  # Tables take more space
+        
+        # Equipment Summary - only if data available
+        equipment_section = None
+        if report_data.equipment_table and report_data.equipment_table.equipment_ids:
+            equipment_section = section_number
+            toc_entries.append((f"{section_number}. Equipment Summary", str(page_estimate)))
+            section_number += 1
+            page_estimate += 1
+        
+        # Mass & Energy Balance - only if data available
+        balance_section = None
+        if report_data.mass_balance or report_data.energy_balance:
+            balance_section = section_number
+            toc_entries.append((f"{section_number}. Mass & Energy Balance", str(page_estimate)))
+            section_number += 1
+            page_estimate += 1
+        
+        # Observations - only if AI content available
+        observations_section = None
+        if report_data.observations:
+            observations_section = section_number
+            toc_entries.append((f"{section_number}. Observations & Conclusions", str(page_estimate)))
+        
+        # =============================================
         # 1. Cover Page
+        # =============================================
         self.add_cover_page(story, report_data.metadata)
         
-        # 2. Table of Contents
-        self.add_table_of_contents(story)
+        # =============================================
+        # 2. Table of Contents (dynamic)
+        # =============================================
+        self.add_table_of_contents(story, toc_entries)
         
-        # 3. Executive Summary
-        self.add_section_header(story, "1", "Executive Summary")
+        # =============================================
+        # 3. Executive Summary (skip if None)
+        # =============================================
+        current_section = 1
         if report_data.executive_summary:
+            self.add_section_header(story, str(current_section), "Executive Summary")
             self.add_paragraph(story, report_data.executive_summary)
-        else:
-            self.add_paragraph(story, 
-                "<i>This section will contain an AI-generated executive summary of the simulation results, "
-                "including key findings, process performance metrics, and overall conclusions. "
-                "(AI narrative generation will be implemented in Phase 2)</i>"
-            )
-        story.append(Spacer(1, 0.3 * inch))
+            story.append(Spacer(1, 0.3 * inch))
+            current_section += 1
         
-        # 4. Process Description
-        self.add_section_header(story, "2", "Process Description")
+        # =============================================
+        # 4. Process Description (skip if None)
+        # =============================================
         if report_data.process_description_sections:
+            self.add_section_header(story, str(current_section), "Process Description")
             for section in report_data.process_description_sections:
                 self.add_subsection_header(story, section.section_number, section.title)
                 self.add_paragraph(story, section.content)
-        else:
-            self.add_paragraph(story,
-                "<i>This section will contain AI-generated descriptions of each process unit, "
-                "including operating conditions, inlet/outlet streams, and performance metrics. "
-                "(AI narrative generation will be implemented in Phase 2)</i>"
-            )
-        story.append(PageBreak())
+            story.append(PageBreak())
+            current_section += 1
         
-        # 5. Process Flow Diagram
-        self.add_section_header(story, "3", "Process Flow Diagram")
+        # =============================================
+        # 5. Process Flow Diagram (always included)
+        # =============================================
+        self.add_section_header(story, str(current_section), "Process Flow Diagram")
         self.add_pfd_image(story, report_data.pfd_image_base64)
         story.append(PageBreak())
+        current_section += 1
         
-        # 6. Stream Tables
-        self.add_section_header(story, "4", "Stream Tables")
-        if report_data.stream_table:
+        # =============================================
+        # 6. Stream Tables (skip if no data)
+        # =============================================
+        if report_data.stream_table and report_data.stream_table.stream_ids:
+            self.add_section_header(story, str(current_section), "Stream Tables")
             self.add_stream_table(story, report_data.stream_table, table_number=1)
-        else:
-            self.add_paragraph(story, "No stream data available.")
-        story.append(PageBreak())
+            story.append(PageBreak())
+            current_section += 1
         
-        # 7. Equipment Summary
-        self.add_section_header(story, "5", "Equipment Summary")
-        if report_data.equipment_table:
+        # =============================================
+        # 7. Equipment Summary (skip if no data)
+        # =============================================
+        if report_data.equipment_table and report_data.equipment_table.equipment_ids:
+            self.add_section_header(story, str(current_section), "Equipment Summary")
             self.add_equipment_table(story, report_data.equipment_table, table_number=2)
-        else:
-            self.add_paragraph(story, "No equipment data available.")
-        story.append(Spacer(1, 0.5 * inch))
+            story.append(Spacer(1, 0.5 * inch))
+            current_section += 1
         
-        # 8. Mass & Energy Balance
-        self.add_section_header(story, "6", "Mass & Energy Balance")
-        self.add_balance_summary(story, report_data.mass_balance, report_data.energy_balance)
-        story.append(PageBreak())
+        # =============================================
+        # 8. Mass & Energy Balance (skip if no data)
+        # =============================================
+        if report_data.mass_balance or report_data.energy_balance:
+            self.add_section_header(story, str(current_section), "Mass & Energy Balance")
+            self.add_balance_summary(story, report_data.mass_balance, report_data.energy_balance)
+            story.append(PageBreak())
+            current_section += 1
         
-        # 9. Observations & Conclusions
-        self.add_section_header(story, "7", "Observations & Conclusions")
+        # =============================================
+        # 9. Observations & Conclusions (skip if None)
+        # =============================================
         if report_data.observations:
+            self.add_section_header(story, str(current_section), "Observations & Conclusions")
             self.add_paragraph(story, report_data.observations)
-        else:
-            self.add_paragraph(story,
-                "<i>This section will contain AI-generated observations about the simulation results, "
-                "including any anomalies, recommendations for optimization, and conclusions. "
-                "(AI narrative generation will be implemented in Phase 2)</i>"
-            )
         
         # Build the PDF
         doc.build(story)

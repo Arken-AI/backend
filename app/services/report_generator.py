@@ -38,6 +38,7 @@ from app.models.report import (
 from app.services.report_data_collector import ReportDataCollector
 from app.services.table_formatter import StreamTableFormatter
 from app.services.pdf_generator import PDFReportGenerator
+from app.services.narrative_generator import NarrativeGeneratorService
 
 
 class ReportGeneratorService:
@@ -65,7 +66,8 @@ class ReportGeneratorService:
     PROGRESS_STARTED = 0
     PROGRESS_COLLECTING_DATA = 10
     PROGRESS_FORMATTING_TABLES = 30
-    PROGRESS_GENERATING_PDF = 50
+    PROGRESS_GENERATING_AI = 50
+    PROGRESS_GENERATING_PDF = 70
     PROGRESS_SAVING_FILE = 90
     PROGRESS_COMPLETE = 100
     
@@ -88,6 +90,7 @@ class ReportGeneratorService:
             page_size=settings.report_pdf_page_size,
             max_streams_per_table=settings.report_max_streams_per_table
         )
+        self.narrative_generator = NarrativeGeneratorService()
         
         # Ensure storage directory exists
         self.storage_path = Path(settings.report_storage_path)
@@ -239,7 +242,39 @@ class ReportGeneratorService:
                 )
             
             # ========================================
-            # STEP 7: Create report metadata
+            # STEP 7: Generate AI narratives (if available)
+            # ========================================
+            executive_summary = None
+            observations = None
+            process_description_sections = None
+            
+            if options.include_ai_narratives and self.narrative_generator.is_available:
+                await self._update_progress(
+                    report_id,
+                    self.PROGRESS_GENERATING_AI,
+                    "Generating AI narratives"
+                )
+                
+                # Generate executive summary
+                executive_summary = await self.narrative_generator.generate_executive_summary(
+                    run_data=run_data,
+                    stream_table=stream_table,
+                    equipment_table=equipment_table,
+                    mass_balance=mass_balance,
+                    energy_balance=energy_balance,
+                )
+                
+                # Generate observations
+                observations = await self.narrative_generator.generate_observations(
+                    run_data=run_data,
+                    mass_balance=mass_balance,
+                    energy_balance=energy_balance,
+                    equipment_table=equipment_table,
+                    stream_table=stream_table,
+                )
+            
+            # ========================================
+            # STEP 8: Create report metadata
             # ========================================
             await self._update_progress(
                 report_id,
@@ -257,7 +292,7 @@ class ReportGeneratorService:
             )
             
             # ========================================
-            # STEP 8: Assemble report data
+            # STEP 9: Assemble report data
             # ========================================
             report_data = ReportData(
                 metadata=metadata,
@@ -266,19 +301,19 @@ class ReportGeneratorService:
                 equipment_table=equipment_table,
                 mass_balance=mass_balance,
                 energy_balance=energy_balance,
-                # AI-generated content (Phase 3)
-                executive_summary=None,
-                process_description_sections=None,
-                observations=None,
+                # AI-generated content
+                executive_summary=executive_summary,
+                process_description_sections=process_description_sections,
+                observations=observations,
             )
             
             # ========================================
-            # STEP 9: Generate PDF
+            # STEP 10: Generate PDF
             # ========================================
             pdf_bytes = self.pdf_generator.generate_pdf(report_data)
             
             # ========================================
-            # STEP 10: Save PDF to storage
+            # STEP 11: Save PDF to storage
             # ========================================
             await self._update_progress(
                 report_id,
@@ -290,7 +325,7 @@ class ReportGeneratorService:
             file_path = await self._save_pdf_to_storage(pdf_bytes, filename)
             
             # ========================================
-            # STEP 11: Update record as completed
+            # STEP 12: Update record as completed
             # ========================================
             download_url = f"/api/v1/reports/{report_id}/download"
             

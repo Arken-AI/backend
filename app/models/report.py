@@ -36,6 +36,7 @@ class ReportOptions(BaseModel):
     include_mass_balance: bool = True
     include_energy_balance: bool = True
     include_observations: bool = True
+    include_ai_narratives: bool = True  # Enable AI-generated content (exec summary, observations)
 
 
 class ReportRequest(BaseModel):

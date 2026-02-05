@@ -310,16 +310,17 @@ Format as bullet points. Be specific and actionable."""
         # Determine balance statuses
         mass_status = "Not calculated"
         if mass_balance:
-            if mass_balance.closure_error_percent is not None:
-                if abs(mass_balance.closure_error_percent) < 0.1:
-                    mass_status = f"Closed ({mass_balance.closure_error_percent:.3f}% error)"
-                else:
-                    mass_status = f"Open ({mass_balance.closure_error_percent:.2f}% error)"
+            # Calculate closure error from closure_percentage (100% = perfect closure)
+            closure_error = abs(100.0 - mass_balance.closure_percentage)
+            if closure_error < 0.1:
+                mass_status = f"Closed ({closure_error:.3f}% error)"
+            else:
+                mass_status = f"Open ({closure_error:.2f}% error)"
         
         energy_status = "Not calculated"
         if energy_balance:
-            if energy_balance.net_heat_kw is not None:
-                energy_status = f"Net heat: {energy_balance.net_heat_kw:.1f} kW"
+            net_heat = energy_balance.total_heat_input - energy_balance.total_heat_output
+            energy_status = f"Net heat: {net_heat:.1f} kW"
         
         # Format the prompt
         prompt = self.EXECUTIVE_SUMMARY_PROMPT.format(
@@ -561,11 +562,12 @@ Format as bullet points. Be specific and actionable."""
         mass_status = "Not calculated"
         
         if mass_balance:
-            mass_in = f"{mass_balance.total_mass_in_kg_s:.3f}" if mass_balance.total_mass_in_kg_s else "N/A"
-            mass_out = f"{mass_balance.total_mass_out_kg_s:.3f}" if mass_balance.total_mass_out_kg_s else "N/A"
-            if mass_balance.closure_error_percent is not None:
-                mass_error = f"{mass_balance.closure_error_percent:.4f}"
-                mass_status = "Closed" if abs(mass_balance.closure_error_percent) < 0.1 else "Open"
+            mass_in = f"{mass_balance.total_mass_in:.3f}" if mass_balance.total_mass_in else "N/A"
+            mass_out = f"{mass_balance.total_mass_out:.3f}" if mass_balance.total_mass_out else "N/A"
+            # Calculate closure error from closure_percentage
+            closure_error = abs(100.0 - mass_balance.closure_percentage)
+            mass_error = f"{closure_error:.4f}"
+            mass_status = "Closed" if closure_error < 0.1 else "Open"
         
         # Energy balance details
         heat_in = "N/A"
@@ -574,10 +576,11 @@ Format as bullet points. Be specific and actionable."""
         energy_status = "Not calculated"
         
         if energy_balance:
-            heat_in = f"{energy_balance.heat_input_kw:.1f}" if energy_balance.heat_input_kw else "N/A"
-            heat_out = f"{energy_balance.heat_output_kw:.1f}" if energy_balance.heat_output_kw else "N/A"
-            net_heat = f"{energy_balance.net_heat_kw:.1f}" if energy_balance.net_heat_kw else "N/A"
-            energy_status = "Balanced" if energy_balance.net_heat_kw and abs(energy_balance.net_heat_kw) < 10 else "Unbalanced"
+            heat_in = f"{energy_balance.total_heat_input:.1f}" if energy_balance.total_heat_input else "N/A"
+            heat_out = f"{energy_balance.total_heat_output:.1f}" if energy_balance.total_heat_output else "N/A"
+            net_heat_val = energy_balance.total_heat_input - energy_balance.total_heat_output
+            net_heat = f"{net_heat_val:.1f}"
+            energy_status = "Balanced" if abs(net_heat_val) < 10 else "Unbalanced"
         
         # Equipment performance summary
         equip_perf_lines = []
