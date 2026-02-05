@@ -13,6 +13,7 @@ using ReportLab library. Creates multi-page reports with:
 """
 
 import io
+import re
 import base64
 from typing import List, Optional, Tuple
 from datetime import datetime
@@ -31,6 +32,8 @@ from reportlab.platypus import (
     PageBreak,
     Image,
     KeepTogether,
+    ListFlowable,
+    ListItem,
 )
 from reportlab.platypus.flowables import HRFlowable
 from PIL import Image as PILImage
@@ -50,6 +53,48 @@ from app.services.table_formatter import (
     format_with_thousands_separator,
     create_balance_summary_table,
 )
+
+
+# =============================================================================
+# MARKDOWN TO REPORTLAB CONVERTER
+# =============================================================================
+
+def markdown_to_reportlab(text: str) -> str:
+    """
+    Convert markdown-formatted text to ReportLab-compatible markup.
+    
+    Handles:
+    - **bold** -> <b>bold</b>
+    - *italic* -> <i>italic</i>
+    - ## headings (stripped, just bold)
+    - Bullet points (• or - or *)
+    
+    Args:
+        text: Markdown-formatted text
+        
+    Returns:
+        ReportLab-compatible text with HTML-like tags
+    """
+    if not text:
+        return ""
+    
+    # Remove markdown headers (##, ###, etc.) - just keep the text as bold
+    text = re.sub(r'^#{1,6}\s+(.+)$', r'<b>\1</b>', text, flags=re.MULTILINE)
+    
+    # Convert **bold** to <b>bold</b>
+    text = re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', text)
+    
+    # Convert *italic* to <i>italic</i> (but not if it's a bullet)
+    text = re.sub(r'(?<!\*)\*([^*\n]+)\*(?!\*)', r'<i>\1</i>', text)
+    
+    # Convert `code` to <font face="Courier">code</font>
+    text = re.sub(r'`([^`]+)`', r'<font face="Courier">\1</font>', text)
+    
+    # Clean up bullet point markers (• - *) at start of lines
+    # Convert to consistent format
+    text = re.sub(r'^[\•\-\*]\s+', '• ', text, flags=re.MULTILINE)
+    
+    return text
 
 
 # =============================================================================
@@ -352,15 +397,26 @@ class PDFReportGenerator:
             self.styles['heading2']
         ))
     
-    def add_paragraph(self, story: List, text: str):
+    def add_paragraph(self, story: List, text: str, convert_markdown: bool = True):
         """
         Add a paragraph of body text to the report.
         
         Args:
             story: List of flowables to append to
-            text: Paragraph text
+            text: Paragraph text (may contain markdown)
+            convert_markdown: Whether to convert markdown to ReportLab markup
         """
-        story.append(Paragraph(text, self.styles['body']))
+        if convert_markdown:
+            text = markdown_to_reportlab(text)
+        
+        # Split by double newlines to create separate paragraphs
+        paragraphs = text.split('\n\n')
+        for para in paragraphs:
+            # Handle single newlines within a paragraph
+            para = para.replace('\n', '<br/>')
+            if para.strip():
+                story.append(Paragraph(para, self.styles['body']))
+                story.append(Spacer(1, 0.1 * inch))
     
     def add_pfd_image(
         self,

@@ -54,39 +54,57 @@ class NarrativeGeneratorService:
     # Prompt Templates
     # =========================================================================
     
-    EXECUTIVE_SUMMARY_PROMPT = """You are a technical writer for a process engineering firm. Generate a concise executive summary (2-3 paragraphs) for a simulation report.
+    EXECUTIVE_SUMMARY_PROMPT = """You are a technical writer for a process engineering firm. Generate a comprehensive executive summary (3-4 paragraphs) for a simulation report.
 
-Simulation Details:
+=== SIMULATION METADATA ===
 - Run ID: {run_id}
 - Industry: {industry}
 - Process: {process_name}
 - Timestamp: {timestamp}
 - Status: {status}
 
-Key Results:
-- Total Streams: {stream_count}
-- Equipment Units: {equipment_count}
-- Mass Balance Closure: {mass_balance_status}
-- Energy Balance Closure: {energy_balance_status}
+=== STREAM DATA ===
+{stream_details}
 
-Feed Stream Summary:
-{feed_summary}
+=== EQUIPMENT DATA ===
+{equipment_details}
 
-Product Stream Summary:
-{product_summary}
+=== MASS BALANCE ===
+- Total Mass In: {mass_in:.2f} kg/hr
+- Total Mass Out: {mass_out:.2f} kg/hr
+- Closure: {mass_closure:.4f}%
+- Status: {mass_balance_status}
+
+=== ENERGY BALANCE ===
+- Total Heat Input: {heat_in:.2f} kW
+- Total Heat Output: {heat_out:.2f} kW
+- Net Heat Duty: {net_heat:.2f} kW
+- Status: {energy_balance_status}
 
 Write a professional executive summary that:
-1. States the purpose of the simulation
-2. Highlights key process conditions and configurations
-3. Summarizes the main findings (mass/energy balance, efficiency)
-4. Notes any significant observations
+1. States the purpose and scope of this {process_name} simulation
+2. Describes the process configuration (number of equipment units, key streams)
+3. Highlights key operating conditions (temperatures, pressures, compositions)
+4. Summarizes mass and energy balance results with specific numbers
+5. Notes the overall process efficiency and any significant findings
 
-Write in third person, past tense. Be concise and technical."""
+Write in third person, past tense. Be specific with numbers and units.
+DO NOT use markdown formatting (no **, ##, or bullet points). Write in plain prose paragraphs."""
 
-    PROCESS_DESCRIPTION_PROMPT = """You are a process engineer documenting a simulation study. Write a technical process description (1-2 paragraphs) for the following process section.
+    PROCESS_DESCRIPTION_PROMPT = """You are a process engineer documenting a simulation study. Write a technical process description (2-3 paragraphs) for the following process.
 
-Process Section: {section_name}
+=== PROCESS OVERVIEW ===
+Process: {process_name}
 Industry: {industry}
+
+=== EQUIPMENT LIST ===
+{equipment_list}
+
+=== STREAM CONNECTIONS ===
+{stream_connections}
+
+=== OPERATING CONDITIONS ===
+{operating_conditions}
 
 Equipment in this section:
 {equipment_list}
@@ -103,7 +121,8 @@ Write a clear technical description that:
 3. Notes key operating parameters
 4. Mentions any recycle streams or integrations
 
-Use professional engineering language. Be specific about equipment types and stream properties."""
+Use professional engineering language. Be specific about equipment types and stream properties.
+DO NOT use markdown formatting. Write in plain prose paragraphs."""
 
     EQUIPMENT_DESCRIPTION_PROMPT = """You are a process engineer documenting simulation results. Write a brief technical description (2-3 sentences) for this equipment unit.
 
@@ -128,41 +147,44 @@ Write a concise description that captures:
 2. Key operating conditions
 3. Notable performance metrics
 
-Be technical and precise."""
+Be technical and precise. DO NOT use markdown formatting."""
 
-    OBSERVATIONS_PROMPT = """You are a senior process engineer reviewing simulation results. Generate observations and recommendations (3-5 bullet points) based on the following data.
+    OBSERVATIONS_PROMPT = """You are a senior process engineer reviewing simulation results. Generate detailed observations and recommendations based on the complete simulation data.
 
-Simulation Overview:
+=== SIMULATION OVERVIEW ===
 - Industry: {industry}
 - Process: {process_name}
 - Run ID: {run_id}
 
-Mass Balance Summary:
-- Total Mass In: {mass_in} kg/s
-- Total Mass Out: {mass_out} kg/s
-- Closure Error: {mass_error}%
+=== COMPLETE STREAM DATA ===
+{stream_details}
+
+=== COMPLETE EQUIPMENT DATA ===
+{equipment_details}
+
+=== MASS BALANCE ===
+- Total Mass In: {mass_in:.2f} kg/hr
+- Total Mass Out: {mass_out:.2f} kg/hr
+- Closure: {mass_closure:.4f}%
 - Status: {mass_status}
 
-Energy Balance Summary:
-- Heat Input: {heat_in} kW
-- Heat Output: {heat_out} kW
-- Net Heat: {net_heat} kW
+=== ENERGY BALANCE ===
+- Heat Input: {heat_in:.2f} kW
+- Heat Output: {heat_out:.2f} kW  
+- Net Heat: {net_heat:.2f} kW
 - Status: {energy_status}
 
-Key Equipment Performance:
-{equipment_performance}
-
-Stream Quality Indicators:
-{stream_quality}
-
-Generate professional observations that:
-1. Comment on mass/energy balance quality
-2. Note any equipment operating near limits
-3. Identify potential optimization opportunities
+Based on this data, generate 4-6 detailed observations that:
+1. Analyze the mass and energy balance closure quality with specific numbers
+2. Evaluate equipment performance (efficiencies, duties, operating conditions)
+3. Assess stream compositions and product purity achieved
+4. Identify any concerning conditions or limitations
+5. Suggest specific optimization opportunities with expected benefits
+6. Recommend next steps or areas for further investigation
 4. Flag any concerning stream conditions
 5. Suggest areas for further investigation
 
-Format as bullet points. Be specific and actionable."""
+Write each observation as a separate paragraph starting with a bold topic (e.g., "Mass Balance Quality:"). Be specific and actionable."""
 
     def __init__(self):
         """Initialize the narrative generator service."""
@@ -255,6 +277,154 @@ Format as bullet points. Be specific and actionable."""
             return None
     
     # =========================================================================
+    # Helper Methods for Formatting Data
+    # =========================================================================
+    
+    def _format_name(self, raw_id: str, raw_name: str = None) -> str:
+        """
+        Format a raw ID or name into a human-readable display name.
+        
+        Examples:
+            dilute_ethanol_feed -> Dilute Ethanol Feed
+            e01_column_to_cooler -> Column to Cooler
+            concentration_column -> Concentration Column
+        """
+        # Use provided name if it's different from ID
+        if raw_name and raw_name != raw_id:
+            return raw_name
+        
+        name = raw_id
+        
+        # Remove common prefixes like e01_, s01_, etc.
+        import re
+        name = re.sub(r'^[es]\d+_', '', name)
+        
+        # Replace underscores with spaces
+        name = name.replace('_', ' ')
+        
+        # Title case each word
+        name = ' '.join(word.capitalize() for word in name.split())
+        
+        return name
+    
+    def _classify_stream_type(self, stream_id: str) -> str:
+        """Classify stream as feed, product, intermediate, or waste."""
+        sid_lower = stream_id.lower()
+        
+        if any(kw in sid_lower for kw in ['feed', 'inlet', 'input', 'raw']):
+            return "Feed"
+        elif any(kw in sid_lower for kw in ['product', 'distillate', 'output']):
+            return "Product"
+        elif any(kw in sid_lower for kw in ['waste', 'bottoms', 'reject', 'purge']):
+            return "Waste"
+        elif '_to_' in sid_lower:
+            return "Intermediate"
+        else:
+            return "Product"
+    
+    def _format_stream_details(self, run_data: SimulationRunData) -> str:
+        """Format all stream data for LLM context with nice names."""
+        if not run_data.streams:
+            return "No stream data available"
+        
+        lines = []
+        for i, stream in enumerate(run_data.streams, 1):
+            stream_id = stream.get("id", "Unknown")
+            data = stream.get("data", {})
+            
+            # Get display name - prefer name from data, else format ID
+            raw_name = data.get("name", stream_id)
+            display_name = self._format_name(stream_id, raw_name)
+            stream_type = self._classify_stream_type(stream_id)
+            
+            # Extract key properties
+            flow_rate = data.get("flow_rate", 0)
+            temp_K = data.get("temperature_K", 0)
+            pressure_Pa = data.get("pressure_Pa", 0)
+            composition = data.get("composition", {})
+            phase = data.get("phase", "liquid")
+            
+            # Convert temperature to Celsius for readability
+            temp_C = temp_K - 273.15 if temp_K else 0
+            
+            # Format composition with nice component names
+            comp_parts = []
+            for comp, frac in composition.items():
+                comp_name = comp.replace('_', ' ').title()
+                comp_parts.append(f"{comp_name}: {frac*100:.1f}%")
+            comp_str = ", ".join(comp_parts) if comp_parts else "N/A"
+            
+            lines.append(f"""
+Stream {i}: {display_name} ({stream_type})
+  - Flow Rate: {flow_rate:.2f} kg/hr
+  - Temperature: {temp_C:.1f}°C ({temp_K:.1f} K)
+  - Pressure: {pressure_Pa/1000:.1f} kPa
+  - Phase: {phase.capitalize()}
+  - Composition: {comp_str}""")
+        
+        return "\n".join(lines)
+    
+    def _format_equipment_details(self, run_data: SimulationRunData) -> str:
+        """Format all equipment data for LLM context with nice names."""
+        if not run_data.equipment_list:
+            return "No equipment data available"
+        
+        lines = []
+        for i, eq in enumerate(run_data.equipment_list, 1):
+            eq_id = eq.get("id", "Unknown")
+            eq_name = eq.get("name", eq_id)
+            eq_type = eq.get("type", "unknown")
+            eq_data = eq.get("data", {})
+            
+            # Format display name
+            display_name = self._format_name(eq_id, eq_name)
+            display_type = self._format_name(eq_type)
+            
+            # Get metadata for detailed info
+            metadata = eq_data.get("metadata", {})
+            energy_streams = eq_data.get("energy_streams", {})
+            
+            lines.append(f"\nEquipment {i}: {display_name}")
+            lines.append(f"  - Type: {display_type}")
+            
+            # Add energy data if available
+            if energy_streams:
+                for stream_name, stream_data in energy_streams.items():
+                    duty_kW = stream_data.get("duty_kW", 0)
+                    energy_type = stream_data.get("energy_type", "")
+                    nice_name = self._format_name(stream_name)
+                    lines.append(f"  - {nice_name}: {abs(duty_kW):.1f} kW ({energy_type})")
+            
+            # Add key metadata
+            if metadata:
+                # For distillation columns
+                if "num_stages" in metadata:
+                    lines.append(f"  - Number of Stages: {metadata.get('num_stages')}")
+                    lines.append(f"  - Feed Stage: {metadata.get('feed_stage')}")
+                    lines.append(f"  - Reflux Ratio: {metadata.get('reflux_ratio')}")
+                    if metadata.get("condenser_duty_kW"):
+                        lines.append(f"  - Condenser Duty: {metadata.get('condenser_duty_kW'):.2f} kW")
+                    if metadata.get("reboiler_duty_kW"):
+                        lines.append(f"  - Reboiler Duty: {metadata.get('reboiler_duty_kW'):.2f} kW")
+                    sep = metadata.get("separation_achieved", {})
+                    if sep:
+                        lines.append(f"  - Light Key in Distillate: {sep.get('light_key_in_distillate', 0)*100:.2f}%")
+                        lines.append(f"  - Heavy Key in Bottoms: {sep.get('heavy_key_in_bottoms', 0)*100:.2f}%")
+                
+                # For heat exchangers/coolers
+                if "duty" in metadata and isinstance(metadata["duty"], dict):
+                    duty_info = metadata["duty"]
+                    lines.append(f"  - Total Duty: {duty_info.get('total_duty_kW', 0):.2f} kW")
+                    lines.append(f"  - Inlet Temp: {metadata.get('inlet_temperature_K', 0) - 273.15:.1f}°C")
+                    lines.append(f"  - Outlet Temp: {metadata.get('outlet_temperature_K', 0) - 273.15:.1f}°C")
+                
+                # Efficiency
+                if "efficiency" in metadata:
+                    lines.append(f"  - Efficiency: {metadata.get('efficiency')*100:.1f}%")
+        
+        return "\n".join(lines)
+    
+    # =========================================================================
     # Narrative Generation Methods
     # =========================================================================
     
@@ -281,60 +451,54 @@ Format as bullet points. Be specific and actionable."""
         """
         logger.info(f"Generating executive summary for run {run_data.run_id}")
         
-        # Build feed/product summaries from stream table
-        feed_summary = "Not available"
-        product_summary = "Not available"
+        # Format full stream and equipment details from raw data
+        stream_details = self._format_stream_details(run_data)
+        equipment_details = self._format_equipment_details(run_data)
         
-        if stream_table and stream_table.streams:
-            feed_streams = [s for s in stream_table.streams if s.get("stream_type") == "feed"]
-            product_streams = [s for s in stream_table.streams if s.get("stream_type") == "product"]
-            
-            if feed_streams:
-                feed_lines = []
-                for s in feed_streams[:5]:  # Limit to 5
-                    name = s.get("name", "Unknown")
-                    flow = s.get("mass_flow_kg_s", s.get("flow_rate", "N/A"))
-                    temp = s.get("temperature_K", s.get("temperature", "N/A"))
-                    feed_lines.append(f"  - {name}: {flow} kg/s at {temp} K")
-                feed_summary = "\n".join(feed_lines)
-            
-            if product_streams:
-                product_lines = []
-                for s in product_streams[:5]:  # Limit to 5
-                    name = s.get("name", "Unknown")
-                    flow = s.get("mass_flow_kg_s", s.get("flow_rate", "N/A"))
-                    temp = s.get("temperature_K", s.get("temperature", "N/A"))
-                    product_lines.append(f"  - {name}: {flow} kg/s at {temp} K")
-                product_summary = "\n".join(product_lines)
+        # Get mass balance values
+        mass_in = mass_balance.total_mass_in if mass_balance else 0
+        mass_out = mass_balance.total_mass_out if mass_balance else 0
+        mass_closure = mass_balance.closure_percentage if mass_balance else 100
         
-        # Determine balance statuses
-        mass_status = "Not calculated"
-        if mass_balance:
-            # Calculate closure error from closure_percentage (100% = perfect closure)
-            closure_error = abs(100.0 - mass_balance.closure_percentage)
-            if closure_error < 0.1:
-                mass_status = f"Closed ({closure_error:.3f}% error)"
-            else:
-                mass_status = f"Open ({closure_error:.2f}% error)"
+        # Determine mass balance status
+        closure_error = abs(100.0 - mass_closure)
+        if closure_error < 0.01:
+            mass_status = "Excellent - Perfect closure"
+        elif closure_error < 0.1:
+            mass_status = "Good - Minor imbalance"
+        elif closure_error < 1.0:
+            mass_status = "Acceptable - Small imbalance"
+        else:
+            mass_status = f"Warning - {closure_error:.2f}% imbalance"
         
-        energy_status = "Not calculated"
-        if energy_balance:
-            net_heat = energy_balance.total_heat_input - energy_balance.total_heat_output
-            energy_status = f"Net heat: {net_heat:.1f} kW"
+        # Get energy balance values
+        heat_in = energy_balance.total_heat_input if energy_balance else 0
+        heat_out = energy_balance.total_heat_output if energy_balance else 0
+        net_heat = heat_in - heat_out
         
-        # Format the prompt
+        # Determine energy balance status
+        if heat_in > 0 or heat_out > 0:
+            energy_status = f"Heat duty: {abs(net_heat):.1f} kW net {'input' if net_heat > 0 else 'removal'}"
+        else:
+            energy_status = "No significant heat duties"
+        
+        # Format the prompt with full data
         prompt = self.EXECUTIVE_SUMMARY_PROMPT.format(
             run_id=run_data.run_id,
-            industry=run_data.industry or "Process",
+            industry=run_data.industry or "Chemical Process",
             process_name=run_data.process_name or "Simulation",
             timestamp=run_data.timestamp.isoformat() if run_data.timestamp else "Unknown",
             status=run_data.status or "completed",
-            stream_count=len(stream_table.streams) if stream_table else 0,
-            equipment_count=len(equipment_table.equipment) if equipment_table else 0,
+            stream_details=stream_details,
+            equipment_details=equipment_details,
+            mass_in=mass_in,
+            mass_out=mass_out,
+            mass_closure=mass_closure,
             mass_balance_status=mass_status,
+            heat_in=heat_in,
+            heat_out=heat_out,
+            net_heat=net_heat,
             energy_balance_status=energy_status,
-            feed_summary=feed_summary,
-            product_summary=product_summary,
         )
         
         return await self._call_llm(prompt, temperature=0.5)
@@ -555,69 +719,51 @@ Format as bullet points. Be specific and actionable."""
         """
         logger.info(f"Generating observations for run {run_data.run_id}")
         
-        # Mass balance details
-        mass_in = "N/A"
-        mass_out = "N/A"
-        mass_error = "N/A"
-        mass_status = "Not calculated"
+        # Format full stream and equipment details from raw data
+        stream_details = self._format_stream_details(run_data)
+        equipment_details = self._format_equipment_details(run_data)
         
-        if mass_balance:
-            mass_in = f"{mass_balance.total_mass_in:.3f}" if mass_balance.total_mass_in else "N/A"
-            mass_out = f"{mass_balance.total_mass_out:.3f}" if mass_balance.total_mass_out else "N/A"
-            # Calculate closure error from closure_percentage
-            closure_error = abs(100.0 - mass_balance.closure_percentage)
-            mass_error = f"{closure_error:.4f}"
-            mass_status = "Closed" if closure_error < 0.1 else "Open"
+        # Get mass balance values
+        mass_in = mass_balance.total_mass_in if mass_balance else 0
+        mass_out = mass_balance.total_mass_out if mass_balance else 0
+        mass_closure = mass_balance.closure_percentage if mass_balance else 100
         
-        # Energy balance details
-        heat_in = "N/A"
-        heat_out = "N/A"
-        net_heat = "N/A"
-        energy_status = "Not calculated"
+        # Determine mass balance status
+        closure_error = abs(100.0 - mass_closure)
+        if closure_error < 0.01:
+            mass_status = "Excellent - Perfect closure"
+        elif closure_error < 0.1:
+            mass_status = "Good - Minor imbalance"
+        elif closure_error < 1.0:
+            mass_status = "Acceptable - Small imbalance"
+        else:
+            mass_status = f"Warning - {closure_error:.2f}% imbalance"
         
-        if energy_balance:
-            heat_in = f"{energy_balance.total_heat_input:.1f}" if energy_balance.total_heat_input else "N/A"
-            heat_out = f"{energy_balance.total_heat_output:.1f}" if energy_balance.total_heat_output else "N/A"
-            net_heat_val = energy_balance.total_heat_input - energy_balance.total_heat_output
-            net_heat = f"{net_heat_val:.1f}"
-            energy_status = "Balanced" if abs(net_heat_val) < 10 else "Unbalanced"
+        # Get energy balance values
+        heat_in = energy_balance.total_heat_input if energy_balance else 0
+        heat_out = energy_balance.total_heat_output if energy_balance else 0
+        net_heat = heat_in - heat_out
         
-        # Equipment performance summary
-        equip_perf_lines = []
-        if equipment_table:
-            for eq in equipment_table.equipment[:5]:
-                name = eq.get("equipment_id", eq.get("name", "Unknown"))
-                perf = eq.get("performance", eq.get("results", {}))
-                if perf:
-                    key_metrics = list(perf.items())[:2]
-                    metrics_str = ", ".join(f"{k}: {v}" for k, v in key_metrics)
-                    equip_perf_lines.append(f"  - {name}: {metrics_str}")
-        equip_perf_str = "\n".join(equip_perf_lines) if equip_perf_lines else "No performance data"
-        
-        # Stream quality summary
-        stream_quality_lines = []
-        if stream_table:
-            for stream in stream_table.streams[:5]:
-                name = stream.get("name", "Unknown")
-                phase = stream.get("phase", "Unknown")
-                temp = stream.get("temperature_K", stream.get("temperature", "N/A"))
-                stream_quality_lines.append(f"  - {name}: {phase} phase at {temp} K")
-        stream_quality_str = "\n".join(stream_quality_lines) if stream_quality_lines else "No stream data"
+        # Determine energy balance status
+        if heat_in > 0 or heat_out > 0:
+            energy_status = f"Heat duty: {abs(net_heat):.1f} kW net {'input' if net_heat > 0 else 'removal'}"
+        else:
+            energy_status = "No significant heat duties"
         
         prompt = self.OBSERVATIONS_PROMPT.format(
-            industry=run_data.industry or "Process",
+            industry=run_data.industry or "Chemical Process",
             process_name=run_data.process_name or "Simulation",
             run_id=run_data.run_id,
+            stream_details=stream_details,
+            equipment_details=equipment_details,
             mass_in=mass_in,
             mass_out=mass_out,
-            mass_error=mass_error,
+            mass_closure=mass_closure,
             mass_status=mass_status,
             heat_in=heat_in,
             heat_out=heat_out,
             net_heat=net_heat,
             energy_status=energy_status,
-            equipment_performance=equip_perf_str,
-            stream_quality=stream_quality_str,
         )
         
         return await self._call_llm(prompt, temperature=0.6)

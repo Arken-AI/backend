@@ -35,7 +35,7 @@ from app.models.report import (
     MassBalanceSummary,
     EnergyBalanceSummary,
 )
-from app.services.report_data_collector import ReportDataCollector
+from app.services.report_data_collector import ReportDataCollector, format_display_name
 from app.services.table_formatter import StreamTableFormatter
 from app.services.pdf_generator import PDFReportGenerator
 from app.services.narrative_generator import NarrativeGeneratorService
@@ -282,10 +282,13 @@ class ReportGeneratorService:
                 "Generating PDF document"
             )
             
+            # Format process name for display (e.g., "ethanolwaterbinary" -> "Ethanol Water Binary")
+            formatted_process_name = format_display_name(run_data.process_name)
+            
             metadata = ReportMetadata(
                 run_id=run_id,
-                process_name=run_data.process_name,
-                title=f"{run_data.process_name} Simulation Report",
+                process_name=formatted_process_name,
+                title=f"{formatted_process_name} Simulation Report",
                 date_generated=datetime.now(timezone.utc),
                 author="ARKEN AI",
                 version="1.0",

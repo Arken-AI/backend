@@ -88,10 +88,12 @@ class StreamTableFormatter:
         
         table = []
         
-        # Header row with stream IDs
-        header_row = ["Stream"]
-        for stream_id in stream_data.stream_ids:
-            header_row.append(f"#{stream_id}")
+        # Header row with stream names (use display names if available)
+        header_row = ["Property"]
+        for i, stream_id in enumerate(stream_data.stream_ids):
+            # Use display name if available, otherwise fall back to ID
+            display_name = stream_data.get_stream_display_name(i)
+            header_row.append(display_name)
         table.append(header_row)
         
         # Standard property rows
@@ -112,15 +114,18 @@ class StreamTableFormatter:
                     row.append(format_number(value, row_key))
                 table.append(row)
         
-        # Component rows
-        for component in stream_data.components:
+        # Component rows (use display names if available)
+        for i, component in enumerate(stream_data.components):
             if component in stream_data.data:
                 unit = stream_data.units.get(component, "")
                 
+                # Use display name if available
+                component_display = stream_data.get_component_display_name(i)
+                
                 if include_units and unit:
-                    row_label = f"{component} {unit}"
+                    row_label = f"{component_display} {unit}"
                 else:
-                    row_label = component
+                    row_label = component_display
                 
                 row = [row_label]
                 for value in stream_data.data[component]:

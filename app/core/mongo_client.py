@@ -119,6 +119,19 @@ class MongoClient:
         except Exception as e:
             logger.error(f"Error during MongoDB disconnect: {e}")
     
+    @property
+    def db(self) -> Optional[AsyncIOMotorDatabase]:
+        """
+        Get the underlying AsyncIOMotorDatabase instance.
+        
+        This property provides direct access to the database for services
+        that need to perform custom queries (e.g., ReportGeneratorService).
+        
+        Returns:
+            AsyncIOMotorDatabase instance, or None if not connected
+        """
+        return self._db
+    
     async def is_connected(self) -> bool:
         """
         Check if MongoDB connection is active.

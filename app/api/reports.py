@@ -50,7 +50,12 @@ async def get_report_generator(
     Returns:
         ReportGeneratorService instance
     """
-    db = mongo_client.get_database()
+    db = mongo_client.db
+    if db is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Database connection not available"
+        )
     return ReportGeneratorService(db)
 
 

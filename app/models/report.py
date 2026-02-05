@@ -83,15 +83,35 @@ class ReportMetadata(BaseModel):
 class StreamTableData(BaseModel):
     """Formatted stream data for table generation"""
     stream_ids: List[str] = Field(..., description="List of stream IDs in order")
+    stream_names: Optional[List[str]] = Field(default=None, description="Display names for streams")
     components: List[str] = Field(..., description="List of component names")
+    component_names: Optional[List[str]] = Field(default=None, description="Display names for components")
     data: Dict[str, List[Any]] = Field(..., description="Data organized by row type (temperature, pressure, etc.)")
     units: Dict[str, str] = Field(..., description="Units for each row type")
+    
+    def get_stream_display_name(self, index: int) -> str:
+        """Get display name for stream at index, falling back to ID."""
+        if self.stream_names and index < len(self.stream_names):
+            return self.stream_names[index]
+        if index < len(self.stream_ids):
+            return self.stream_ids[index]
+        return f"Stream {index + 1}"
+    
+    def get_component_display_name(self, index: int) -> str:
+        """Get display name for component at index, falling back to raw name."""
+        if self.component_names and index < len(self.component_names):
+            return self.component_names[index]
+        if index < len(self.components):
+            return self.components[index]
+        return f"Component {index + 1}"
     
     class Config:
         json_schema_extra = {
             "example": {
                 "stream_ids": ["1", "2", "3", "4"],
+                "stream_names": ["Feed", "Distillate", "Bottoms", "Product"],
                 "components": ["H2O", "Ethanol"],
+                "component_names": ["Water", "Ethanol"],
                 "data": {
                     "temperature": [30.0, 78.0, 100.0, 35.0],
                     "pressure": [1.0, 1.0, 1.0, 1.0],
@@ -181,3 +201,13 @@ class SimulationRunData(BaseModel):
     streams: List[Dict[str, Any]]
     input_parameters: Dict[str, Any]
     calculation_results: Dict[str, Any]
+    # Additional fields for AI narrative generation
+    industry: Optional[str] = None  # e.g., "Sugar", "Chemical", etc.
+    status: Optional[str] = "completed"  # Run status
+    timestamp: Optional[datetime] = None  # Alias for created_at, for narrative templates
+    
+    def __init__(self, **data):
+        super().__init__(**data)
+        # Set timestamp to created_at if not provided
+        if self.timestamp is None:
+            object.__setattr__(self, 'timestamp', self.created_at)
