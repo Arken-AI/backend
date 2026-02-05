@@ -113,8 +113,50 @@ class ReportGeneratorService:
         Returns:
             ReportResponse with report_id and initial status
         """
-        # TODO: Step 2 implementation
-        raise NotImplementedError("Step 2: generate_report()")
+        # Use default options if not provided
+        if options is None:
+            options = ReportOptions()
+        
+        # Generate unique report ID
+        report_id = str(uuid.uuid4())
+        
+        # Get current timestamp
+        created_at = datetime.now(timezone.utc)
+        
+        # Create initial report record in MongoDB
+        report_record = {
+            "_id": report_id,
+            "report_id": report_id,
+            "run_id": run_id,
+            "status": ReportStatus.PENDING.value,
+            "progress": self.PROGRESS_STARTED,
+            "current_step": "Initializing report generation",
+            "options": options.model_dump(),
+            "pfd_image_base64": pfd_image_base64,
+            "created_at": created_at,
+            "updated_at": created_at,
+            "completed_at": None,
+            "file_path": None,
+            "download_url": None,
+            "error": None,
+        }
+        
+        # Insert record into MongoDB
+        await self.reports_collection.insert_one(report_record)
+        
+        # Schedule background processing (will be triggered by API layer)
+        # The API endpoint will call _process_report() as a background task
+        
+        # Estimate processing time (rough estimate: 10-30 seconds)
+        estimated_time = 20
+        
+        # Return response immediately
+        return ReportResponse(
+            report_id=report_id,
+            status=ReportStatus.PENDING,
+            created_at=created_at,
+            estimated_time_seconds=estimated_time,
+        )
     
     async def _process_report(
         self,
