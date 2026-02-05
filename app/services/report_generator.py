@@ -207,14 +207,14 @@ class ReportGeneratorService:
             
             stream_table = None
             if options.include_stream_tables and run_data.streams:
-                stream_table = await self.data_collector.build_stream_table(run_data.streams)
+                stream_table = self.data_collector.build_stream_table(run_data.streams)
             
             # ========================================
             # STEP 4: Build equipment table data
             # ========================================
             equipment_table = None
             if options.include_equipment_tables and run_data.equipment_list:
-                equipment_table = await self.data_collector.build_equipment_table(
+                equipment_table = self.data_collector.build_equipment_table(
                     run_data.equipment_list
                 )
             
@@ -223,8 +223,9 @@ class ReportGeneratorService:
             # ========================================
             mass_balance = None
             if options.include_mass_balance:
-                mass_balance = await self.data_collector.build_mass_balance_summary(
-                    run_data.calculation_results
+                mass_balance = self.data_collector.build_mass_balance_summary(
+                    run_data.calculation_results,
+                    run_data.streams
                 )
             
             # ========================================
@@ -232,8 +233,9 @@ class ReportGeneratorService:
             # ========================================
             energy_balance = None
             if options.include_energy_balance:
-                energy_balance = await self.data_collector.build_energy_balance_summary(
-                    run_data.calculation_results
+                energy_balance = self.data_collector.build_energy_balance_summary(
+                    run_data.calculation_results,
+                    run_data.equipment_list
                 )
             
             # ========================================
@@ -408,12 +410,24 @@ class ReportGeneratorService:
             current_step: Description of current step
             status: Report status
         """
-        # TODO: Step 6 implementation
-        raise NotImplementedError("Step 6: _update_progress()")
+        await self.reports_collection.update_one(
+            {"_id": report_id},
+            {
+                "$set": {
+                    "status": status.value,
+                    "progress": progress,
+                    "current_step": current_step,
+                    "updated_at": datetime.now(timezone.utc),
+                }
+            }
+        )
     
     def _generate_filename(self, report_id: str, process_name: str) -> str:
         """
         Generate a unique filename for the PDF.
+        
+        Format: {short_report_id}_{sanitized_process_name}_{timestamp}.pdf
+        Example: abc123_Sugar_Mill_20260205_143022.pdf
         
         Args:
             report_id: Unique report identifier
@@ -422,8 +436,18 @@ class ReportGeneratorService:
         Returns:
             Filename string
         """
-        # TODO: Step 7 implementation
-        raise NotImplementedError("Step 7: _generate_filename()")
+        # Use first 8 chars of report_id for shorter filename
+        short_id = report_id[:8]
+        
+        # Sanitize process name (replace spaces with underscores, remove special chars)
+        import re
+        sanitized_name = re.sub(r'[^a-zA-Z0-9_]', '', process_name.replace(' ', '_'))
+        sanitized_name = sanitized_name[:30]  # Limit length
+        
+        # Generate timestamp
+        timestamp = datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')
+        
+        return f"{short_id}_{sanitized_name}_{timestamp}.pdf"
     
     async def _save_pdf_to_storage(
         self,
@@ -433,15 +457,25 @@ class ReportGeneratorService:
         """
         Save PDF to storage directory.
         
+        Uses asyncio to run file I/O in thread pool to avoid blocking.
+        
         Args:
             pdf_bytes: PDF file content
             filename: Filename to save as
             
         Returns:
-            Full file path
+            Full file path as string
         """
-        # TODO: Step 7 implementation
-        raise NotImplementedError("Step 7: _save_pdf_to_storage()")
+        file_path = self.storage_path / filename
+        
+        # Write file asynchronously using run_in_executor
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(
+            None,  # Use default executor
+            lambda: file_path.write_bytes(pdf_bytes)
+        )
+        
+        return str(file_path)
     
     async def delete_report(self, report_id: str) -> bool:
         """
@@ -453,12 +487,32 @@ class ReportGeneratorService:
         Returns:
             True if deleted, False if not found
         """
-        # TODO: Optional implementation
-        raise NotImplementedError("Optional: delete_report()")
+        # Find the report first
+        report = await self.reports_collection.find_one({"_id": report_id})
+        
+        if not report:
+            return False
+        
+        # Delete the PDF file if it exists
+        file_path = report.get("file_path")
+        if file_path:
+            path = Path(file_path)
+            if path.exists():
+                try:
+                    path.unlink()  # Delete file
+                except OSError:
+                    pass  # Ignore file deletion errors
+        
+        # Delete the MongoDB record
+        result = await self.reports_collection.delete_one({"_id": report_id})
+        
+        return result.deleted_count > 0
     
     async def cleanup_old_reports(self, days: int = 7) -> int:
         """
         Clean up reports older than specified days.
+        
+        Deletes both MongoDB records and PDF files.
         
         Args:
             days: Number of days to retain reports
@@ -466,5 +520,31 @@ class ReportGeneratorService:
         Returns:
             Number of reports deleted
         """
-        # TODO: Step 8 implementation (optional)
-        raise NotImplementedError("Step 8: cleanup_old_reports()")
+        from datetime import timedelta
+        
+        # Calculate cutoff date
+        cutoff_date = datetime.now(timezone.utc) - timedelta(days=days)
+        
+        # Find all old reports
+        cursor = self.reports_collection.find(
+            {"created_at": {"$lt": cutoff_date}}
+        )
+        
+        deleted_count = 0
+        
+        async for report in cursor:
+            # Delete PDF file if exists
+            file_path = report.get("file_path")
+            if file_path:
+                path = Path(file_path)
+                if path.exists():
+                    try:
+                        path.unlink()
+                    except OSError:
+                        pass
+            
+            # Delete MongoDB record
+            await self.reports_collection.delete_one({"_id": report["_id"]})
+            deleted_count += 1
+        
+        return deleted_count

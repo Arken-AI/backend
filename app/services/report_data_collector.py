@@ -46,6 +46,8 @@ class ReportDataCollector:
         """
         Fetch complete simulation run data from MongoDB.
         
+        Searches both calc_simulation_runs and runs collections.
+        
         Args:
             run_id: ID of the simulation run to fetch
             
@@ -55,21 +57,31 @@ class ReportDataCollector:
         Raises:
             ValueError: If run_id is not found in database
         """
-        # Query the runs collection
-        run_doc = await self.runs_collection.find_one({"_id": ObjectId(run_id)})
+        # First try calc_simulation_runs collection (calc engine)
+        run_doc = await self.db.calc_simulation_runs.find_one({"run_id": run_id})
+        source = "calc_engine"
+        
+        # If not found, try runs collection (process server)
+        if not run_doc:
+            run_doc = await self.runs_collection.find_one({"run_id": run_id})
+            source = "process_server"
         
         if not run_doc:
             raise ValueError(f"Simulation run not found: {run_id}")
         
-        # Extract basic metadata
-        process_name = run_doc.get("process_name", "Unknown Process")
-        process_type = run_doc.get("process_type", "generic")
-        created_at = run_doc.get("created_at", datetime.utcnow())
-        
-        # Extract equipment list from run result
-        equipment_list = []
-        if "result" in run_doc and isinstance(run_doc["result"], dict):
-            equipment_results = run_doc["result"].get("equipment_results", {})
+        # Extract basic metadata based on source
+        if source == "calc_engine":
+            # calc_simulation_runs structure
+            process_name = run_doc.get("process_name", run_doc.get("process_id", "Unknown Process"))
+            process_type = run_doc.get("process_type", "generic")
+            created_at = run_doc.get("created_at", datetime.utcnow())
+            
+            # Extract from flowsheet_results
+            flowsheet_results = run_doc.get("flowsheet_results", {})
+            
+            # Equipment list
+            equipment_list = []
+            equipment_results = flowsheet_results.get("equipment_results", {})
             for eq_id, eq_data in equipment_results.items():
                 equipment_list.append({
                     "id": eq_id,
@@ -77,22 +89,54 @@ class ReportDataCollector:
                     "type": eq_data.get("type", "unknown"),
                     "data": eq_data
                 })
-        
-        # Extract stream data from run result
-        streams = []
-        if "result" in run_doc and isinstance(run_doc["result"], dict):
-            stream_results = run_doc["result"].get("streams", {})
+            
+            # Stream data
+            streams = []
+            stream_results = flowsheet_results.get("streams", {})
             for stream_id, stream_data in stream_results.items():
                 streams.append({
                     "id": stream_id,
                     "data": stream_data
                 })
-        
-        # Extract input parameters
-        input_parameters = run_doc.get("input_parameters", {})
-        
-        # Extract calculation results
-        calculation_results = run_doc.get("result", {})
+            
+            # Input parameters and results
+            input_parameters = run_doc.get("input_parameters", {})
+            calculation_results = flowsheet_results
+            
+        else:
+            # runs collection structure (process server / sugar)
+            process_name = run_doc.get("process_name", run_doc.get("process_id", "Unknown Process"))
+            process_type = run_doc.get("industry", "sugar")
+            created_at = run_doc.get("created_at", datetime.utcnow())
+            
+            # Extract from outputs
+            outputs = run_doc.get("outputs", {})
+            
+            # Equipment list
+            equipment_list = []
+            equipment_results = outputs.get("equipment_results", outputs.get("equipment", {}))
+            if isinstance(equipment_results, dict):
+                for eq_id, eq_data in equipment_results.items():
+                    equipment_list.append({
+                        "id": eq_id,
+                        "name": eq_data.get("name", eq_id),
+                        "type": eq_data.get("type", "unknown"),
+                        "data": eq_data
+                    })
+            
+            # Stream data
+            streams = []
+            stream_results = outputs.get("streams", {})
+            if isinstance(stream_results, dict):
+                for stream_id, stream_data in stream_results.items():
+                    streams.append({
+                        "id": stream_id,
+                        "data": stream_data
+                    })
+            
+            # Input parameters and results
+            input_parameters = run_doc.get("inputs", {})
+            calculation_results = outputs
         
         return SimulationRunData(
             run_id=run_id,
@@ -288,69 +332,107 @@ class ReportDataCollector:
     
     def build_mass_balance_summary(
         self, 
-        run_data: SimulationRunData
+        calculation_results: Dict[str, Any],
+        streams: List[Dict[str, Any]] = None
     ) -> MassBalanceSummary:
         """
-        Calculate mass balance summary from run data.
+        Calculate mass balance summary from calculation results.
         
         Args:
-            run_data: Complete simulation run data
+            calculation_results: Calculation results dictionary
+            streams: Optional list of streams (if not in calculation_results)
             
         Returns:
             MassBalanceSummary object with totals and closure
         """
-        # This is a simplified version - actual implementation would need
-        # to identify inlet vs outlet streams from the flowsheet topology
+        # Try to get mass balance from calculation results directly
+        mass_balance = calculation_results.get("mass_balance", {})
         
+        if mass_balance:
+            return MassBalanceSummary(
+                total_mass_in=mass_balance.get("total_in", 0.0),
+                total_mass_out=mass_balance.get("total_out", 0.0),
+                closure_percentage=mass_balance.get("closure", 100.0)
+            )
+        
+        # Fallback: Calculate from streams
         total_mass_in = 0.0
         total_mass_out = 0.0
         
-        # For now, assume first stream is inlet, rest are outlets
-        # In real implementation, would query flowsheet structure
-        for idx, stream in enumerate(run_data.streams):
-            stream_data = stream.get("data", {})
-            flow_rate = stream_data.get("flow_rate", 0)
-            
-            if idx == 0:
+        # Get streams from calculation_results or parameter
+        stream_data = calculation_results.get("streams", {})
+        if not stream_data and streams:
+            stream_data = {s.get("id", f"s{i}"): s.get("data", {}) for i, s in enumerate(streams)}
+        
+        # Sum flow rates (simplified - actual implementation would use topology)
+        for stream_id, data in stream_data.items():
+            flow_rate = data.get("flow_rate", 0) or 0
+            # Simple heuristic: streams with "in" or "feed" are inputs
+            if any(x in stream_id.lower() for x in ["in", "feed", "inlet", "raw"]):
                 total_mass_in += flow_rate
             else:
                 total_mass_out += flow_rate
+        
+        # If no categorization worked, use equipment-based approach
+        if total_mass_in == 0 and total_mass_out == 0:
+            # Get total from first/last streams
+            stream_list = list(stream_data.values())
+            if stream_list:
+                total_mass_in = stream_list[0].get("flow_rate", 0) or 0
+                total_mass_out = sum(s.get("flow_rate", 0) or 0 for s in stream_list[1:])
         
         # Calculate closure percentage
         if total_mass_in > 0:
             closure_percentage = (total_mass_out / total_mass_in) * 100.0
         else:
-            closure_percentage = 0.0
+            closure_percentage = 100.0 if total_mass_out == 0 else 0.0
         
         return MassBalanceSummary(
             total_mass_in=total_mass_in,
             total_mass_out=total_mass_out,
-            closure_percentage=closure_percentage
+            closure_percentage=min(closure_percentage, 100.0)
         )
     
     def build_energy_balance_summary(
         self, 
-        run_data: SimulationRunData
+        calculation_results: Dict[str, Any],
+        equipment_list: List[Dict[str, Any]] = None
     ) -> EnergyBalanceSummary:
         """
-        Calculate energy balance summary from run data.
+        Calculate energy balance summary from calculation results.
         
         Args:
-            run_data: Complete simulation run data
+            calculation_results: Calculation results dictionary
+            equipment_list: Optional list of equipment (if not in calculation_results)
             
         Returns:
             EnergyBalanceSummary object with totals and closure
         """
+        # Try to get energy balance from calculation results directly
+        energy_balance = calculation_results.get("energy_balance", {})
+        
+        if energy_balance:
+            return EnergyBalanceSummary(
+                total_heat_input=energy_balance.get("heat_in", 0.0),
+                total_heat_output=energy_balance.get("heat_out", 0.0),
+                total_power=energy_balance.get("power", 0.0),
+                closure_percentage=energy_balance.get("closure", 100.0)
+            )
+        
+        # Fallback: Calculate from equipment
         total_heat_input = 0.0
         total_heat_output = 0.0
         total_power = 0.0
         
+        # Get equipment from calculation_results or parameter
+        equip_results = calculation_results.get("equipment_results", {})
+        if not equip_results and equipment_list:
+            equip_results = {e.get("id", f"e{i}"): e.get("data", {}) for i, e in enumerate(equipment_list)}
+        
         # Sum heat duties from equipment
-        for equipment in run_data.equipment_list:
-            eq_data = equipment.get("data", {})
-            
+        for eq_id, eq_data in equip_results.items():
             # Get duty
-            duty = eq_data.get("duty_kW") or eq_data.get("heat_duty") or 0.0
+            duty = eq_data.get("duty_kW") or eq_data.get("heat_duty") or eq_data.get("duty") or 0.0
             
             # Positive duty = heat input, negative = heat output
             if duty > 0:
@@ -359,19 +441,19 @@ class ReportDataCollector:
                 total_heat_output += abs(duty)
             
             # Get power consumption
-            power = eq_data.get("power") or 0.0
-            total_power += power
+            power = eq_data.get("power") or eq_data.get("power_kW") or 0.0
+            total_power += abs(power)
         
         # Calculate closure percentage
         total_energy_in = total_heat_input + total_power
         if total_energy_in > 0:
             closure_percentage = (total_heat_output / total_energy_in) * 100.0
         else:
-            closure_percentage = 0.0
+            closure_percentage = 100.0 if total_heat_output == 0 else 0.0
         
         return EnergyBalanceSummary(
             total_heat_input=total_heat_input,
             total_heat_output=total_heat_output,
             total_power=total_power,
-            closure_percentage=closure_percentage
+            closure_percentage=min(closure_percentage, 100.0)
         )
