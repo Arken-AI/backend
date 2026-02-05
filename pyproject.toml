@@ -7,20 +7,21 @@ name = "mcp-chat-backend"
 version = "0.1.0"
 description = "Production-grade chat backend for MCP Process Server"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.10"
 authors = [{ name = "Arken AI", email = "info@arken.ai" }]
 keywords = ["mcp", "chat", "backend", "fastapi", "anthropic"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
 ]
 
 dependencies = [
     # FastAPI and ASGI server
-    "fastapi>=0.110.0,<0.120.0",
-    "uvicorn[standard]>=0.27.0,<0.30.0",
+    "fastapi>=0.115.0,<0.120.0",
+    "uvicorn[standard]>=0.31.1,<0.35.0",
 
     # Database clients
     "redis[hiredis]>=5.0.1,<6.0.0",
@@ -86,7 +87,7 @@ markers = [
 
 [tool.ruff]
 line-length = 100
-target-version = "py311"
+target-version = "py310"
 select = [
     "E",  # pycodestyle errors
     "W",  # pycodestyle warnings
@@ -106,11 +107,11 @@ ignore = [
 
 [tool.black]
 line-length = 100
-target-version = ["py311"]
+target-version = ["py310"]
 include = '\.pyi?$'
 
 [tool.mypy]
-python_version = "3.11"
+python_version = "3.10"
 warn_return_any = true
 warn_unused_configs = true
 disallow_untyped_defs = false
