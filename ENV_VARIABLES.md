@@ -172,6 +172,46 @@ These settings configure the second MCP server that handles dynamic flowsheet si
 
 ---
 
+## Report Generation Settings
+
+These settings configure the detailed PDF report generation feature with AI-powered narratives.
+
+### `REPORT_STORAGE_PATH`
+- **Description**: Directory path for storing generated PDF reports
+- **Default**: `storage/reports`
+- **Example**: `/var/data/reports` (production)
+- **Required**: No (uses default)
+- **Note**: Directory will be created automatically if it doesn't exist
+
+### `REPORT_MAX_STREAMS_PER_TABLE`
+- **Description**: Maximum number of streams to display per table before splitting
+- **Default**: `10`
+- **Range**: `5-20` recommended
+- **Required**: No
+- **Purpose**: Prevents tables from becoming too wide for PDF pages
+
+### `REPORT_LLM_MODEL`
+- **Description**: Anthropic model to use for generating report narratives
+- **Default**: `claude-sonnet-4-20250514`
+- **Options**: Any valid Anthropic model (e.g., `claude-3-opus-20240229`)
+- **Required**: No (uses default)
+- **Note**: Requires `ANTHROPIC_API_KEY` to be set for AI features
+
+### `REPORT_LLM_MAX_TOKENS`
+- **Description**: Maximum tokens for AI-generated narrative sections
+- **Default**: `1500`
+- **Range**: `500-4000` recommended
+- **Required**: No
+- **Purpose**: Controls length of executive summaries and observations
+
+### `REPORT_PDF_PAGE_SIZE`
+- **Description**: PDF page size for generated reports
+- **Default**: `letter`
+- **Options**: `letter` (8.5" x 11"), `A4` (210mm x 297mm)
+- **Required**: No
+
+---
+
 ## Application Settings
 
 ### `LOG_LEVEL`
