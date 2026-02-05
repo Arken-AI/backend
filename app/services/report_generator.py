@@ -181,8 +181,150 @@ class ReportGeneratorService:
             pfd_image_base64: Base64 encoded PFD image
             options: Report generation options
         """
-        # TODO: Step 3 implementation
-        raise NotImplementedError("Step 3: _process_report()")
+        try:
+            # ========================================
+            # STEP 1: Update status to processing
+            # ========================================
+            await self._update_progress(
+                report_id,
+                self.PROGRESS_COLLECTING_DATA,
+                "Collecting simulation data"
+            )
+            
+            # ========================================
+            # STEP 2: Collect simulation data from MongoDB
+            # ========================================
+            run_data = await self.data_collector.collect_run_data(run_id)
+            
+            # ========================================
+            # STEP 3: Build stream table data
+            # ========================================
+            await self._update_progress(
+                report_id,
+                self.PROGRESS_FORMATTING_TABLES,
+                "Formatting stream tables"
+            )
+            
+            stream_table = None
+            if options.include_stream_tables and run_data.streams:
+                stream_table = await self.data_collector.build_stream_table(run_data.streams)
+            
+            # ========================================
+            # STEP 4: Build equipment table data
+            # ========================================
+            equipment_table = None
+            if options.include_equipment_tables and run_data.equipment_list:
+                equipment_table = await self.data_collector.build_equipment_table(
+                    run_data.equipment_list
+                )
+            
+            # ========================================
+            # STEP 5: Build mass balance summary
+            # ========================================
+            mass_balance = None
+            if options.include_mass_balance:
+                mass_balance = await self.data_collector.build_mass_balance_summary(
+                    run_data.calculation_results
+                )
+            
+            # ========================================
+            # STEP 6: Build energy balance summary
+            # ========================================
+            energy_balance = None
+            if options.include_energy_balance:
+                energy_balance = await self.data_collector.build_energy_balance_summary(
+                    run_data.calculation_results
+                )
+            
+            # ========================================
+            # STEP 7: Create report metadata
+            # ========================================
+            await self._update_progress(
+                report_id,
+                self.PROGRESS_GENERATING_PDF,
+                "Generating PDF document"
+            )
+            
+            metadata = ReportMetadata(
+                run_id=run_id,
+                process_name=run_data.process_name,
+                title=f"{run_data.process_name} Simulation Report",
+                date_generated=datetime.now(timezone.utc),
+                author="ARKEN AI",
+                version="1.0",
+            )
+            
+            # ========================================
+            # STEP 8: Assemble report data
+            # ========================================
+            report_data = ReportData(
+                metadata=metadata,
+                pfd_image_base64=pfd_image_base64,
+                stream_table=stream_table,
+                equipment_table=equipment_table,
+                mass_balance=mass_balance,
+                energy_balance=energy_balance,
+                # AI-generated content (Phase 3)
+                executive_summary=None,
+                process_description_sections=None,
+                observations=None,
+            )
+            
+            # ========================================
+            # STEP 9: Generate PDF
+            # ========================================
+            pdf_bytes = self.pdf_generator.generate_pdf(report_data)
+            
+            # ========================================
+            # STEP 10: Save PDF to storage
+            # ========================================
+            await self._update_progress(
+                report_id,
+                self.PROGRESS_SAVING_FILE,
+                "Saving PDF file"
+            )
+            
+            filename = self._generate_filename(report_id, run_data.process_name)
+            file_path = await self._save_pdf_to_storage(pdf_bytes, filename)
+            
+            # ========================================
+            # STEP 11: Update record as completed
+            # ========================================
+            download_url = f"/api/v1/reports/{report_id}/download"
+            
+            await self.reports_collection.update_one(
+                {"_id": report_id},
+                {
+                    "$set": {
+                        "status": ReportStatus.COMPLETED.value,
+                        "progress": self.PROGRESS_COMPLETE,
+                        "current_step": "Report generation complete",
+                        "file_path": file_path,
+                        "download_url": download_url,
+                        "completed_at": datetime.now(timezone.utc),
+                        "updated_at": datetime.now(timezone.utc),
+                    }
+                }
+            )
+            
+        except Exception as e:
+            # ========================================
+            # ERROR HANDLING: Mark as failed
+            # ========================================
+            error_message = str(e)
+            await self.reports_collection.update_one(
+                {"_id": report_id},
+                {
+                    "$set": {
+                        "status": ReportStatus.FAILED.value,
+                        "current_step": "Report generation failed",
+                        "error": error_message,
+                        "updated_at": datetime.now(timezone.utc),
+                    }
+                }
+            )
+            # Re-raise for logging purposes (optional)
+            raise
     
     async def get_report_status(self, report_id: str) -> Optional[ReportStatusResponse]:
         """
@@ -194,8 +336,23 @@ class ReportGeneratorService:
         Returns:
             ReportStatusResponse or None if not found
         """
-        # TODO: Step 4 implementation
-        raise NotImplementedError("Step 4: get_report_status()")
+        # Query MongoDB for the report record
+        report = await self.reports_collection.find_one({"_id": report_id})
+        
+        if not report:
+            return None
+        
+        # Build and return status response
+        return ReportStatusResponse(
+            report_id=report["report_id"],
+            status=ReportStatus(report["status"]),
+            progress=report.get("progress", 0),
+            current_step=report.get("current_step", "Unknown"),
+            download_url=report.get("download_url"),
+            created_at=report["created_at"],
+            completed_at=report.get("completed_at"),
+            error=report.get("error"),
+        )
     
     async def get_report_file(self, report_id: str) -> Optional[tuple[bytes, str]]:
         """
@@ -207,8 +364,33 @@ class ReportGeneratorService:
         Returns:
             Tuple of (pdf_bytes, filename) or None if not found/not ready
         """
-        # TODO: Step 5 implementation
-        raise NotImplementedError("Step 5: get_report_file()")
+        # Query MongoDB for the report record
+        report = await self.reports_collection.find_one({"_id": report_id})
+        
+        if not report:
+            return None
+        
+        # Check if report is completed
+        if report.get("status") != ReportStatus.COMPLETED.value:
+            return None
+        
+        # Get file path
+        file_path = report.get("file_path")
+        if not file_path:
+            return None
+        
+        # Check if file exists
+        full_path = Path(file_path)
+        if not full_path.exists():
+            return None
+        
+        # Read PDF file
+        pdf_bytes = full_path.read_bytes()
+        
+        # Extract filename from path
+        filename = full_path.name
+        
+        return (pdf_bytes, filename)
     
     async def _update_progress(
         self,
