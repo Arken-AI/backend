@@ -1,36 +1,33 @@
 """
 MCP Client Wrapper
 
-Manages connection to MCP servers via stdio transport.
+Manages connection to MCP servers via SSE (Server-Sent Events) transport.
 Supports multiple MCP servers (process server + calculation engine server).
 
 Key Features:
-- Subprocess management (launch, monitor, restart)
-- Stdio transport (JSON-RPC over stdin/stdout)
-- Tool discovery and execution
+- SSE HTTP transport (connect to standalone MCP server services)
+- Tool discovery and execution via MCP SDK ClientSession
 - Supervisor pattern with health checks
 - Connection state management
 - Async locking for serialized tool calls
 - Multi-server registry for routing tool calls
 
 Architecture:
-┌─────────────────────┐         stdio (JSON-RPC)        ┌──────────────────────┐
-│   FastAPI Backend   │ ←──────────────────────────────→ │   MCP Process Server │
-│  (MCP Clients)      │    stdin: send requests         │   (subprocess)        │
-│                     │    stdout: receive responses    │                      │
-│                     │                                  └──────────────────────┘
-│                     │         stdio (JSON-RPC)        ┌──────────────────────┐
-│                     │ ←──────────────────────────────→ │  MCP Calc Engine     │
-│                     │                                  │   (subprocess)        │
-└─────────────────────┘                                  └──────────────────────┘
+┌─────────────────────┐       SSE (HTTP)              ┌──────────────────────┐
+│   FastAPI Backend   │ ←──────────────────────────→   │   MCP Process Server │
+│  (MCP Clients)      │    GET /sse: event stream      │   (standalone svc)   │
+│                     │    POST /messages/: requests    │                      │
+│                     │                                 └──────────────────────┘
+│                     │       SSE (HTTP)              ┌──────────────────────┐
+│                     │ ←──────────────────────────→   │  MCP Calc Engine     │
+│                     │                                │   (standalone svc)   │
+└─────────────────────┘                                └──────────────────────┘
 """
 
 import asyncio
-import json
-import traceback
-import os
 import time
-from asyncio import subprocess
+import os
+from contextlib import AsyncExitStack
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Dict, List, Optional
@@ -46,6 +43,10 @@ if _env_path.exists():
 else:
     # Fallback: try current directory
     load_dotenv()
+
+# MCP SDK imports for SSE client
+from mcp import ClientSession
+from mcp.client.sse import sse_client
 
 
 
@@ -73,43 +74,24 @@ class MCPTool:
 
 @dataclass
 class MCPServerConfig:
-    """MCP server configuration (from .env)"""
+    """MCP server configuration (from .env) - SSE transport"""
     name: str  # Server identifier (e.g., "process_server", "calc_engine")
-    command: str
-    args: List[str]
-    env: Dict[str, str]
-    cwd: Optional[str] = None  # Working directory
+    url: str   # SSE endpoint URL (e.g., "http://localhost:8080/sse")
     enabled: bool = True
     
     @classmethod
     def from_env_process_server(cls) -> "MCPServerConfig":
         """Load MCP process server config from environment variables"""
-        # Check if process server is enabled (default: true if command is set)
-        command = os.getenv("MCP_SERVER_COMMAND")
+        url = os.getenv("MCP_SERVER_URL", "http://localhost:8080/sse")
         enabled = os.getenv("MCP_PROCESS_SERVER_ENABLED", "true").lower() == "true"
-        args_str = os.getenv("MCP_SERVER_ARGS", "")
-        cwd = os.getenv("MCP_SERVER_CWD")
         
-        # If no command configured, disable the server
-        if not command:
+        # If no URL configured, disable the server
+        if not url:
             enabled = False
-        
-        # Parse args (single path or comma-separated)
-        args = [args_str] if args_str and "," not in args_str else args_str.split(",")
-        
-        # Parse environment variables (MCP_SERVER_ENV_*)
-        env = {}
-        for key, value in os.environ.items():
-            if key.startswith("MCP_SERVER_ENV_"):
-                env_key = key.replace("MCP_SERVER_ENV_", "")
-                env[env_key] = value
         
         return cls(
             name="process_server",
-            command=command or "",  # Ensure command is never None
-            args=args,
-            env=env,
-            cwd=cwd,
+            url=url,
             enabled=enabled
         )
     
@@ -117,26 +99,15 @@ class MCPServerConfig:
     def from_env_calc_engine(cls) -> "MCPServerConfig":
         """Load MCP calculation engine server config from environment variables"""
         enabled = os.getenv("MCP_CALC_ENGINE_ENABLED", "true").lower() == "true"
-        command = os.getenv("MCP_CALC_ENGINE_COMMAND", "python")
-        args_str = os.getenv("MCP_CALC_ENGINE_ARGS", "server.py")
-        cwd = os.getenv("MCP_CALC_ENGINE_CWD")
+        url = os.getenv("MCP_CALC_ENGINE_SERVER_URL", "")
         
-        # Parse args (single path or comma-separated)
-        args = [args_str] if args_str and "," not in args_str else args_str.split(",")
-        
-        # Parse environment variables (MCP_CALC_ENGINE_ENV_*)
-        env = {}
-        for key, value in os.environ.items():
-            if key.startswith("MCP_CALC_ENGINE_ENV_"):
-                env_key = key.replace("MCP_CALC_ENGINE_ENV_", "")
-                env[env_key] = value
+        # If no URL configured, disable the server
+        if not url:
+            enabled = False
         
         return cls(
             name="calc_engine",
-            command=command,
-            args=args,
-            env=env,
-            cwd=cwd,
+            url=url,
             enabled=enabled
         )
     
@@ -152,7 +123,7 @@ class MCPServerConfig:
 
 class MCPClient:
     """
-    MCP Client Wrapper - Manages connection to an MCP Server
+    MCP Client Wrapper - Manages connection to an MCP Server via SSE
     
     Usage:
         config = MCPServerConfig.from_env_process_server()
@@ -170,31 +141,18 @@ class MCPClient:
         max_retries: int = 3,
         health_check_interval: float = 30.0,
     ):
-        """
-        Initialize MCP client
-        
-        Args:
-            config: MCP server configuration
-            restart_delay: Seconds to wait before restart
-            max_retries: Max restart attempts
-            health_check_interval: Seconds between health checks
-        """
         self.config = config
-        self.name = config.name  # Server identifier for logging/routing
+        self.name = config.name
         self.restart_delay = restart_delay
         self.max_retries = max_retries
         self.health_check_interval = health_check_interval
         
         # Connection state
         self.state = ConnectionState.DISCONNECTED
-        self._process: Optional[subprocess.Process] = None
-        self._reader_task: Optional[asyncio.Task] = None
+        self._session: Optional[ClientSession] = None
+        self._exit_stack: Optional[AsyncExitStack] = None
         self._health_task: Optional[asyncio.Task] = None
-        
-        # Message handling
-        self._message_id = 0
-        self._pending_requests: Dict[int, asyncio.Future] = {}
-        self._tool_lock = asyncio.Lock()  # Serialize tool calls
+        self._tool_lock = asyncio.Lock()
         
         # Cached tools
         self._tools: Optional[List[MCPTool]] = None
@@ -209,7 +167,7 @@ class MCPClient:
     
     async def connect(self) -> None:
         """
-        Connect to MCP server (launch subprocess)
+        Connect to MCP server via SSE transport.
         
         Raises:
             RuntimeError: If connection fails
@@ -220,43 +178,34 @@ class MCPClient:
         self.state = ConnectionState.CONNECTING
         
         try:
-            # Prepare environment
-            env = os.environ.copy()
-            env.update(self.config.env)
+            self._exit_stack = AsyncExitStack()
+            await self._exit_stack.__aenter__()
             
-            # Launch MCP server subprocess with increased buffer limit
-            # Default is 64KB which is too small for large MCP responses
-            # Increase to 16MB to handle large process templates
-            self._process = await asyncio.create_subprocess_exec(
-                self.config.command,
-                *self.config.args,
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                env=env,
-                cwd=self.config.cwd,  # Support working directory
-                limit=16 * 1024 * 1024,  # 16MB buffer limit for large responses
+            # Connect via SSE
+            read_stream, write_stream = await self._exit_stack.enter_async_context(
+                sse_client(self.config.url)
             )
             
-            # Start reading stdout
-            self._reader_task = asyncio.create_task(self._read_loop())
+            # Create MCP client session
+            self._session = await self._exit_stack.enter_async_context(
+                ClientSession(read_stream, write_stream)
+            )
             
-            # Set connected state BEFORE protocol init (so _send_request works)
+            # Initialize MCP protocol handshake
+            await self._session.initialize()
+            
             self.state = ConnectionState.CONNECTED
-            
-            # Initialize MCP protocol
-            await self._initialize_protocol()
             
             # Start health checks
             self._health_task = asyncio.create_task(self._health_check_loop())
             
-            print(f"INFO: MCP server '{self.name}' connected successfully")
+            print(f"INFO: MCP server '{self.name}' connected via SSE at {self.config.url}")
             
         except Exception as e:
             self.state = ConnectionState.FAILED
-            print(f"ERROR: Failed to connect to MCP server '{self.name}': {e}")
+            print(f"ERROR: Failed to connect to MCP server '{self.name}' at {self.config.url}: {e}")
             await self._cleanup()
-            raise RuntimeError(f"MCP connection failed for '{self.name}': {e}")
+            raise RuntimeError(f"MCP SSE connection failed for '{self.name}': {e}")
     
     async def disconnect(self) -> None:
         """Gracefully disconnect from MCP server"""
@@ -264,185 +213,31 @@ class MCPClient:
             return
         
         self.state = ConnectionState.DISCONNECTED
-        
         await self._cleanup()
     
     async def _cleanup(self) -> None:
         """Clean up resources"""
-        # Cancel health checks
         if self._health_task:
             self._health_task.cancel()
             try:
                 await self._health_task
             except asyncio.CancelledError:
                 pass
+            self._health_task = None
         
-        # Cancel reader
-        if self._reader_task:
-            self._reader_task.cancel()
+        if self._exit_stack:
             try:
-                await self._reader_task
-            except asyncio.CancelledError:
-                pass
-        
-        # Terminate process
-        if self._process:
-            try:
-                self._process.terminate()
-                await asyncio.wait_for(self._process.wait(), timeout=5.0)
-            except asyncio.TimeoutError:
-                self._process.kill()
-                await self._process.wait()
+                await self._exit_stack.aclose()
             except Exception as e:
-                print(f"WARNING: Error terminating MCP process: {e}")
+                print(f"WARNING: Error closing MCP SSE connection: {e}")
+            self._exit_stack = None
         
-        # Clear state
-        self._process = None
-        self._reader_task = None
-        self._health_task = None
+        self._session = None
         self._tools = None
-        
-        # Reject pending requests
-        for future in self._pending_requests.values():
-            if not future.done():
-                future.set_exception(RuntimeError("MCP connection closed"))
-        self._pending_requests.clear()
     
     def is_connected(self) -> bool:
         """Check if MCP client is connected"""
-        return self.state == ConnectionState.CONNECTED and self._process is not None
-    
-    # -------------------------------------------------------------------------
-    # Protocol Operations
-    # -------------------------------------------------------------------------
-    
-    async def _initialize_protocol(self) -> None:
-        """Initialize MCP protocol (handshake)"""
-        # Send initialize request
-        response = await self._send_request("initialize", {
-            "protocolVersion": "2024-11-05",
-            "capabilities": {
-                "roots": {"listChanged": False},
-                "sampling": {}
-            },
-            "clientInfo": {
-                "name": "arken-chat-backend",
-                "version": "1.0.0"
-            }
-        })
-        
-        
-        # Send initialized notification
-        await self._send_notification("notifications/initialized")
-    
-    async def _send_request(self, method: str, params: Optional[Dict] = None) -> Dict[str, Any]:
-        """
-        Send JSON-RPC request and wait for response
-        
-        Args:
-            method: JSON-RPC method name
-            params: Method parameters
-        
-        Returns:
-            Response result
-        
-        Raises:
-            RuntimeError: If not connected or request fails
-        """
-        if not self.is_connected():
-            raise RuntimeError("MCP client not connected")
-        
-        # Generate message ID
-        self._message_id += 1
-        msg_id = self._message_id
-        
-        # Create request
-        request = {
-            "jsonrpc": "2.0",
-            "id": msg_id,
-            "method": method,
-        }
-        if params:
-            request["params"] = params
-        
-        # Create future for response
-        future = asyncio.Future()
-        self._pending_requests[msg_id] = future
-        
-        # Send request
-        try:
-            request_json = json.dumps(request) + "\n"
-            self._process.stdin.write(request_json.encode())
-            await self._process.stdin.drain()
-            
-            # Wait for response (with timeout)
-            response = await asyncio.wait_for(future, timeout=300.0)
-            
-            # Check for error
-            if "error" in response:
-                error = response["error"]
-                raise RuntimeError(f"MCP error: {error.get('message', 'Unknown error')}")
-            
-            return response.get("result", {})
-            
-        except asyncio.TimeoutError:
-            self._pending_requests.pop(msg_id, None)
-            raise RuntimeError(f"MCP request timeout: {method}")
-        except Exception as e:
-            self._pending_requests.pop(msg_id, None)
-            raise RuntimeError(f"MCP request failed: {e}")
-    
-    async def _send_notification(self, method: str, params: Optional[Dict] = None) -> None:
-        """Send JSON-RPC notification (no response expected)"""
-        if not self.is_connected():
-            raise RuntimeError("MCP client not connected")
-        
-        notification = {
-            "jsonrpc": "2.0",
-            "method": method,
-        }
-        if params:
-            notification["params"] = params
-        
-        notification_json = json.dumps(notification) + "\n"
-        self._process.stdin.write(notification_json.encode())
-        await self._process.stdin.drain()
-    
-    async def _read_loop(self) -> None:
-        """Read and process messages from MCP server stdout"""
-        try:
-            while self._process and self._process.stdout:
-                line = await self._process.stdout.readline()
-                if not line:
-                    break
-                
-                try:
-                    message = json.loads(line.decode())
-                    await self._handle_message(message)
-                except json.JSONDecodeError as e:
-                    print(f"ERROR: Invalid JSON from MCP server: {e}")
-                except Exception as e:
-                    print(f"ERROR: Error handling MCP message: {e}")
-        
-        except asyncio.CancelledError:
-            pass
-        except Exception as e:
-            print(f"ERROR: MCP reader loop error: {e}")
-            if self.state == ConnectionState.CONNECTED:
-                await self._handle_disconnect()
-    
-    async def _handle_message(self, message: Dict[str, Any]) -> None:
-        """Handle incoming message from MCP server"""
-        # Response to request
-        if "id" in message:
-            msg_id = message["id"]
-            future = self._pending_requests.pop(msg_id, None)
-            if future and not future.done():
-                future.set_result(message)
-        
-        # Notification (log progress, etc.)
-        elif "method" in message:
-            pass
+        return self.state == ConnectionState.CONNECTED and self._session is not None
     
     # -------------------------------------------------------------------------
     # Tool Operations
@@ -450,7 +245,7 @@ class MCPClient:
     
     async def list_tools(self, force_refresh: bool = False) -> List[MCPTool]:
         """
-        List available MCP tools
+        List available MCP tools.
         
         Args:
             force_refresh: Force refresh cached tools
@@ -461,24 +256,26 @@ class MCPClient:
         if self._tools and not force_refresh:
             return self._tools
         
-        response = await self._send_request("tools/list")
+        if not self.is_connected():
+            raise RuntimeError(f"MCP client '{self.name}' not connected")
+        
+        result = await self._session.list_tools()
         
         tools = []
-        for tool_data in response.get("tools", []):
+        for tool in result.tools:
             tools.append(MCPTool(
-                name=tool_data["name"],
-                description=tool_data.get("description", ""),
-                input_schema=tool_data.get("inputSchema", {}),
-                server_name=self.name,  # Tag tool with server name
+                name=tool.name,
+                description=tool.description or "",
+                input_schema=tool.inputSchema if hasattr(tool, 'inputSchema') else {},
+                server_name=self.name,
             ))
         
         self._tools = tools
-        
         return tools
     
     async def call_tool(self, name: str, arguments: Dict[str, Any]) -> Any:
         """
-        Call MCP tool
+        Call MCP tool.
         
         Args:
             name: Tool name
@@ -490,46 +287,35 @@ class MCPClient:
         Raises:
             RuntimeError: If tool call fails
         """
-        # Use lock to serialize tool calls (MCP servers typically aren't thread-safe)
+        if not self.is_connected():
+            raise RuntimeError(f"MCP client '{self.name}' not connected")
+        
         async with self._tool_lock:
-            response = await self._send_request("tools/call", {
-                "name": name,
-                "arguments": arguments
-            })
+            result = await self._session.call_tool(name, arguments)
             
             # Extract content
-            content = response.get("content", [])
-            if not content:
+            if not result.content:
                 return None
             
             # Return first text content
-            for item in content:
-                if item.get("type") == "text":
-                    return item.get("text")
+            for item in result.content:
+                if hasattr(item, 'text'):
+                    return item.text
             
-            return content
+            return str(result.content)
     
     # -------------------------------------------------------------------------
     # Health & Supervisor
     # -------------------------------------------------------------------------
     
     async def health_check(self) -> bool:
-        """
-        Perform health check
-        
-        Returns:
-            True if healthy, False otherwise
-        """
+        """Perform health check by listing tools."""
         try:
-            # Check process alive
-            if not self._process or self._process.returncode is not None:
+            if not self.is_connected():
                 return False
-            
-            # Try to list tools (lightweight operation)
-            await asyncio.wait_for(self.list_tools(), timeout=5.0)
+            await asyncio.wait_for(self._session.list_tools(), timeout=5.0)
             return True
-            
-        except Exception as e:
+        except Exception:
             return False
     
     async def _health_check_loop(self) -> None:
@@ -537,36 +323,32 @@ class MCPClient:
         try:
             while self.state == ConnectionState.CONNECTED:
                 await asyncio.sleep(self.health_check_interval)
-                
                 if not await self.health_check():
                     await self._handle_disconnect()
                     break
-        
         except asyncio.CancelledError:
             pass
     
     async def _handle_disconnect(self) -> None:
-        """Handle unexpected disconnect - attempt restart"""
+        """Handle unexpected disconnect - attempt reconnect"""
         if self.state == ConnectionState.DISCONNECTED:
             return
         
         print(f"WARNING: MCP server '{self.name}' disconnected unexpectedly")
-        # Check restart limits
+        
         now = time.time()
-        if now - self._last_restart < 60:  # Within 1 minute
+        if now - self._last_restart < 60:
             self._restart_count += 1
         else:
             self._restart_count = 1
         
         if self._restart_count > self.max_retries:
             self.state = ConnectionState.FAILED
-            print(f"ERROR: Max restart attempts reached for '{self.name}' ({self.max_retries})")
+            print(f"ERROR: Max reconnect attempts reached for '{self.name}' ({self.max_retries})")
             await self._cleanup()
             return
         
-        # Attempt restart
         self.state = ConnectionState.RESTARTING
-        
         await self._cleanup()
         await asyncio.sleep(self.restart_delay)
         
@@ -575,7 +357,7 @@ class MCPClient:
             await self.connect()
         except Exception as e:
             self.state = ConnectionState.FAILED
-            print(f"ERROR: Failed to restart MCP server '{self.name}': {e}")
+            print(f"ERROR: Failed to reconnect MCP server '{self.name}': {e}")
 
 
 # =============================================================================
@@ -643,7 +425,7 @@ class MCPClientRegistry:
         
         # Load process server config
         process_config = MCPServerConfig.from_env_process_server()
-        if process_config.enabled and process_config.command:
+        if process_config.enabled and process_config.url:
             client = MCPClient(process_config)
             try:
                 await client.connect()
@@ -654,7 +436,7 @@ class MCPClientRegistry:
         
         # Load calc engine config
         calc_config = MCPServerConfig.from_env_calc_engine()
-        if calc_config.enabled and calc_config.command:
+        if calc_config.enabled and calc_config.url:
             client = MCPClient(calc_config)
             try:
                 await client.connect()

@@ -73,53 +73,27 @@ class Settings(BaseSettings):
     # =============================================================================
     # MCP Process Server Configuration (Sugar Industry, etc.)
     # =============================================================================
-    mcp_server_command: str = Field(
-        ...,
-        description="Path to Python interpreter for MCP process server"
+    # MCP Process Server Configuration (Sugar Industry, etc.) - SSE Transport
+    # =============================================================================
+    mcp_server_url: str = Field(
+        default="http://localhost:8080/sse",
+        description="MCP process server SSE endpoint URL"
     )
-    mcp_server_args: str = Field(
-        ...,
-        description="Path to MCP process server.py file"
-    )
-    mcp_server_env_calc_engine_url: str = Field(
-        default="http://localhost:8000",
-        description="Calculation engine API URL for process server"
-    )
-    mcp_server_env_max_stored_runs: int = Field(
-        default=1000,
-        description="Maximum stored runs in MCP process server"
-    )
-    mcp_server_env_mongodb_uri: str = Field(
-        ...,
-        description="MongoDB URI for MCP process server (arken_process_db)"
+    mcp_process_server_enabled: bool = Field(
+        default=True,
+        description="Enable MCP process server connection"
     )
     
     # =============================================================================
-    # MCP Calculation Engine Server Configuration (Dynamic Flowsheets)
+    # MCP Calculation Engine Server Configuration (Dynamic Flowsheets) - SSE Transport
     # =============================================================================
     mcp_calc_engine_enabled: bool = Field(
         default=True,
         description="Enable MCP calculation engine server"
     )
-    mcp_calc_engine_command: str = Field(
-        default="python",
-        description="Path to Python interpreter for MCP calc engine server"
-    )
-    mcp_calc_engine_args: str = Field(
-        default="server.py",
-        description="Path to MCP calc engine server.py file"
-    )
-    mcp_calc_engine_cwd: Optional[str] = Field(
-        default=None,
-        description="Working directory for MCP calc engine server"
-    )
-    mcp_calc_engine_env_calc_engine_url: str = Field(
-        default="http://localhost:8000",
-        description="Calculation engine API URL for calc engine server"
-    )
-    mcp_calc_engine_env_mongodb_uri: Optional[str] = Field(
-        default=None,
-        description="MongoDB URI for MCP calc engine server (uses MONGODB_URL if not set)"
+    mcp_calc_engine_server_url: str = Field(
+        default="",
+        description="MCP calculation engine SSE endpoint URL"
     )
     
     # =============================================================================
