@@ -48,12 +48,12 @@ class StreamTableFormatter:
     - Table splitting for wide tables
     """
     
-    def __init__(self, max_streams_per_table: int = 10):
+    def __init__(self, max_streams_per_table: int = 5):
         """
         Initialize the formatter.
         
         Args:
-            max_streams_per_table: Maximum number of streams before splitting table
+            max_streams_per_table: Maximum number of streams before splitting table (5 recommended for readability)
         """
         self.max_streams_per_table = max_streams_per_table
     
