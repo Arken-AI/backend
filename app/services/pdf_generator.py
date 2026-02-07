@@ -150,13 +150,13 @@ class PDFReportGenerator:
     - Placeholder sections for AI-generated content (Phase 2)
     """
     
-    def __init__(self, page_size: str = "letter", max_streams_per_table: int = 10):
+    def __init__(self, page_size: str = "letter", max_streams_per_table: int = 5):
         """
         Initialize the PDF generator.
         
         Args:
             page_size: Page size ("letter" or "a4")
-            max_streams_per_table: Maximum streams per table before splitting
+            max_streams_per_table: Maximum streams per table before splitting (5 recommended for readability)
         """
         self.page_size = PAGE_SIZES.get(page_size.lower(), letter)
         self.page_width, self.page_height = self.page_size
