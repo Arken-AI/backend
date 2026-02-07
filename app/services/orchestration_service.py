@@ -795,10 +795,12 @@ class OrchestrationService:
         Claude will learn from tool descriptions and error messages to determine workflow.
         """
         # Build minimal system prompt - let Claude learn from tool descriptions and errors
+        frontend_url = settings.frontend_url
         system_parts = [
             "You are a process simulation assistant with access to tools for industrial process simulation.",
             "Use the available tools to help users. If a tool fails, read the error message to understand what went wrong.",
             "If you need more information from the user to proceed, ask them directly.",
+            f"When a simulation completes successfully and returns a run_id, include a link for the user: 📊 [View Simulation Results]({frontend_url}/results/{{run_id}}) — replace {{run_id}} with the actual run_id.",
         ]
         
         # Add current context if available (industry, process)
