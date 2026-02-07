@@ -577,7 +577,8 @@ class OrchestrationService:
                         })
                         
                         all_tool_results.append({
-                            "tool": tool_name,
+                            "name": tool_name,
+                            "tool": tool_name,  # For backward compatibility
                             "status": "denied",
                             "reason": policy_result["reason"]
                         })
