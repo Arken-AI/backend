@@ -101,33 +101,32 @@ from app.core.mcp_client import MCPClient, MCPServerConfig, MCPClientRegistry
 
 def inject_result_links(message: str, run_ids: List[str], frontend_url: str) -> str:
     """
-    Inject result links if LLM didn't include them.
+    Append result links using the configured frontend URL.
     
-    Fallback mechanism for when system prompt fails to generate links.
-    Checks if LLM already included links before injecting to avoid duplicates.
+    Always injects links with the correct frontend_url from FRONTEND_URL env var.
+    Skips if LLM already included result links to avoid duplicates.
     
     Args:
         message: LLM's response text
         run_ids: List of run IDs from simulation tools
-        frontend_url: Base URL of frontend application
+        frontend_url: Base URL of frontend application (from FRONTEND_URL env)
     
     Returns:
-        Message with injected links (if needed)
+        Message with result links appended
     """
     if not run_ids:
         return message
     
-    # Check if LLM already included links (avoid duplicates)
-    if "View Simulation Results" in message or "/results/" in message:
-        return message  # LLM already added links
+    # Skip if LLM already included result links
+    if "/results/" in message:
+        return message
     
-    # Inject links programmatically
+    # Inject links using the configured frontend URL
     links = []
     for run_id in run_ids:
         url = f"{frontend_url}/results/{run_id}"
         links.append(f"📊 [View Simulation Results]({url})")
     
-    # Append links to message
     link_section = "\n\n" + "\n".join(links)
     return message + link_section
 
