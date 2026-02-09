@@ -13,7 +13,7 @@ but the final response is returned directly in the HTTP response.
 import logging
 import uuid
 from datetime import datetime
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 
 from fastapi import APIRouter, HTTPException, Depends, status
 from fastapi.responses import JSONResponse
@@ -347,6 +347,7 @@ async def delete_conversation(
 async def list_conversations(
     limit: int = 50,
     offset: int = 0,
+    username: Optional[str] = None,
     mongo_client: MongoClient = Depends(get_mongo_client)
 ) -> ConversationListResponse:
     """
@@ -354,10 +355,12 @@ async def list_conversations(
     
     Returns a paginated list of conversations with summary information.
     Conversations are sorted by updated_at (newest first).
+    Optionally filtered by username (matches user_id field).
     
     Args:
         limit: Maximum number of conversations to return (default: 50)
         offset: Number of conversations to skip (default: 0)
+        username: Optional username to filter conversations by
         mongo_client: MongoDB client dependency
         
     Returns:
@@ -367,11 +370,16 @@ async def list_conversations(
         db = mongo_client._client["arken_process_db"]
         collection = db["conversations"]
         
+        # Build query filter
+        query = {}
+        if username:
+            query["user_id"] = username.lower()
+        
         # Get total count
-        total = await collection.count_documents({})
+        total = await collection.count_documents(query)
         
         # Get conversations sorted by updated_at
-        cursor = collection.find({}).sort("updated_at", -1).skip(offset).limit(limit)
+        cursor = collection.find(query).sort("updated_at", -1).skip(offset).limit(limit)
         
         conversations = []
         async for doc in cursor:
