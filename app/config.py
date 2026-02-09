@@ -204,6 +204,11 @@ class Settings(BaseSettings):
     # =============================================================================
     # Application Settings
     # =============================================================================
+    app_shared_password: str = Field(
+        default="arkenai123",
+        description="Shared password for user login authentication"
+    )
+    
     log_level: str = Field(
         default="INFO",
         description="Logging level (DEBUG, INFO, WARNING, ERROR)"
