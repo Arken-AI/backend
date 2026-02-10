@@ -190,7 +190,8 @@ class OrchestrationService:
         mcp_client: MCPClient = None,  # Legacy: single client (deprecated)
         mcp_registry: MCPClientRegistry = None,  # New: multi-server registry
         event_emitter: Optional[EventEmitter] = None,
-        anthropic_api_key: str = None
+        anthropic_api_key: str = None,
+        llm_provider = None  # Pre-built singleton LLM provider
     ):
         """
         Initialize orchestration service.
@@ -222,8 +223,11 @@ class OrchestrationService:
             self.mcp_client = None
             self.mcp_registry = None
         
-        # Initialize Claude LLM provider
-        self.llm = ClaudeProvider(api_key=anthropic_api_key)
+        # Use pre-built singleton LLM provider if available, otherwise create new one
+        if llm_provider:
+            self.llm = llm_provider
+        else:
+            self.llm = ClaudeProvider(api_key=anthropic_api_key)
     
     # =========================================================================
     # AGENTIC LOOP - Main Entry Point

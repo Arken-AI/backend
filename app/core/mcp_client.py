@@ -355,6 +355,9 @@ class MCPClient:
         try:
             self._last_restart = now
             await self.connect()
+            # Reset retry counter on successful reconnect
+            self._restart_count = 0
+            print(f"INFO: Successfully reconnected MCP server '{self.name}'")
         except Exception as e:
             self.state = ConnectionState.FAILED
             print(f"ERROR: Failed to reconnect MCP server '{self.name}': {e}")
