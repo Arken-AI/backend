@@ -9,7 +9,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api import stream, health, chat, test_stream, runs, reports, auth
-from app.dependencies import close_redis_client, close_mcp_clients
+from app.dependencies import close_redis_client, close_mcp_clients, close_llm_provider
 from app.config import settings
 
 
@@ -26,6 +26,7 @@ async def lifespan(app: FastAPI):
     yield
     
     # Shutdown
+    await close_llm_provider()  # Close LLM httpx connection pool
     await close_mcp_clients()  # Close both MCP server connections
     await close_redis_client()
 
