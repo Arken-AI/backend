@@ -140,12 +140,14 @@ class MCPClient:
         restart_delay: float = 2.0,
         max_retries: int = 3,
         health_check_interval: float = 30.0,
+        sse_read_timeout: float = 60 * 60,  # 1 hour - prevents idle SSE disconnects
     ):
         self.config = config
         self.name = config.name
         self.restart_delay = restart_delay
         self.max_retries = max_retries
         self.health_check_interval = health_check_interval
+        self.sse_read_timeout = sse_read_timeout
         
         # Connection state
         self.state = ConnectionState.DISCONNECTED
@@ -181,9 +183,9 @@ class MCPClient:
             self._exit_stack = AsyncExitStack()
             await self._exit_stack.__aenter__()
             
-            # Connect via SSE
+            # Connect via SSE with extended read timeout to prevent idle disconnects
             read_stream, write_stream = await self._exit_stack.enter_async_context(
-                sse_client(self.config.url)
+                sse_client(self.config.url, sse_read_timeout=self.sse_read_timeout)
             )
             
             # Create MCP client session
@@ -257,7 +259,12 @@ class MCPClient:
             return self._tools
         
         if not self.is_connected():
-            raise RuntimeError(f"MCP client '{self.name}' not connected")
+            print(f"WARNING: MCP client '{self.name}' not connected, attempting reconnect before listing tools...")
+            try:
+                await self._cleanup()
+                await self.connect()
+            except Exception as e:
+                raise RuntimeError(f"MCP client '{self.name}' not connected and reconnect failed: {e}")
         
         result = await self._session.list_tools()
         
@@ -275,7 +282,10 @@ class MCPClient:
     
     async def call_tool(self, name: str, arguments: Dict[str, Any]) -> Any:
         """
-        Call MCP tool.
+        Call MCP tool with automatic reconnection.
+        
+        If the connection is dead when the call comes in, reconnects first
+        and retries. This handles graceful recovery from SSE disconnects.
         
         Args:
             name: Tool name
@@ -285,13 +295,33 @@ class MCPClient:
             Tool result
         
         Raises:
-            RuntimeError: If tool call fails
+            RuntimeError: If tool call fails after reconnection attempt
         """
+        # Check connection and reconnect if needed before attempting the call
         if not self.is_connected():
-            raise RuntimeError(f"MCP client '{self.name}' not connected")
+            print(f"WARNING: MCP client '{self.name}' not connected, attempting reconnect before tool call...")
+            try:
+                await self._cleanup()
+                await self.connect()
+                print(f"INFO: Successfully reconnected MCP client '{self.name}' before tool call")
+            except Exception as e:
+                raise RuntimeError(f"MCP client '{self.name}' not connected and reconnect failed: {e}")
         
         async with self._tool_lock:
-            result = await self._session.call_tool(name, arguments)
+            try:
+                result = await self._session.call_tool(name, arguments)
+            except Exception as e:
+                # Connection may have died during the call - try one reconnect + retry
+                print(f"WARNING: Tool call '{name}' failed on '{self.name}': {e}. Attempting reconnect and retry...")
+                try:
+                    await self._cleanup()
+                    await self.connect()
+                    result = await self._session.call_tool(name, arguments)
+                    print(f"INFO: Tool call '{name}' succeeded after reconnect")
+                except Exception as retry_error:
+                    raise RuntimeError(
+                        f"Tool call '{name}' failed on '{self.name}' even after reconnect: {retry_error}"
+                    )
             
             # Extract content
             if not result.content:
