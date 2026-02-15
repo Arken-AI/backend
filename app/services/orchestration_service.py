@@ -764,6 +764,22 @@ class OrchestrationService:
             "Use the available tools to help users. If a tool fails, read the error message to understand what went wrong.",
             "If you need more information from the user to proceed, ask them directly.",
             "When a simulation tool returns a result_link field, include it exactly as-is in your response so the user can click it. Do NOT modify or reconstruct the link.",
+            "",
+            "SINGLE-EQUIPMENT SIMULATION:",
+            "- Use calc_list_processes with template_type='single_equipment' to find standalone equipment templates.",
+            "- Single-equipment templates use generic compound placeholders (compound_1, compound_2, etc.).",
+            "- When you see generic compounds in a template, ask the user which real compounds to use.",
+            "- Pass the compound_mapping parameter (e.g., {\"compound_1\": \"ethanol\", \"compound_2\": \"water\"}) when simulating.",
+            "- If the user asks to simulate a single piece of equipment (e.g., 'simulate a distillation column'), search for single-equipment templates first.",
+            "",
+            "EQUIPMENT CHAINING:",
+            "- Use calc_chain_equipment to feed the output of one simulation into another piece of equipment.",
+            "- The user may say things like 'feed the heater output to a distillation column' — use chaining for this.",
+            "- When chaining, you need: source_run_id, source_equipment_id, source_port, and target_process_id.",
+            "- For multi-outlet equipment (e.g., flash drum with vapor_outlet and liquid_outlet), ask the user which outlet to use.",
+            "- If a connection is invalid (phase mismatch, zero flow, etc.), relay the error and suggestion to the user clearly.",
+            "- Suggest intermediate equipment when connections are blocked (e.g., 'add a condenser between flash drum vapor and pump').",
+            "- Prefer calc_chain_equipment for connecting individual equipment over building a full process template.",
         ]
         
         # Add current context if available (industry, process)

@@ -24,7 +24,8 @@ from app.models.runs import (
     RunListResponse,
     RunListItem,
     RunSource,
-    RunStatus
+    RunStatus,
+    TemplateType
 )
 from app.dependencies import get_mongo_client
 from app.core.mongo_client import MongoClient
@@ -55,6 +56,7 @@ def normalize_run(doc: dict, source: str) -> dict:
             "source": "calc_engine",
             "user_id": doc.get("user_id"),
             "process_id": doc.get("process_id"),
+            "template_type": doc.get("template_type"),
             "status": doc["status"],
             "error": doc.get("error"),
             "created_at": doc["created_at"],
@@ -65,7 +67,8 @@ def normalize_run(doc: dict, source: str) -> dict:
                 "run_name": doc.get("run_name"),
                 "completed_at": doc.get("completed_at"),
                 "request": doc.get("payload_snapshot")
-            }
+            },
+            "chain_metadata": doc.get("chain_metadata")
         }
     else:  # process_server
         return {
@@ -73,6 +76,7 @@ def normalize_run(doc: dict, source: str) -> dict:
             "source": "process_server",
             "user_id": doc.get("user_id", "default_user"),
             "process_id": doc.get("process_id"),
+            "template_type": None,
             "status": doc["status"],
             "error": doc.get("error"),
             "created_at": doc["created_at"],
@@ -82,7 +86,8 @@ def normalize_run(doc: dict, source: str) -> dict:
                 "industry": doc.get("industry"),
                 "request": doc.get("inputs"),
                 "run_metadata": doc.get("metadata")
-            }
+            },
+            "chain_metadata": None
         }
 
 
@@ -103,9 +108,11 @@ def normalize_run_summary(doc: dict, source: str) -> dict:
             "source": "calc_engine",
             "user_id": doc.get("user_id"),
             "process_id": doc.get("process_id"),
+            "template_type": doc.get("template_type"),
             "status": doc["status"],
             "created_at": doc["created_at"],
-            "execution_time_ms": doc.get("execution_time_ms")
+            "execution_time_ms": doc.get("execution_time_ms"),
+            "has_chain_metadata": doc.get("chain_metadata") is not None
         }
     else:  # process_server
         return {
@@ -113,9 +120,11 @@ def normalize_run_summary(doc: dict, source: str) -> dict:
             "source": "process_server",
             "user_id": doc.get("user_id", "default_user"),
             "process_id": doc.get("process_id"),
+            "template_type": None,
             "status": doc["status"],
             "created_at": doc["created_at"],
-            "execution_time_ms": int(doc.get("execution_time_ms", 0)) if doc.get("execution_time_ms") else None
+            "execution_time_ms": int(doc.get("execution_time_ms", 0)) if doc.get("execution_time_ms") else None,
+            "has_chain_metadata": False
         }
 
 
@@ -169,6 +178,15 @@ async def get_run_results(
         if doc:
             normalized = normalize_run(doc, "calc_engine")
             source = "calc_engine"
+            
+            # Resolve template_type from templates collection if not on run doc
+            if not normalized.get("template_type") and doc.get("process_id"):
+                tmpl = await db.calc_process_templates.find_one(
+                    {"process_id": doc["process_id"]},
+                    {"template_type": 1}
+                )
+                if tmpl:
+                    normalized["template_type"] = tmpl.get("template_type", "process")
         else:
             # Try process_server collection
             doc = await db.runs.find_one({"run_id": run_id})
@@ -227,6 +245,11 @@ async def list_runs(
         None,
         description="Filter by process ID (e.g., 'sugar', 'ethanol')"
     ),
+    template_type: Optional[TemplateType] = Query(
+        None,
+        description="Filter by template type ('process' or 'single_equipment'). "
+                    "Only applies to calc_engine runs. If set, process_server runs are excluded."
+    ),
     status: Optional[RunStatus] = Query(
         None,
         description="Filter by run status"
@@ -245,6 +268,8 @@ async def list_runs(
     Query strategy:
     - If source filter provided: Query only that collection (efficient)
     - If no source filter: Query both collections, merge, and sort in memory
+    - If template_type filter provided: Only query calc_engine collection,
+      using a two-step lookup through calc_process_templates to get matching process_ids
     
     Performance notes:
     - For large datasets, use the source filter
@@ -255,6 +280,7 @@ async def list_runs(
         source: Filter by run source (optional but recommended)
         user_id: Filter by user ID (optional)
         process_id: Filter by process ID (optional)
+        template_type: Filter by template type (optional, calc_engine only)
         status: Filter by run status (optional)
         limit: Max results to return (default 20, max 100)
         mongo_client: Injected MongoDB client
@@ -274,27 +300,59 @@ async def list_runs(
         if status:
             filter_query["status"] = status.value
         
+        # If template_type is specified, resolve matching process_ids from templates
+        # and force source to calc_engine (process_server runs don't have template_type)
+        template_type_process_ids = None
+        if template_type:
+            template_filter = {"template_type": template_type.value}
+            template_cursor = db.calc_process_templates.find(
+                template_filter,
+                {"process_id": 1}
+            )
+            template_type_process_ids = []
+            async for tmpl in template_cursor:
+                pid = tmpl.get("process_id")
+                if pid:
+                    template_type_process_ids.append(pid)
+            
+            # If a specific process_id was also given, intersect
+            if process_id:
+                if process_id not in template_type_process_ids:
+                    # No match — return empty
+                    return RunListResponse(runs=[], has_more=False)
+                # process_id is already in filter_query
+            else:
+                if not template_type_process_ids:
+                    return RunListResponse(runs=[], has_more=False)
+                filter_query["process_id"] = {"$in": template_type_process_ids}
+        
         all_runs = []
         
+        # When template_type is set, skip process_server collection
+        query_calc = (source is None or source == RunSource.CALC_ENGINE)
+        query_process = (source is None or source == RunSource.PROCESS_SERVER) and template_type is None
+        
         # Query calc_engine collection
-        if source is None or source == RunSource.CALC_ENGINE:
+        if query_calc:
             cursor = db.calc_simulation_runs.find(
                 filter_query,
                 {
                     "run_id": 1,
                     "user_id": 1,
                     "process_id": 1,
+                    "template_type": 1,
                     "status": 1,
                     "created_at": 1,
-                    "execution_time_ms": 1
+                    "execution_time_ms": 1,
+                    "chain_metadata": 1
                 }
             ).sort("created_at", DESCENDING).limit(limit + 1)
             
             async for doc in cursor:
                 all_runs.append(normalize_run_summary(doc, "calc_engine"))
         
-        # Query process_server collection
-        if source is None or source == RunSource.PROCESS_SERVER:
+        # Query process_server collection (skipped when template_type filter is active)
+        if query_process:
             cursor = db.runs.find(
                 filter_query,
                 {

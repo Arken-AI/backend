@@ -35,6 +35,12 @@ class RunStatus(str, Enum):
     ERROR = "error"
 
 
+class TemplateType(str, Enum):
+    """Type of process template"""
+    PROCESS = "process"
+    SINGLE_EQUIPMENT = "single_equipment"
+
+
 class RunResultResponse(BaseModel):
     """
     Complete run result with full simulation data.
@@ -50,6 +56,10 @@ class RunResultResponse(BaseModel):
     source: RunSource = Field(description="Which MCP server created this run")
     user_id: Optional[str] = Field(default=None, description="User who initiated the run")
     process_id: Optional[str] = Field(default=None, description="Process ID (sugar, ethanol, etc.)")
+    template_type: Optional[str] = Field(
+        default=None,
+        description="Template type: 'process' or 'single_equipment'. Only set for calc_engine runs."
+    )
     status: RunStatus = Field(description="Current status of the run")
     error: Optional[str] = Field(default=None, description="Error message if status is failed/error")
     created_at: datetime = Field(description="When the run was created")
@@ -61,6 +71,11 @@ class RunResultResponse(BaseModel):
     metadata: Optional[Dict[str, Any]] = Field(
         default=None,
         description="Additional metadata (version, run_name, industry, etc.)"
+    )
+    chain_metadata: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="Chain provenance metadata for equipment-chained runs. "
+                    "Contains source_run_id, source_equipment_id, source_port, extracted_stream."
     )
 
 
@@ -78,9 +93,17 @@ class RunListItem(BaseModel):
     source: RunSource = Field(description="Which MCP server created this run")
     user_id: Optional[str] = Field(default=None, description="User who initiated the run")
     process_id: Optional[str] = Field(default=None, description="Process ID (sugar, ethanol, etc.)")
+    template_type: Optional[str] = Field(
+        default=None,
+        description="Template type: 'process' or 'single_equipment'. Only set for calc_engine runs."
+    )
     status: RunStatus = Field(description="Current status of the run")
     created_at: datetime = Field(description="When the run was created")
     execution_time_ms: Optional[int] = Field(default=None, description="Execution time in milliseconds")
+    has_chain_metadata: bool = Field(
+        default=False,
+        description="Whether this run has chain provenance metadata (is a chained run)"
+    )
 
 
 class RunListResponse(BaseModel):
