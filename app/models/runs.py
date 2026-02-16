@@ -106,6 +106,42 @@ class RunListItem(BaseModel):
     )
 
 
+class FlowsheetResponse(BaseModel):
+    """
+    Unified flowsheet merging all chained runs.
+    
+    Walks the chain graph (upstream via chain_metadata, downstream via downstream_runs)
+    and merges equipment, edges, feed_streams, and results into a single flowsheet
+    that the frontend can render without knowing about individual runs.
+    
+    The `data` field has the exact same shape as RunResultResponse.data so that
+    transformEquipmentData and useFlowLayout work without changes.
+    """
+    model_config = ConfigDict(populate_by_name=True)
+
+    run_id: str = Field(description="The requested (leaf) run ID")
+    root_run_id: str = Field(description="The root run of the chain (no chain_metadata)")
+    all_run_ids: List[str] = Field(description="All run IDs in this flowsheet, root-first order")
+    run_map: Dict[str, str] = Field(
+        description="Mapping of equipment_id → run_id so the frontend knows "
+                    "which run each equipment belongs to (for detail panel)"
+    )
+    status: str = Field(description="Overall status (success if all runs succeeded)")
+    data: Dict[str, Any] = Field(
+        description="Merged flowsheet data in unified format: "
+                    "{ input: { feed_streams, equipment, edges }, "
+                    "result: { node_results, stream_results, equipment_inputs, execution_order } }"
+    )
+    chain_metadata: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="Chain metadata of the requested run (for banner display)"
+    )
+    warnings: List[str] = Field(
+        default_factory=list,
+        description="Warnings encountered during chain traversal or merge"
+    )
+
+
 class RunListResponse(BaseModel):
     """
     Response model for listing runs.
