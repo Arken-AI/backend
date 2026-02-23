@@ -438,12 +438,23 @@ class OrchestrationService:
                     total_accumulated_text = message_text
                     
                     # PHASE 2.3: Update assistant message with final content and status=complete
+                    # Build per-message tool_executions list for persistent inline display
+                    tool_executions_to_store = [
+                        {
+                            "tool_name": tc.get("name", "unknown"),
+                            "status": "error" if tc.get("result", {}).get("status") in ["error", "failed", "simulation_failed"] else "success",
+                            "duration_ms": tc.get("duration_ms"),
+                            "summary": tc.get("result", {}).get("message") or tc.get("result", {}).get("summary") or str(tc.get("result", {}))[:200],
+                            "error": tc.get("result", {}).get("error") if tc.get("result", {}).get("status") in ["error", "failed", "simulation_failed"] else None,
+                        }
+                        for tc in all_tool_results
+                    ]
                     await self.context_manager.update_message(
                         conversation_id,
                         assistant_message_id,
                         content=message_text,
                         status=MessageStatus.COMPLETE,
-                        metadata={"iterations": iteration + 1, "tool_calls": len(all_tool_results)}
+                        metadata={"iterations": iteration + 1, "tool_calls": len(all_tool_results), "tool_executions": tool_executions_to_store}
                     )
                     
                     # Emit thinking end
