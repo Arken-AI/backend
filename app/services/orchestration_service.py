@@ -201,7 +201,8 @@ class OrchestrationService:
         self,
         conversation_id: str,
         user_message: str,
-        user_id: str = "default_user"
+        user_id: str = "default_user",
+        metadata: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
         """
         Main entry point: Process user message using an agentic loop.
@@ -221,6 +222,9 @@ class OrchestrationService:
             conversation_id: Unique conversation identifier
             user_message: User's message
             user_id: User identifier
+            metadata: Optional dict forwarded from frontend; if it contains
+                      ``re_simulation=True`` the agentic loop injects a
+                      directive block so the LLM simulates immediately.
             
         Returns:
             {
@@ -383,7 +387,8 @@ class OrchestrationService:
                             tools, 
                             context,
                             conversation_id,  # Pass conversation_id for streaming events
-                            assistant_message_id  # Pass message_id for error recovery
+                            assistant_message_id,  # Pass message_id for error recovery
+                            metadata=metadata or {}
                         )
                         break  # Success - exit retry loop
                         
@@ -745,7 +750,8 @@ class OrchestrationService:
         tools: List[Any],
         context: Dict[str, Any],
         conversation_id: Optional[str] = None,
-        assistant_message_id: Optional[str] = None
+        assistant_message_id: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None
     ) -> Any:
         """
         Call LLM with full conversation history.
@@ -758,6 +764,8 @@ class OrchestrationService:
         The LLM sees the full history and decides what to do next.
         Claude will learn from tool descriptions and error messages to determine workflow.
         """
+        metadata = metadata or {}
+
         # Build minimal system prompt - let Claude learn from tool descriptions and errors
         system_parts = [
             "You are a process simulation assistant with access to tools for industrial process simulation.",
@@ -781,6 +789,55 @@ class OrchestrationService:
             "- Suggest intermediate equipment when connections are blocked (e.g., 'add a condenser between flash drum vapor and pump').",
             "- Prefer calc_chain_equipment for connecting individual equipment over building a full process template.",
         ]
+
+        # ── Re-simulation directive block ──────────────────────────────────────
+        # When the frontend sends re_simulation=True in metadata it also sends
+        # a fully-classified parameter payload.  Inject an explicit directive so
+        # the LLM does NOT ask clarifying questions and fires the right tool
+        # immediately.
+        if metadata.get("re_simulation"):
+            source          = metadata.get("source", "")           # "calc_engine" | "process_server"
+            process_id      = metadata.get("process_id", "")
+            template_type   = metadata.get("template_type", "")    # "single_equipment" | "process"
+            parent_run_id   = metadata.get("parent_run_id", "")
+            eq_edits        = metadata.get("equipment_param_edits", {})
+            feed_edits      = metadata.get("feed_stream_edits", {})
+            compound_map    = metadata.get("compound_mapping", {})
+
+            # Choose the right MCP tool name based on source + template_type
+            if source == "calc_engine":
+                tool_hint = "calc_simulate_process"
+                # Format equipment params as dot-notation inline_overrides
+                inline_parts = []
+                for equip_id, params in eq_edits.items():
+                    for param, val in params.items():
+                        inline_parts.append(f'"equipment.{equip_id}.parameters.{param}": {val}')
+                for stream_id, props in feed_edits.items():
+                    for prop, val in props.items():
+                        inline_parts.append(f'"feed_streams_override.{stream_id}.{prop}": {val}')
+                overrides_hint = "{" + ", ".join(inline_parts) + "}" if inline_parts else "{}"
+            else:
+                # process_server — single_equipment or process
+                tool_hint = "simulate_equipment" if template_type == "single_equipment" else "simulate_process"
+                overrides_hint = str({"node_params": eq_edits, "feeds": feed_edits})
+
+            directive_lines = [
+                "",
+                "RE-SIMULATION REQUEST (respond with tool call ONLY — no questions):",
+                f"- This is a parameter update re-simulation. Parent run: {parent_run_id}",
+                f"- Source: {source} | Process: {process_id} | Template: {template_type}",
+                f"- Call tool: {tool_hint}",
+                f"- Use process_id: \"{process_id}\"",
+                f"- Apply these parameter overrides: {overrides_hint}",
+            ]
+            if compound_map:
+                directive_lines.append(f"- Include compound_mapping: {compound_map}")
+            directive_lines += [
+                "- Do NOT ask the user for confirmation or additional input.",
+                "- After the tool returns, summarise the changes and new results in 2-3 sentences.",
+            ]
+            system_parts.extend(directive_lines)
+        # ── End re-simulation directive ────────────────────────────────────────
         
         # Add current context if available (industry, process)
         if context.get("current_industry") or context.get("current_process"):

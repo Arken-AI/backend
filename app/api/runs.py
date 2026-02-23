@@ -603,6 +603,26 @@ async def get_run_flowsheet(
         # Get chain_metadata from the requested run (for banner)
         leaf_chain_meta = leaf_doc.get("chain_metadata")
 
+        # Resolve source + process_id + template_type from leaf doc
+        # (same logic as normalize_run — calc_engine vs process_server)
+        leaf_source = "calc_engine" if leaf_doc.get("process_id") or leaf_doc.get("template_type") or "calc_simulation_runs" in str(collection.name) else "process_server"
+        leaf_process_id = leaf_doc.get("process_id")
+        leaf_template_type = leaf_doc.get("template_type")
+        # Resolve template_type from templates collection if missing
+        if not leaf_template_type and leaf_process_id and leaf_source == "calc_engine":
+            tmpl = await db.calc_process_templates.find_one(
+                {"process_id": leaf_process_id}, {"template_type": 1}
+            )
+            if tmpl:
+                leaf_template_type = tmpl.get("template_type", "process")
+
+        # Lookup conversation_id — check any run in the chain
+        conversation = await db.conversations.find_one(
+            {"run_ids": {"$in": [rid for rid, _ in ordered_runs]}},
+            {"conversation_id": 1},
+        )
+        conversation_id = conversation["conversation_id"] if conversation else None
+
         return FlowsheetResponse(
             run_id=run_id,
             root_run_id=root_run_id,
@@ -611,6 +631,10 @@ async def get_run_flowsheet(
             status=overall_status,
             data=merged_data,
             chain_metadata=leaf_chain_meta,
+            conversation_id=conversation_id,
+            process_id=leaf_process_id,
+            source=leaf_source,
+            template_type=leaf_template_type,
             warnings=warnings,
         )
 
