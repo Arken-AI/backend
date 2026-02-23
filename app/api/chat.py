@@ -123,7 +123,7 @@ async def send_message(
         tool_executions = []
         for tool_call in result.get("tool_calls", []):
             tool_executions.append(ToolExecution(
-                tool_name=tool_call.get("tool_name", "unknown"),
+                tool_name=tool_call.get("name") or tool_call.get("tool_name") or tool_call.get("tool", "unknown"),
                 status=tool_call.get("status", "success"),
                 duration_ms=tool_call.get("duration_ms"),
                 result_summary=tool_call.get("summary")
