@@ -312,6 +312,10 @@ class OrchestrationService:
             all_tool_results = []
             total_tool_calls = 0
             
+            # Tool result cache — prevents duplicate calls with identical arguments
+            # Key: (tool_name, frozenset(sorted(params.items()))) → result
+            tool_result_cache: Dict[str, Any] = {}
+            
             # Track repeated errors to stop loop early
             recent_errors = []  # Store last N error messages
             MAX_REPEATED_ERRORS = 3  # Stop if same error occurs this many times
@@ -563,37 +567,69 @@ class OrchestrationService:
                         })
                         continue
                     
-                    # Execute tool
-                    if self.event_emitter:
-                        await self.event_emitter.emit_tool_start(
-                            conversation_id,
-                            tool_name,
-                            tool_params
-                        )
+                    # ── Duplicate call detection ─────────────────────────
+                    # Build a stable cache key from tool name + sorted params.
+                    # Only cache read-only / idempotent discovery tools;
+                    # simulation tools must always execute.
+                    _CACHEABLE_TOOLS = {
+                        "calc_list_processes", "calc_get_process",
+                        "calc_list_runs", "calc_get_run",
+                        "calc_get_editable_params",
+                        "list_industries", "list_processes", "get_process",
+                    }
+                    try:
+                        _cache_key = f"{tool_name}::{json.dumps(tool_params, sort_keys=True, default=str)}"
+                    except Exception:
+                        _cache_key = None  # unhashable params — skip cache
+
+                    cached_result = tool_result_cache.get(_cache_key) if (_cache_key and tool_name in _CACHEABLE_TOOLS) else None
+
+                    if cached_result is not None:
+                        # Return cached result without re-executing
+                        result = cached_result["result"]
+                        tool_duration_ms = 0
+                        if self.event_emitter:
+                            await self.event_emitter.emit_tool_start(conversation_id, tool_name, tool_params)
+                            await self.event_emitter.emit_tool_end(
+                                conversation_id, tool_name, "success", 0,
+                                f"{tool_name} (cached)", error_message=None
+                            )
+                    else:
+                        # Execute tool
+                        if self.event_emitter:
+                            await self.event_emitter.emit_tool_start(
+                                conversation_id,
+                                tool_name,
+                                tool_params
+                            )
+                        
+                        tool_start_time = datetime.now()
+                        result = await self._execute_tool(tool_name, tool_params, conversation_id, context)
+                        tool_duration_ms = int((datetime.now() - tool_start_time).total_seconds() * 1000)
+
+                        # Store in cache for cacheable tools on success
+                        if _cache_key and tool_name in _CACHEABLE_TOOLS and result.get("status") != "error":
+                            tool_result_cache[_cache_key] = {"result": result}
                     
-                    tool_start_time = datetime.now()
-                    result = await self._execute_tool(tool_name, tool_params, conversation_id, context)
-                    tool_duration_ms = int((datetime.now() - tool_start_time).total_seconds() * 1000)
-                    
-                    # Emit tool end
-                    if self.event_emitter:
-                        # Treat 'not_converged' as success - simulation ran, just didn't converge
-                        # Only 'error', 'failed', 'simulation_failed' are actual tool failures
-                        result_status = result.get("status", "")
-                        status = "error" if result_status in ["error", "failed", "simulation_failed"] else "success"
-                        summary = result.get("message", f"{tool_name} completed")
-                        error_msg = result.get("error") if status == "error" else None
-                        # Ensure error_message is always a string, not a list or other type
-                        if error_msg is not None and not isinstance(error_msg, str):
-                            error_msg = str(error_msg)
-                        await self.event_emitter.emit_tool_end(
-                            conversation_id,
-                            tool_name,
-                            status,
-                            tool_duration_ms,
-                            summary,
-                            error_message=error_msg
-                        )
+                        # Emit tool end (only for non-cached — cached already emitted above)
+                        if self.event_emitter:
+                            # Treat 'not_converged' as success - simulation ran, just didn't converge
+                            # Only 'error', 'failed', 'simulation_failed' are actual tool failures
+                            result_status = result.get("status", "")
+                            status = "error" if result_status in ["error", "failed", "simulation_failed"] else "success"
+                            summary = result.get("message", f"{tool_name} completed")
+                            error_msg = result.get("error") if status == "error" else None
+                            # Ensure error_message is always a string, not a list or other type
+                            if error_msg is not None and not isinstance(error_msg, str):
+                                error_msg = str(error_msg)
+                            await self.event_emitter.emit_tool_end(
+                                conversation_id,
+                                tool_name,
+                                status,
+                                tool_duration_ms,
+                                summary,
+                                error_message=error_msg
+                            )
                     
                     # Update context
                     await self._update_context(
@@ -799,6 +835,12 @@ class OrchestrationService:
             "- If a connection is invalid (phase mismatch, zero flow, etc.), relay the error and suggestion to the user clearly.",
             "- Suggest intermediate equipment when connections are blocked (e.g., 'add a condenser between flash drum vapor and pump').",
             "- Prefer calc_chain_equipment for connecting individual equipment over building a full process template.",
+            "",
+            "EFFICIENCY RULES:",
+            "- Do NOT call the same tool with the same or similar arguments more than once per conversation turn.",
+            "- If you already got results from calc_list_processes, do NOT call it again — use the results you already have.",
+            "- Plan your tool calls: list → get → simulate → chain. Each step uses output from the previous.",
+            "- If a tool succeeds, move on to the next step immediately instead of re-querying.",
         ]
 
         # ── Re-simulation directive block ──────────────────────────────────────
@@ -842,7 +884,18 @@ class OrchestrationService:
                 f"- Apply these parameter overrides: {overrides_hint}",
             ]
             if compound_map:
-                directive_lines.append(f"- Include compound_mapping: {compound_map}")
+                # Explicit mapping provided — pass it through verbatim
+                directive_lines.append(f"- REQUIRED compound_mapping: {compound_map}")
+            elif template_type == "single_equipment" and source == "calc_engine":
+                # Single-equipment template but no mapping supplied.
+                # The template likely uses generic compounds; tell the LLM
+                # to reuse whatever mapping the original run used.
+                directive_lines.append(
+                    "- This is a single-equipment template that uses generic compound "
+                    "placeholders. You MUST include the same compound_mapping that was "
+                    "used in the parent run. Retrieve it from the parent run if needed "
+                    f"(parent_run_id: {parent_run_id})."
+                )
             directive_lines += [
                 "- Do NOT ask the user for confirmation or additional input.",
                 "- After the tool returns, summarise the changes and new results in 2-3 sentences.",
