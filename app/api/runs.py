@@ -63,6 +63,7 @@ def normalize_run(doc: dict, source: str) -> dict:
             "created_at": doc["created_at"],
             "execution_time_ms": doc.get("execution_time_ms"),
             "data": doc.get("result", {}),  # calc_engine uses "result" field
+            "compound_mapping": doc.get("compound_mapping"),  # Generic → real compound mapping
             "metadata": {
                 "version_used": doc.get("version_used", 0),
                 "run_name": doc.get("run_name"),
@@ -623,6 +624,9 @@ async def get_run_flowsheet(
         )
         conversation_id = conversation["conversation_id"] if conversation else None
 
+        # Resolve compound_mapping from the leaf run document
+        leaf_compound_mapping = leaf_doc.get("compound_mapping")
+
         return FlowsheetResponse(
             run_id=run_id,
             root_run_id=root_run_id,
@@ -635,6 +639,7 @@ async def get_run_flowsheet(
             process_id=leaf_process_id,
             source=leaf_source,
             template_type=leaf_template_type,
+            compound_mapping=leaf_compound_mapping,
             warnings=warnings,
         )
 

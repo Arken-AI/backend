@@ -68,6 +68,12 @@ class RunResultResponse(BaseModel):
         default_factory=dict,
         description="Full simulation response in unified flowsheet format (input, result, metadata)"
     )
+    compound_mapping: Optional[Dict[str, str]] = Field(
+        default=None,
+        description="Generic → real compound mapping used in this run, "
+                    "e.g. {'compound_1': 'ethanol', 'compound_2': 'water'}. "
+                    "Only present for single-equipment templates with generic compounds."
+    )
     metadata: Optional[Dict[str, Any]] = Field(
         default=None,
         description="Additional metadata (version, run_name, industry, etc.)"
@@ -151,6 +157,11 @@ class FlowsheetResponse(BaseModel):
     template_type: Optional[str] = Field(
         default=None,
         description="Template type: single_equipment or process"
+    )
+    compound_mapping: Optional[Dict[str, str]] = Field(
+        default=None,
+        description="Generic → real compound mapping used in this run. "
+                    "Only present for single-equipment templates with generic compounds."
     )
     warnings: List[str] = Field(
         default_factory=list,
