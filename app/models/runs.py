@@ -136,6 +136,22 @@ class FlowsheetResponse(BaseModel):
         default=None,
         description="Chain metadata of the requested run (for banner display)"
     )
+    conversation_id: Optional[str] = Field(
+        default=None,
+        description="Conversation that created this run (looked up from conversations collection)"
+    )
+    process_id: Optional[str] = Field(
+        default=None,
+        description="Process/template ID used for this run"
+    )
+    source: Optional[str] = Field(
+        default=None,
+        description="Run source: calc_engine or process_server"
+    )
+    template_type: Optional[str] = Field(
+        default=None,
+        description="Template type: single_equipment or process"
+    )
     warnings: List[str] = Field(
         default_factory=list,
         description="Warnings encountered during chain traversal or merge"

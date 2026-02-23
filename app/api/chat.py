@@ -101,7 +101,8 @@ async def send_message(
         result = await orchestration.process_message(
             conversation_id=conversation_id,
             user_message=request.message,
-            user_id=user_id
+            user_id=user_id,
+            metadata=request.metadata or {}
         )
         
         logger.info(
