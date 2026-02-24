@@ -859,6 +859,8 @@ class OrchestrationService:
             "- If you already got results from calc_list_processes, do NOT call it again — use the results you already have.",
             "- Plan your tool calls: list → get → simulate → chain. Each step uses output from the previous.",
             "- If a tool succeeds, move on to the next step immediately instead of re-querying.",
+            "- NEVER guess or invent a process_id. Always use an exact process_id returned by calc_list_processes. Process IDs are case-sensitive and may differ from human-readable names (e.g. 'BenzeneTolueneRecycleDB', not 'benzene-toluene-separation').",
+            "- If you are not sure of the exact process_id, call calc_list_processes first before attempting to simulate.",
         ]
 
         # ── Re-simulation directive block ──────────────────────────────────────
@@ -929,7 +931,17 @@ class OrchestrationService:
             if context.get("current_process"):
                 context_info.append(f"Process: {context['current_process']}")
             system_parts.append(f"\nCurrent context: {', '.join(context_info)}")
-        
+
+        # Inject confirmed process IDs so the LLM never has to guess them again.
+        # These are IDs that were returned by calc_list_processes or successfully
+        # used in a simulation — they are guaranteed to exist in the database.
+        confirmed_pids = context.get("confirmed_process_ids", [])
+        if confirmed_pids:
+            system_parts.append(
+                f"\nConfirmed process_ids available in this conversation (use these EXACTLY — do not guess or modify them): "
+                + ", ".join(f'"{p}"' for p in confirmed_pids)
+            )
+
         # Add run history reference for follow-up questions
         run_ids = context.get("run_ids", [])
         if run_ids:
@@ -1271,6 +1283,17 @@ class OrchestrationService:
                 updated_run_ids = updated_run_ids[:10]
             else:
                 updated_run_ids = current_run_ids
+
+            # Store the confirmed process_id used in this simulation so the
+            # system prompt can surface it to the LLM on subsequent turns,
+            # preventing it from guessing/hallucinating the ID again.
+            confirmed_pid = params.get("process_id")
+            if confirmed_pid:
+                existing_pids = set(context.get("confirmed_process_ids", []) if context else [])
+                existing_pids.add(confirmed_pid.lower())
+                confirmed_process_ids = list(existing_pids)
+            else:
+                confirmed_process_ids = context.get("confirmed_process_ids", []) if context else []
             
             # MERGE parameters instead of overwriting
             # This ensures resolved warnings from equipment simulations persist
@@ -1295,10 +1318,26 @@ class OrchestrationService:
                 conversation_id,
                 {
                     "simulation_params": merged_params,
-                    "run_ids": updated_run_ids
+                    "run_ids": updated_run_ids,
+                    "confirmed_process_ids": confirmed_process_ids,
                 }
             )
         
+        # Capture confirmed process_ids from discovery tools so the LLM can
+        # reuse them on the next turn without re-listing or guessing.
+        if tool_name in ["calc_list_processes"] and result.get("status") == "success":
+            context = await self.context_manager.get_context(conversation_id)
+            existing_pids = set(context.get("confirmed_process_ids", []) if context else [])
+            for item in result.get("processes", []):
+                pid = item.get("process_id")
+                if pid:
+                    existing_pids.add(pid.lower())
+            if existing_pids:
+                await self.context_manager.update_context(
+                    conversation_id,
+                    {"confirmed_process_ids": list(existing_pids)}
+                )
+
         # Update validation params if this was a validation
         if tool_name.startswith("validate_"):
             # Get current context to merge validation params
