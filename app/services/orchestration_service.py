@@ -450,6 +450,7 @@ class OrchestrationService:
                             "duration_ms": tc.get("duration_ms"),
                             "summary": tc.get("result", {}).get("message") or tc.get("result", {}).get("summary") or str(tc.get("result", {}))[:200],
                             "error": tc.get("result", {}).get("error") if tc.get("result", {}).get("status") in ["error", "failed", "simulation_failed"] else None,
+                            "arguments": tc.get("arguments"),
                         }
                         for tc in all_tool_results
                     ]
@@ -465,6 +466,7 @@ class OrchestrationService:
                     if self.event_emitter:
                         await self.event_emitter.emit_thinking_end(conversation_id, thinking_duration_ms)
                     # Response returned via HTTP (no emit_message_final needed)
+                    print(f"[TIMING] thinking_end emitted for {conversation_id}, HTTP response returning NOW")
                     
                     # Get updated context with run_ids
                     final_context = await self.context_manager.get_context(conversation_id)
@@ -479,7 +481,8 @@ class OrchestrationService:
                             "tool_name": tc.get("name", "unknown"),
                             "status": "success" if tc.get("result", {}).get("status") != "error" else "error",
                             "duration_ms": tc.get("duration_ms"),
-                            "summary": tc.get("result", {}).get("summary", str(tc.get("result", {}))[:100])
+                            "summary": tc.get("result", {}).get("summary", str(tc.get("result", {}))[:100]),
+                            "arguments": tc.get("arguments")
                         }
                         for tc in all_tool_results
                     ]
@@ -574,6 +577,7 @@ class OrchestrationService:
                         all_tool_results.append({
                             "name": tool_name,
                             "tool": tool_name,  # For backward compatibility
+                            "arguments": tool_params,
                             "status": "denied",
                             "reason": policy_result["reason"]
                         })
@@ -689,6 +693,7 @@ class OrchestrationService:
                     all_tool_results.append({
                         "name": tool_name,
                         "tool": tool_name,  # For backward compatibility
+                        "arguments": tool_params,
                         "result": result,
                         "duration_ms": tool_duration_ms,
                         "status": tool_status
@@ -733,7 +738,8 @@ class OrchestrationService:
                     "tool_name": tc.get("name", "unknown"),
                     "status": "success" if tc.get("result", {}).get("status") != "error" else "error",
                     "duration_ms": tc.get("duration_ms"),
-                    "summary": tc.get("result", {}).get("summary", str(tc.get("result", {}))[:100])
+                    "summary": tc.get("result", {}).get("summary", str(tc.get("result", {}))[:100]),
+                    "arguments": tc.get("arguments")
                 }
                 for tc in all_tool_results
             ]

@@ -72,11 +72,11 @@ async def send_message(
     This endpoint processes the message synchronously and returns the final response.
     Tool progress events are still emitted via SSE for real-time UI updates.
     
-    For new conversations, leave conversation_id empty.
-    For multi-turn conversations, provide the same conversation_id.
+    The conversation_id must be provided by the client (frontend generates it).
+    This ensures the SSE stream can connect before the HTTP response arrives.
     
     Args:
-        request: Chat request with message and optional conversation_id
+        request: Chat request with message and required conversation_id
         orchestration: Orchestration service dependency
         event_emitter: Event emitter for tool progress events
         
@@ -84,8 +84,7 @@ async def send_message(
         ChatResponse with complete assistant response
     """
     try:
-        # Generate conversation_id if new conversation
-        conversation_id = request.conversation_id or f"conv_{uuid.uuid4().hex[:16]}"
+        conversation_id = request.conversation_id
         
         # Generate unique request_id for this message
         request_id = f"req_{uuid.uuid4().hex[:16]}"
@@ -126,7 +125,8 @@ async def send_message(
                 tool_name=tool_call.get("name") or tool_call.get("tool_name") or tool_call.get("tool", "unknown"),
                 status=tool_call.get("status", "success"),
                 duration_ms=tool_call.get("duration_ms"),
-                result_summary=tool_call.get("summary")
+                summary=tool_call.get("summary"),
+                arguments=tool_call.get("arguments")
             ))
         
         # Return complete response

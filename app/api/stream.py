@@ -135,6 +135,7 @@ async def event_stream_generator(
                                 last_keepalive = current_time
                                 continue
 
+                        logger.info(f"[SSE STREAM] Sending {event.event_type} to client for {request_id} at sequence {last_sequence}")
                         logger.info(f"Stream complete for {request_id} at sequence {last_sequence} ({event.event_type})")
                         stream_complete = True
                         break
