@@ -5,11 +5,57 @@ Main FastAPI application with SSE streaming support.
 """
 
 import logging
+import logging.config
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
+
+
+class _SuppressHealthOK(logging.Filter):
+    """Drop uvicorn access-log lines for successful health checks.
+    Failures (non-2xx) are still logged.
+    """
+    def filter(self, record: logging.LogRecord) -> bool:
+        msg = record.getMessage()
+        if "GET /api/health" in msg and any(f" {c} " in msg for c in ("200", "201", "204")):
+            return False
+        return True
+
+
+# Install via dictConfig so it survives --reload worker restarts.
+# dictConfig runs at import time in every worker process, before uvicorn
+# emits its first access log line.
+logging.config.dictConfig({
+    "version": 1,
+    "disable_existing_loggers": False,
+    "filters": {
+        "suppress_health_ok": {
+            "()": _SuppressHealthOK,
+        }
+    },
+    "handlers": {
+        "access": {
+            "class": "logging.StreamHandler",
+            "formatter": "access",
+            "filters": ["suppress_health_ok"],
+        }
+    },
+    "formatters": {
+        "access": {
+            "()": "uvicorn.logging.AccessFormatter",
+            "fmt": '%(levelprefix)s %(client_addr)s - "%(request_line)s" %(status_code)s',
+        }
+    },
+    "loggers": {
+        "uvicorn.access": {
+            "handlers": ["access"],
+            "level": "INFO",
+            "propagate": False,
+        }
+    },
+})
 
 from app.api import stream, health, chat, test_stream, runs, reports, auth
 from app.dependencies import close_redis_client, close_mcp_clients, close_llm_provider

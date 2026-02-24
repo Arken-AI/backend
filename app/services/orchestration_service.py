@@ -483,7 +483,19 @@ class OrchestrationService:
                         }
                         for tc in all_tool_results
                     ]
-                    
+
+                    # ── Token cost summary ──────────────────────────────
+                    # Claude Sonnet 4: $3/M input, $15/M output
+                    _in   = total_input_tokens
+                    _out  = total_output_tokens
+                    _cost = (_in * 3 + _out * 15) / 1_000_000
+                    print(
+                        f"[TOKENS] conv={conversation_id[:8]}  "
+                        f"in={_in:,}  out={_out:,}  total={_in+_out:,}  "
+                        f"cost≈${_cost:.4f}"
+                    )
+                    # ────────────────────────────────────────────────────
+
                     return {
                         "status": "success",
                         "message": message_text,
