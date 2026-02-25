@@ -13,7 +13,7 @@ but the final response is returned directly in the HTTP response.
 import logging
 import uuid
 from datetime import datetime
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 
 from fastapi import APIRouter, HTTPException, Depends, status
 from fastapi.responses import JSONResponse
@@ -72,11 +72,11 @@ async def send_message(
     This endpoint processes the message synchronously and returns the final response.
     Tool progress events are still emitted via SSE for real-time UI updates.
     
-    For new conversations, leave conversation_id empty.
-    For multi-turn conversations, provide the same conversation_id.
+    The conversation_id must be provided by the client (frontend generates it).
+    This ensures the SSE stream can connect before the HTTP response arrives.
     
     Args:
-        request: Chat request with message and optional conversation_id
+        request: Chat request with message and required conversation_id
         orchestration: Orchestration service dependency
         event_emitter: Event emitter for tool progress events
         
@@ -84,8 +84,7 @@ async def send_message(
         ChatResponse with complete assistant response
     """
     try:
-        # Generate conversation_id if new conversation
-        conversation_id = request.conversation_id or f"conv_{uuid.uuid4().hex[:16]}"
+        conversation_id = request.conversation_id
         
         # Generate unique request_id for this message
         request_id = f"req_{uuid.uuid4().hex[:16]}"
@@ -101,7 +100,8 @@ async def send_message(
         result = await orchestration.process_message(
             conversation_id=conversation_id,
             user_message=request.message,
-            user_id=user_id
+            user_id=user_id,
+            metadata=request.metadata or {}
         )
         
         logger.info(
@@ -122,10 +122,11 @@ async def send_message(
         tool_executions = []
         for tool_call in result.get("tool_calls", []):
             tool_executions.append(ToolExecution(
-                tool_name=tool_call.get("tool_name", "unknown"),
+                tool_name=tool_call.get("name") or tool_call.get("tool_name") or tool_call.get("tool", "unknown"),
                 status=tool_call.get("status", "success"),
                 duration_ms=tool_call.get("duration_ms"),
-                result_summary=tool_call.get("summary")
+                summary=tool_call.get("summary"),
+                arguments=tool_call.get("arguments")
             ))
         
         # Return complete response
@@ -347,6 +348,7 @@ async def delete_conversation(
 async def list_conversations(
     limit: int = 50,
     offset: int = 0,
+    username: Optional[str] = None,
     mongo_client: MongoClient = Depends(get_mongo_client)
 ) -> ConversationListResponse:
     """
@@ -354,10 +356,12 @@ async def list_conversations(
     
     Returns a paginated list of conversations with summary information.
     Conversations are sorted by updated_at (newest first).
+    Optionally filtered by username (matches user_id field).
     
     Args:
         limit: Maximum number of conversations to return (default: 50)
         offset: Number of conversations to skip (default: 0)
+        username: Optional username to filter conversations by
         mongo_client: MongoDB client dependency
         
     Returns:
@@ -367,11 +371,16 @@ async def list_conversations(
         db = mongo_client._client["arken_process_db"]
         collection = db["conversations"]
         
+        # Build query filter
+        query = {}
+        if username:
+            query["user_id"] = username.lower()
+        
         # Get total count
-        total = await collection.count_documents({})
+        total = await collection.count_documents(query)
         
         # Get conversations sorted by updated_at
-        cursor = collection.find({}).sort("updated_at", -1).skip(offset).limit(limit)
+        cursor = collection.find(query).sort("updated_at", -1).skip(offset).limit(limit)
         
         conversations = []
         async for doc in cursor:

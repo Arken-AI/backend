@@ -35,6 +35,12 @@ class RunStatus(str, Enum):
     ERROR = "error"
 
 
+class TemplateType(str, Enum):
+    """Type of process template"""
+    PROCESS = "process"
+    SINGLE_EQUIPMENT = "single_equipment"
+
+
 class RunResultResponse(BaseModel):
     """
     Complete run result with full simulation data.
@@ -50,6 +56,10 @@ class RunResultResponse(BaseModel):
     source: RunSource = Field(description="Which MCP server created this run")
     user_id: Optional[str] = Field(default=None, description="User who initiated the run")
     process_id: Optional[str] = Field(default=None, description="Process ID (sugar, ethanol, etc.)")
+    template_type: Optional[str] = Field(
+        default=None,
+        description="Template type: 'process' or 'single_equipment'. Only set for calc_engine runs."
+    )
     status: RunStatus = Field(description="Current status of the run")
     error: Optional[str] = Field(default=None, description="Error message if status is failed/error")
     created_at: datetime = Field(description="When the run was created")
@@ -58,9 +68,20 @@ class RunResultResponse(BaseModel):
         default_factory=dict,
         description="Full simulation response in unified flowsheet format (input, result, metadata)"
     )
+    compound_mapping: Optional[Dict[str, str]] = Field(
+        default=None,
+        description="Generic → real compound mapping used in this run, "
+                    "e.g. {'compound_1': 'ethanol', 'compound_2': 'water'}. "
+                    "Only present for single-equipment templates with generic compounds."
+    )
     metadata: Optional[Dict[str, Any]] = Field(
         default=None,
         description="Additional metadata (version, run_name, industry, etc.)"
+    )
+    chain_metadata: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="Chain provenance metadata for equipment-chained runs. "
+                    "Contains source_run_id, source_equipment_id, source_port, extracted_stream."
     )
 
 
@@ -78,9 +99,74 @@ class RunListItem(BaseModel):
     source: RunSource = Field(description="Which MCP server created this run")
     user_id: Optional[str] = Field(default=None, description="User who initiated the run")
     process_id: Optional[str] = Field(default=None, description="Process ID (sugar, ethanol, etc.)")
+    template_type: Optional[str] = Field(
+        default=None,
+        description="Template type: 'process' or 'single_equipment'. Only set for calc_engine runs."
+    )
     status: RunStatus = Field(description="Current status of the run")
     created_at: datetime = Field(description="When the run was created")
     execution_time_ms: Optional[int] = Field(default=None, description="Execution time in milliseconds")
+    has_chain_metadata: bool = Field(
+        default=False,
+        description="Whether this run has chain provenance metadata (is a chained run)"
+    )
+
+
+class FlowsheetResponse(BaseModel):
+    """
+    Unified flowsheet merging all chained runs.
+    
+    Walks the chain graph (upstream via chain_metadata, downstream via downstream_runs)
+    and merges equipment, edges, feed_streams, and results into a single flowsheet
+    that the frontend can render without knowing about individual runs.
+    
+    The `data` field has the exact same shape as RunResultResponse.data so that
+    transformEquipmentData and useFlowLayout work without changes.
+    """
+    model_config = ConfigDict(populate_by_name=True)
+
+    run_id: str = Field(description="The requested (leaf) run ID")
+    root_run_id: str = Field(description="The root run of the chain (no chain_metadata)")
+    all_run_ids: List[str] = Field(description="All run IDs in this flowsheet, root-first order")
+    run_map: Dict[str, str] = Field(
+        description="Mapping of equipment_id → run_id so the frontend knows "
+                    "which run each equipment belongs to (for detail panel)"
+    )
+    status: str = Field(description="Overall status (success if all runs succeeded)")
+    data: Dict[str, Any] = Field(
+        description="Merged flowsheet data in unified format: "
+                    "{ input: { feed_streams, equipment, edges }, "
+                    "result: { node_results, stream_results, equipment_inputs, execution_order } }"
+    )
+    chain_metadata: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="Chain metadata of the requested run (for banner display)"
+    )
+    conversation_id: Optional[str] = Field(
+        default=None,
+        description="Conversation that created this run (looked up from conversations collection)"
+    )
+    process_id: Optional[str] = Field(
+        default=None,
+        description="Process/template ID used for this run"
+    )
+    source: Optional[str] = Field(
+        default=None,
+        description="Run source: calc_engine or process_server"
+    )
+    template_type: Optional[str] = Field(
+        default=None,
+        description="Template type: single_equipment or process"
+    )
+    compound_mapping: Optional[Dict[str, str]] = Field(
+        default=None,
+        description="Generic → real compound mapping used in this run. "
+                    "Only present for single-equipment templates with generic compounds."
+    )
+    warnings: List[str] = Field(
+        default_factory=list,
+        description="Warnings encountered during chain traversal or merge"
+    )
 
 
 class RunListResponse(BaseModel):

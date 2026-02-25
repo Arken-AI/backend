@@ -122,19 +122,23 @@ async def event_stream_generator(
                         last_sequence = event.sequence
                     
                     # Check if stream is complete
-                    # Only terminate on FINAL message_final (not intermediate ones)
-                    if event.event_type == EventType.MESSAGE_FINAL:
-                        # Check if this is an intermediate message (has is_intermediate flag)
-                        is_intermediate = False
-                        if hasattr(event, 'metadata') and event.metadata:
-                            is_intermediate = event.metadata.get('is_intermediate', False)
-                        
-                        if not is_intermediate:
-                            logger.info(f"Stream complete for {request_id} at sequence {last_sequence}")
-                            stream_complete = True
-                            break
-                        else:
-                            logger.info(f"Intermediate message_final for {request_id}, continuing stream...")
+                    # Terminate on thinking_end (always the last event from the
+                    # agentic loop) or message_final (legacy / explicit close).
+                    if event.event_type in (EventType.THINKING_END, EventType.MESSAGE_FINAL):
+                        # For message_final, skip intermediate messages
+                        if event.event_type == EventType.MESSAGE_FINAL:
+                            is_intermediate = False
+                            if hasattr(event, 'metadata') and event.metadata:
+                                is_intermediate = event.metadata.get('is_intermediate', False)
+                            if is_intermediate:
+                                logger.info(f"Intermediate message_final for {request_id}, continuing stream...")
+                                last_keepalive = current_time
+                                continue
+
+                        logger.info(f"[SSE STREAM] Sending {event.event_type} to client for {request_id} at sequence {last_sequence}")
+                        logger.info(f"Stream complete for {request_id} at sequence {last_sequence} ({event.event_type})")
+                        stream_complete = True
+                        break
                     
                     # Reset keepalive timer after sending event
                     last_keepalive = current_time

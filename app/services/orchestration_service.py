@@ -96,42 +96,6 @@ from app.core.mcp_client import MCPClient, MCPServerConfig, MCPClientRegistry
 
 
 # =============================================================================
-# Helper Functions
-# =============================================================================
-
-def inject_result_links(message: str, run_ids: List[str], frontend_url: str) -> str:
-    """
-    Append result links using the configured frontend URL.
-    
-    Always injects links with the correct frontend_url from FRONTEND_URL env var.
-    Skips if LLM already included result links to avoid duplicates.
-    
-    Args:
-        message: LLM's response text
-        run_ids: List of run IDs from simulation tools
-        frontend_url: Base URL of frontend application (from FRONTEND_URL env)
-    
-    Returns:
-        Message with result links appended
-    """
-    if not run_ids:
-        return message
-    
-    # Skip if LLM already included result links
-    if "/results/" in message:
-        return message
-    
-    # Inject links using the configured frontend URL
-    links = []
-    for run_id in run_ids:
-        url = f"{frontend_url}/results/{run_id}"
-        links.append(f"📊 [View Simulation Results]({url})")
-    
-    link_section = "\n\n" + "\n".join(links)
-    return message + link_section
-
-
-# =============================================================================
 # Streaming LLM Response
 # =============================================================================
 
@@ -190,7 +154,8 @@ class OrchestrationService:
         mcp_client: MCPClient = None,  # Legacy: single client (deprecated)
         mcp_registry: MCPClientRegistry = None,  # New: multi-server registry
         event_emitter: Optional[EventEmitter] = None,
-        anthropic_api_key: str = None
+        anthropic_api_key: str = None,
+        llm_provider = None  # Pre-built singleton LLM provider
     ):
         """
         Initialize orchestration service.
@@ -222,8 +187,11 @@ class OrchestrationService:
             self.mcp_client = None
             self.mcp_registry = None
         
-        # Initialize Claude LLM provider
-        self.llm = ClaudeProvider(api_key=anthropic_api_key)
+        # Use pre-built singleton LLM provider if available, otherwise create new one
+        if llm_provider:
+            self.llm = llm_provider
+        else:
+            self.llm = ClaudeProvider(api_key=anthropic_api_key)
     
     # =========================================================================
     # AGENTIC LOOP - Main Entry Point
@@ -233,7 +201,8 @@ class OrchestrationService:
         self,
         conversation_id: str,
         user_message: str,
-        user_id: str = "default_user"
+        user_id: str = "default_user",
+        metadata: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
         """
         Main entry point: Process user message using an agentic loop.
@@ -253,6 +222,9 @@ class OrchestrationService:
             conversation_id: Unique conversation identifier
             user_message: User's message
             user_id: User identifier
+            metadata: Optional dict forwarded from frontend; if it contains
+                      ``re_simulation=True`` the agentic loop injects a
+                      directive block so the LLM simulates immediately.
             
         Returns:
             {
@@ -340,6 +312,10 @@ class OrchestrationService:
             all_tool_results = []
             total_tool_calls = 0
             
+            # Tool result cache — prevents duplicate calls with identical arguments
+            # Key: (tool_name, frozenset(sorted(params.items()))) → result
+            tool_result_cache: Dict[str, Any] = {}
+            
             # Track repeated errors to stop loop early
             recent_errors = []  # Store last N error messages
             MAX_REPEATED_ERRORS = 3  # Stop if same error occurs this many times
@@ -415,7 +391,8 @@ class OrchestrationService:
                             tools, 
                             context,
                             conversation_id,  # Pass conversation_id for streaming events
-                            assistant_message_id  # Pass message_id for error recovery
+                            assistant_message_id,  # Pass message_id for error recovery
+                            metadata=metadata or {}
                         )
                         break  # Success - exit retry loop
                         
@@ -465,29 +442,38 @@ class OrchestrationService:
                     total_accumulated_text = message_text
                     
                     # PHASE 2.3: Update assistant message with final content and status=complete
+                    # Build per-message tool_executions list for persistent inline display
+                    tool_executions_to_store = [
+                        {
+                            "tool_name": tc.get("name", "unknown"),
+                            "status": "error" if tc.get("result", {}).get("status") in ["error", "failed", "simulation_failed"] else "success",
+                            "duration_ms": tc.get("duration_ms"),
+                            "summary": tc.get("result", {}).get("message") or tc.get("result", {}).get("summary") or str(tc.get("result", {}))[:200],
+                            "error": tc.get("result", {}).get("error") if tc.get("result", {}).get("status") in ["error", "failed", "simulation_failed"] else None,
+                            "arguments": tc.get("arguments"),
+                        }
+                        for tc in all_tool_results
+                    ]
                     await self.context_manager.update_message(
                         conversation_id,
                         assistant_message_id,
                         content=message_text,
                         status=MessageStatus.COMPLETE,
-                        metadata={"iterations": iteration + 1, "tool_calls": len(all_tool_results)}
+                        metadata={"iterations": iteration + 1, "tool_calls": len(all_tool_results), "tool_executions": tool_executions_to_store}
                     )
                     
                     # Emit thinking end
                     if self.event_emitter:
                         await self.event_emitter.emit_thinking_end(conversation_id, thinking_duration_ms)
                     # Response returned via HTTP (no emit_message_final needed)
+                    print(f"[TIMING] thinking_end emitted for {conversation_id}, HTTP response returning NOW")
                     
                     # Get updated context with run_ids
                     final_context = await self.context_manager.get_context(conversation_id)
                     run_ids = final_context.get("run_ids", [])
                     
-                    # Inject result links if LLM didn't include them (Phase 4.1)
-                    message_with_links = inject_result_links(
-                        message=message_text,
-                        run_ids=run_ids,
-                        frontend_url=settings.frontend_url
-                    )
+                    # Result links are now generated by MCP servers in tool responses
+                    # LLM includes the result_link from tool output in its message
                     
                     # Format tool executions for response
                     tool_executions = [
@@ -495,14 +481,27 @@ class OrchestrationService:
                             "tool_name": tc.get("name", "unknown"),
                             "status": "success" if tc.get("result", {}).get("status") != "error" else "error",
                             "duration_ms": tc.get("duration_ms"),
-                            "summary": tc.get("result", {}).get("summary", str(tc.get("result", {}))[:100])
+                            "summary": tc.get("result", {}).get("summary", str(tc.get("result", {}))[:100]),
+                            "arguments": tc.get("arguments")
                         }
                         for tc in all_tool_results
                     ]
-                    
+
+                    # ── Token cost summary ──────────────────────────────
+                    # Claude Sonnet 4: $3/M input, $15/M output
+                    _in   = total_input_tokens
+                    _out  = total_output_tokens
+                    _cost = (_in * 3 + _out * 15) / 1_000_000
+                    print(
+                        f"[TOKENS] conv={conversation_id[:8]}  "
+                        f"in={_in:,}  out={_out:,}  total={_in+_out:,}  "
+                        f"cost≈${_cost:.4f}"
+                    )
+                    # ────────────────────────────────────────────────────
+
                     return {
                         "status": "success",
-                        "message": message_with_links,
+                        "message": message_text,
                         "tool_calls": all_tool_results,
                         "tool_executions": tool_executions,
                         "run_ids": run_ids,
@@ -578,42 +577,75 @@ class OrchestrationService:
                         all_tool_results.append({
                             "name": tool_name,
                             "tool": tool_name,  # For backward compatibility
+                            "arguments": tool_params,
                             "status": "denied",
                             "reason": policy_result["reason"]
                         })
                         continue
                     
-                    # Execute tool
-                    if self.event_emitter:
-                        await self.event_emitter.emit_tool_start(
-                            conversation_id,
-                            tool_name,
-                            tool_params
-                        )
+                    # ── Duplicate call detection ─────────────────────────
+                    # Build a stable cache key from tool name + sorted params.
+                    # Only cache read-only / idempotent discovery tools;
+                    # simulation tools must always execute.
+                    _CACHEABLE_TOOLS = {
+                        "calc_list_processes", "calc_get_process",
+                        "calc_list_runs", "calc_get_run",
+                        "calc_get_editable_params",
+                        "list_industries", "list_processes", "get_process",
+                    }
+                    try:
+                        _cache_key = f"{tool_name}::{json.dumps(tool_params, sort_keys=True, default=str)}"
+                    except Exception:
+                        _cache_key = None  # unhashable params — skip cache
+
+                    cached_result = tool_result_cache.get(_cache_key) if (_cache_key and tool_name in _CACHEABLE_TOOLS) else None
+
+                    if cached_result is not None:
+                        # Return cached result without re-executing
+                        result = cached_result["result"]
+                        tool_duration_ms = 0
+                        if self.event_emitter:
+                            await self.event_emitter.emit_tool_start(conversation_id, tool_name, tool_params)
+                            await self.event_emitter.emit_tool_end(
+                                conversation_id, tool_name, "success", 0,
+                                f"{tool_name} (cached)", error_message=None
+                            )
+                    else:
+                        # Execute tool
+                        if self.event_emitter:
+                            await self.event_emitter.emit_tool_start(
+                                conversation_id,
+                                tool_name,
+                                tool_params
+                            )
+                        
+                        tool_start_time = datetime.now()
+                        result = await self._execute_tool(tool_name, tool_params, conversation_id, context)
+                        tool_duration_ms = int((datetime.now() - tool_start_time).total_seconds() * 1000)
+
+                        # Store in cache for cacheable tools on success
+                        if _cache_key and tool_name in _CACHEABLE_TOOLS and result.get("status") != "error":
+                            tool_result_cache[_cache_key] = {"result": result}
                     
-                    tool_start_time = datetime.now()
-                    result = await self._execute_tool(tool_name, tool_params, conversation_id, context)
-                    tool_duration_ms = int((datetime.now() - tool_start_time).total_seconds() * 1000)
-                    
-                    # Emit tool end
-                    if self.event_emitter:
-                        # Treat 'not_converged' as success - simulation ran, just didn't converge
-                        # Only 'error', 'failed', 'simulation_failed' are actual tool failures
-                        result_status = result.get("status", "")
-                        status = "error" if result_status in ["error", "failed", "simulation_failed"] else "success"
-                        summary = result.get("message", f"{tool_name} completed")
-                        error_msg = result.get("error") if status == "error" else None
-                        # Ensure error_message is always a string, not a list or other type
-                        if error_msg is not None and not isinstance(error_msg, str):
-                            error_msg = str(error_msg)
-                        await self.event_emitter.emit_tool_end(
-                            conversation_id,
-                            tool_name,
-                            status,
-                            tool_duration_ms,
-                            summary,
-                            error_message=error_msg
-                        )
+                        # Emit tool end (only for non-cached — cached already emitted above)
+                        if self.event_emitter:
+                            # Treat 'not_converged' as success - simulation ran, just didn't converge
+                            # Only 'error', 'failed', 'simulation_failed' are actual tool failures
+                            result_status = result.get("status", "")
+                            status = "error" if result_status in ["error", "failed", "simulation_failed"] else "success"
+                            summary = result.get("message", f"{tool_name} completed")
+                            error_msg = result.get("error") if status == "error" else None
+                            # Ensure error_message is always a string, not a list or other type
+                            if error_msg is not None and not isinstance(error_msg, str):
+                                error_msg = str(error_msg)
+                            await self.event_emitter.emit_tool_end(
+                                conversation_id,
+                                tool_name,
+                                status,
+                                tool_duration_ms,
+                                summary,
+                                error_message=error_msg
+                            )
                     
                     # Update context
                     await self._update_context(
@@ -661,6 +693,7 @@ class OrchestrationService:
                     all_tool_results.append({
                         "name": tool_name,
                         "tool": tool_name,  # For backward compatibility
+                        "arguments": tool_params,
                         "result": result,
                         "duration_ms": tool_duration_ms,
                         "status": tool_status
@@ -705,7 +738,8 @@ class OrchestrationService:
                     "tool_name": tc.get("name", "unknown"),
                     "status": "success" if tc.get("result", {}).get("status") != "error" else "error",
                     "duration_ms": tc.get("duration_ms"),
-                    "summary": tc.get("result", {}).get("summary", str(tc.get("result", {}))[:100])
+                    "summary": tc.get("result", {}).get("summary", str(tc.get("result", {}))[:100]),
+                    "arguments": tc.get("arguments")
                 }
                 for tc in all_tool_results
             ]
@@ -781,7 +815,8 @@ class OrchestrationService:
         tools: List[Any],
         context: Dict[str, Any],
         conversation_id: Optional[str] = None,
-        assistant_message_id: Optional[str] = None
+        assistant_message_id: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None
     ) -> Any:
         """
         Call LLM with full conversation history.
@@ -794,14 +829,99 @@ class OrchestrationService:
         The LLM sees the full history and decides what to do next.
         Claude will learn from tool descriptions and error messages to determine workflow.
         """
+        metadata = metadata or {}
+
         # Build minimal system prompt - let Claude learn from tool descriptions and errors
-        frontend_url = settings.frontend_url
         system_parts = [
             "You are a process simulation assistant with access to tools for industrial process simulation.",
             "Use the available tools to help users. If a tool fails, read the error message to understand what went wrong.",
             "If you need more information from the user to proceed, ask them directly.",
-            f"When a simulation completes successfully and returns a run_id, include a link for the user: 📊 [View Simulation Results]({frontend_url}/results/{{run_id}}) — replace {{run_id}} with the actual run_id.",
+            "When a simulation tool returns a result_link field, include it exactly as-is in your response so the user can click it. Do NOT modify or reconstruct the link.",
+            "",
+            "SINGLE-EQUIPMENT SIMULATION:",
+            "- Use calc_list_processes with template_type='single_equipment' to find standalone equipment templates.",
+            "- Single-equipment templates use generic compound placeholders (compound_1, compound_2, etc.).",
+            "- When you see generic compounds in a template, ask the user which real compounds to use.",
+            "- Pass the compound_mapping parameter (e.g., {\"compound_1\": \"ethanol\", \"compound_2\": \"water\"}) when simulating.",
+            "- If the user asks to simulate a single piece of equipment (e.g., 'simulate a distillation column'), search for single-equipment templates first.",
+            "",
+            "EQUIPMENT CHAINING:",
+            "- Use calc_chain_equipment to feed the output of one simulation into another piece of equipment.",
+            "- The user may say things like 'feed the heater output to a distillation column' — use chaining for this.",
+            "- When chaining, you need: source_run_id, source_equipment_id, source_port, and target_process_id.",
+            "- For multi-outlet equipment (e.g., flash drum with vapor_outlet and liquid_outlet), ask the user which outlet to use.",
+            "- If a connection is invalid (phase mismatch, zero flow, etc.), relay the error and suggestion to the user clearly.",
+            "- Suggest intermediate equipment when connections are blocked (e.g., 'add a condenser between flash drum vapor and pump').",
+            "- Prefer calc_chain_equipment for connecting individual equipment over building a full process template.",
+            "",
+            "EFFICIENCY RULES:",
+            "- Do NOT call the same tool with the same or similar arguments more than once per conversation turn.",
+            "- If you already got results from calc_list_processes, do NOT call it again — use the results you already have.",
+            "- Plan your tool calls: list → get → simulate → chain. Each step uses output from the previous.",
+            "- If a tool succeeds, move on to the next step immediately instead of re-querying.",
+            "- NEVER guess or invent a process_id. Always use an exact process_id returned by calc_list_processes. Process IDs are case-sensitive and may differ from human-readable names (e.g. 'BenzeneTolueneRecycleDB', not 'benzene-toluene-separation').",
+            "- If you are not sure of the exact process_id, call calc_list_processes first before attempting to simulate.",
         ]
+
+        # ── Re-simulation directive block ──────────────────────────────────────
+        # When the frontend sends re_simulation=True in metadata it also sends
+        # a fully-classified parameter payload.  Inject an explicit directive so
+        # the LLM does NOT ask clarifying questions and fires the right tool
+        # immediately.
+        if metadata.get("re_simulation"):
+            source          = metadata.get("source", "")           # "calc_engine" | "process_server"
+            process_id      = metadata.get("process_id", "")
+            template_type   = metadata.get("template_type", "")    # "single_equipment" | "process"
+            parent_run_id   = metadata.get("parent_run_id", "")
+            eq_edits        = metadata.get("equipment_param_edits", {})
+            feed_edits      = metadata.get("feed_stream_edits", {})
+            compound_map    = metadata.get("compound_mapping", {})
+
+            # Choose the right MCP tool name based on source + template_type
+            if source == "calc_engine":
+                tool_hint = "calc_simulate_process"
+                # Format equipment params as dot-notation inline_overrides
+                inline_parts = []
+                for equip_id, params in eq_edits.items():
+                    for param, val in params.items():
+                        inline_parts.append(f'"equipment.{equip_id}.parameters.{param}": {val}')
+                for stream_id, props in feed_edits.items():
+                    for prop, val in props.items():
+                        inline_parts.append(f'"feed_streams_override.{stream_id}.{prop}": {val}')
+                overrides_hint = "{" + ", ".join(inline_parts) + "}" if inline_parts else "{}"
+            else:
+                # process_server — single_equipment or process
+                tool_hint = "simulate_equipment" if template_type == "single_equipment" else "simulate_process"
+                overrides_hint = str({"node_params": eq_edits, "feeds": feed_edits})
+
+            directive_lines = [
+                "",
+                "RE-SIMULATION REQUEST (respond with tool call ONLY — no questions):",
+                f"- This is a parameter update re-simulation. Parent run: {parent_run_id}",
+                f"- Source: {source} | Process: {process_id} | Template: {template_type}",
+                f"- Call tool: {tool_hint}",
+                f"- Use process_id: \"{process_id}\"",
+                f"- Apply these parameter overrides: {overrides_hint}",
+            ]
+            if compound_map:
+                # Explicit mapping provided — pass it through verbatim
+                directive_lines.append(f"- REQUIRED compound_mapping: {compound_map}")
+            elif template_type == "single_equipment" and source == "calc_engine":
+                # Single-equipment template but no mapping supplied.
+                # The template likely uses generic compounds; tell the LLM
+                # to reuse whatever mapping the original run used.
+                directive_lines.append(
+                    "- This is a single-equipment template that uses generic compound "
+                    "placeholders. You MUST include the same compound_mapping that was "
+                    "used in the parent run. Retrieve it from the parent run if needed "
+                    f"(parent_run_id: {parent_run_id})."
+                )
+            directive_lines += [
+                "- Do NOT ask the user for confirmation or additional input.",
+                "- After the tool returns, summarise the changes and new results in 2-3 sentences.",
+            ]
+            system_parts.extend(directive_lines)
+        # ── End re-simulation directive ────────────────────────────────────────
         
         # Add current context if available (industry, process)
         if context.get("current_industry") or context.get("current_process"):
@@ -811,7 +931,17 @@ class OrchestrationService:
             if context.get("current_process"):
                 context_info.append(f"Process: {context['current_process']}")
             system_parts.append(f"\nCurrent context: {', '.join(context_info)}")
-        
+
+        # Inject confirmed process IDs so the LLM never has to guess them again.
+        # These are IDs that were returned by calc_list_processes or successfully
+        # used in a simulation — they are guaranteed to exist in the database.
+        confirmed_pids = context.get("confirmed_process_ids", [])
+        if confirmed_pids:
+            system_parts.append(
+                f"\nConfirmed process_ids available in this conversation (use these EXACTLY — do not guess or modify them): "
+                + ", ".join(f'"{p}"' for p in confirmed_pids)
+            )
+
         # Add run history reference for follow-up questions
         run_ids = context.get("run_ids", [])
         if run_ids:
@@ -1138,7 +1268,7 @@ class OrchestrationService:
             )
         
         # Update simulation params if this was a simulation
-        if tool_name in ["simulate_process", "simulate_equipment"]:
+        if tool_name in ["simulate_process", "simulate_equipment", "calc_simulate_process"]:
             # Extract run_id - could be 'calc_run_id' or 'run_id' depending on the tool
             run_id = result.get("calc_run_id") or result.get("run_id")
             
@@ -1153,6 +1283,17 @@ class OrchestrationService:
                 updated_run_ids = updated_run_ids[:10]
             else:
                 updated_run_ids = current_run_ids
+
+            # Store the confirmed process_id used in this simulation so the
+            # system prompt can surface it to the LLM on subsequent turns,
+            # preventing it from guessing/hallucinating the ID again.
+            confirmed_pid = params.get("process_id")
+            if confirmed_pid:
+                existing_pids = set(context.get("confirmed_process_ids", []) if context else [])
+                existing_pids.add(confirmed_pid.lower())
+                confirmed_process_ids = list(existing_pids)
+            else:
+                confirmed_process_ids = context.get("confirmed_process_ids", []) if context else []
             
             # MERGE parameters instead of overwriting
             # This ensures resolved warnings from equipment simulations persist
@@ -1177,10 +1318,26 @@ class OrchestrationService:
                 conversation_id,
                 {
                     "simulation_params": merged_params,
-                    "run_ids": updated_run_ids
+                    "run_ids": updated_run_ids,
+                    "confirmed_process_ids": confirmed_process_ids,
                 }
             )
         
+        # Capture confirmed process_ids from discovery tools so the LLM can
+        # reuse them on the next turn without re-listing or guessing.
+        if tool_name in ["calc_list_processes"] and result.get("status") == "success":
+            context = await self.context_manager.get_context(conversation_id)
+            existing_pids = set(context.get("confirmed_process_ids", []) if context else [])
+            for item in result.get("processes", []):
+                pid = item.get("process_id")
+                if pid:
+                    existing_pids.add(pid.lower())
+            if existing_pids:
+                await self.context_manager.update_context(
+                    conversation_id,
+                    {"confirmed_process_ids": list(existing_pids)}
+                )
+
         # Update validation params if this was a validation
         if tool_name.startswith("validate_"):
             # Get current context to merge validation params

@@ -21,6 +21,7 @@ Architecture:
 
 import asyncio
 import traceback
+import httpx
 from typing import Any, AsyncGenerator, Dict, List, Optional, Union
 from anthropic import Anthropic, AsyncAnthropic
 from anthropic.types import Message, MessageStreamEvent
@@ -344,11 +345,19 @@ class ClaudeProvider:
         self.max_retries = max_retries
         self.timeout = timeout
         
-        # Initialize async client
+        # Initialize async client with connection pool limits to prevent socket leak
         self.client = AsyncAnthropic(
             api_key=self.api_key,
             max_retries=max_retries,
-            timeout=timeout
+            timeout=timeout,
+            http_client=httpx.AsyncClient(
+                limits=httpx.Limits(
+                    max_connections=20,          # Max total connections
+                    max_keepalive_connections=10, # Max idle keep-alive connections
+                    keepalive_expiry=30,          # Close idle connections after 30s
+                ),
+                timeout=httpx.Timeout(timeout, connect=10.0),  # 10s connect timeout
+            )
         )
     
     async def create_message(

@@ -170,6 +170,9 @@ class MongoClient:
             # User preferences collection indexes
             await self._db.user_preferences.create_index("user_id", unique=True)
             
+            # Visitors collection indexes
+            await self._db.visitors.create_index("username", unique=True)
+            
             logger.info("MongoDB indexes created successfully")
             
         except Exception as e:
@@ -428,6 +431,101 @@ class MongoClient:
             
         except PyMongoError as e:
             logger.error(f"Failed to delete conversation: {e}")
+            raise
+    
+    # -------------------------------------------------------------------------
+    # Visitor Tracking Methods
+    # -------------------------------------------------------------------------
+    
+    async def save_visitor(
+        self,
+        username: str,
+        display_name: str,
+    ) -> Dict[str, Any]:
+        """
+        Save or update a visitor record in MongoDB.
+        
+        Uses upsert pattern:
+        - If username exists → update last_login_time, increment login_count
+        - If new → create record with first_login_time, last_login_time, login_count=1
+        
+        Args:
+            username: Lowercase username (unique key)
+            display_name: Original case username as entered by user
+        
+        Returns:
+            Visitor document dict
+        
+        Example:
+            visitor = await mongo_client.save_visitor("johndoe", "JohnDoe")
+        """
+        if self._db is None:
+            raise RuntimeError("MongoDB client not connected")
+        
+        now = datetime.now(timezone.utc)
+        
+        try:
+            result = await self._db.visitors.find_one_and_update(
+                {"username": username},
+                {
+                    "$set": {
+                        "display_name": display_name,
+                        "last_login_time": now,
+                    },
+                    "$setOnInsert": {
+                        "username": username,
+                        "first_login_time": now,
+                    },
+                    "$inc": {
+                        "login_count": 1,
+                    },
+                },
+                upsert=True,
+                return_document=True,  # Return updated document
+            )
+            
+            if result:
+                result["_id"] = str(result["_id"])
+                logger.info(f"Visitor record upserted: {username}")
+            
+            return result
+            
+        except PyMongoError as e:
+            logger.error(f"Failed to save visitor: {e}")
+            raise
+    
+    async def get_visitor(
+        self,
+        username: str,
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Retrieve visitor record by lowercase username.
+        
+        Args:
+            username: Lowercase username to look up
+        
+        Returns:
+            Visitor document or None if not found
+        
+        Example:
+            visitor = await mongo_client.get_visitor("johndoe")
+        """
+        if self._db is None:
+            raise RuntimeError("MongoDB client not connected")
+        
+        try:
+            doc = await self._db.visitors.find_one({"username": username})
+            
+            if doc:
+                doc["_id"] = str(doc["_id"])
+                logger.debug(f"Retrieved visitor: {username}")
+            else:
+                logger.debug(f"Visitor not found: {username}")
+            
+            return doc
+            
+        except PyMongoError as e:
+            logger.error(f"Failed to get visitor: {e}")
             raise
     
     # -------------------------------------------------------------------------

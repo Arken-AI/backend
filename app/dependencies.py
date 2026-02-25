@@ -4,6 +4,7 @@ Dependency Injection
 Provides dependency injection for database connections, clients, and services.
 """
 
+import logging
 from typing import AsyncGenerator
 import redis.asyncio as redis
 from fastapi import Depends
@@ -16,6 +17,39 @@ from app.core.policy_engine import PolicyEngine
 from app.services.context_manager import ContextManager
 from app.services.tool_registry import ToolRegistry
 from app.services.orchestration_service import OrchestrationService
+from app.core.llm_provider import ClaudeProvider
+
+logger = logging.getLogger(__name__)
+
+
+# =============================================================================
+# LLM Provider (Singleton)
+# =============================================================================
+
+_llm_provider: ClaudeProvider | None = None
+
+
+def get_llm_provider() -> ClaudeProvider:
+    """
+    Get singleton ClaudeProvider instance.
+    
+    Reuses the same AsyncAnthropic httpx connection pool across all requests
+    to prevent socket/connection leaks.
+    """
+    global _llm_provider
+    
+    if _llm_provider is None:
+        _llm_provider = ClaudeProvider(api_key=settings.anthropic_api_key)
+    
+    return _llm_provider
+
+
+async def close_llm_provider():
+    """Close LLM provider on application shutdown"""
+    global _llm_provider
+    if _llm_provider:
+        await _llm_provider.close()
+        _llm_provider = None
 
 
 # =============================================================================
@@ -29,10 +63,24 @@ async def get_redis_client() -> redis.Redis:
     """
     Dependency to get Redis client instance (singleton).
     
+    Validates the connection is alive and recreates if stale.
+    
     Returns:
         redis.Redis: Async Redis client from redis.asyncio
     """
     global _redis_client
+    
+    if _redis_client is not None:
+        # Verify connection is alive
+        try:
+            await _redis_client.ping()
+        except Exception:
+            logger.warning("Redis connection stale, reconnecting...")
+            try:
+                await _redis_client.aclose()
+            except Exception:
+                pass
+            _redis_client = None
     
     if _redis_client is None:
         # Use redis.asyncio.Redis for async operations
@@ -43,6 +91,7 @@ async def get_redis_client() -> redis.Redis:
             db=0,
             decode_responses=True,
             socket_connect_timeout=5,
+            retry_on_timeout=True,
         )
     
     return _redis_client
@@ -82,10 +131,24 @@ async def get_mongo_client() -> MongoClient:
     """
     Dependency to get MongoDB client instance (singleton).
     
+    Validates the connection is alive and recreates if stale.
+    
     Returns:
         MongoClient: Async MongoDB client
     """
     global _mongo_client
+    
+    if _mongo_client is not None:
+        # Verify connection is alive
+        try:
+            await _mongo_client._client.admin.command("ping")
+        except Exception:
+            logger.warning("MongoDB connection stale, reconnecting...")
+            try:
+                _mongo_client._client.close()
+            except Exception:
+                pass
+            _mongo_client = None
     
     if _mongo_client is None:
         _mongo_client = MongoClient(
@@ -194,13 +257,15 @@ async def get_orchestration_service(
     policy_engine = PolicyEngine()  # PolicyEngine takes no arguments
     
     # Create orchestration service with MCP registry (multi-server)
+    # Use singleton LLM provider to reuse httpx connection pool
     orchestration = OrchestrationService(
         context_manager=context_manager,
         tool_registry=tool_registry,
         policy_engine=policy_engine,
         mcp_registry=mcp_registry,  # Use registry instead of single client
         event_emitter=event_emitter,
-        anthropic_api_key=settings.anthropic_api_key
+        anthropic_api_key=settings.anthropic_api_key,
+        llm_provider=get_llm_provider()  # Reuse singleton
     )
     
     return orchestration
