@@ -242,6 +242,7 @@ class ToolEndEvent(BaseEvent):
     summary: str = Field(..., description="Short human-readable result summary")
     error_message: Optional[str] = Field(None, description="Error details if status=error")
     result_id: Optional[str] = Field(None, description="Reference to full result in MongoDB")
+    result: Optional[Dict[str, Any]] = Field(None, description="Full tool result output")
 
 
 class RunProgressEvent(BaseEvent):

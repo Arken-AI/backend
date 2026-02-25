@@ -443,12 +443,23 @@ class OrchestrationService:
                     
                     # PHASE 2.3: Update assistant message with final content and status=complete
                     # Build per-message tool_executions list for persistent inline display
+                    def _extract_summary_store(tc):
+                        """Extract a string summary from a tool result for storage."""
+                        r = tc.get("result", {})
+                        msg = r.get("message")
+                        if isinstance(msg, str):
+                            return msg
+                        s = r.get("summary")
+                        if isinstance(s, str):
+                            return s
+                        return str(r)[:200]
+
                     tool_executions_to_store = [
                         {
                             "tool_name": tc.get("name", "unknown"),
                             "status": "error" if tc.get("result", {}).get("status") in ["error", "failed", "simulation_failed"] else "success",
                             "duration_ms": tc.get("duration_ms"),
-                            "summary": tc.get("result", {}).get("message") or tc.get("result", {}).get("summary") or str(tc.get("result", {}))[:200],
+                            "summary": _extract_summary_store(tc),
                             "error": tc.get("result", {}).get("error") if tc.get("result", {}).get("status") in ["error", "failed", "simulation_failed"] else None,
                             "arguments": tc.get("arguments"),
                         }
@@ -476,12 +487,23 @@ class OrchestrationService:
                     # LLM includes the result_link from tool output in its message
                     
                     # Format tool executions for response
+                    def _extract_summary(tc):
+                        """Extract a string summary from a tool result dict."""
+                        r = tc.get("result", {})
+                        msg = r.get("message")
+                        if isinstance(msg, str):
+                            return msg
+                        s = r.get("summary")
+                        if isinstance(s, str):
+                            return s
+                        return str(r)[:200]
+
                     tool_executions = [
                         {
                             "tool_name": tc.get("name", "unknown"),
                             "status": "success" if tc.get("result", {}).get("status") != "error" else "error",
                             "duration_ms": tc.get("duration_ms"),
-                            "summary": tc.get("result", {}).get("summary", str(tc.get("result", {}))[:100]),
+                            "summary": _extract_summary(tc),
                             "arguments": tc.get("arguments")
                         }
                         for tc in all_tool_results
@@ -608,7 +630,8 @@ class OrchestrationService:
                             await self.event_emitter.emit_tool_start(conversation_id, tool_name, tool_params)
                             await self.event_emitter.emit_tool_end(
                                 conversation_id, tool_name, "success", 0,
-                                f"{tool_name} (cached)", error_message=None
+                                f"{tool_name} (cached)", error_message=None,
+                                result=result
                             )
                     else:
                         # Execute tool
@@ -633,7 +656,12 @@ class OrchestrationService:
                             # Only 'error', 'failed', 'simulation_failed' are actual tool failures
                             result_status = result.get("status", "")
                             status = "error" if result_status in ["error", "failed", "simulation_failed"] else "success"
-                            summary = result.get("message", f"{tool_name} completed")
+                            # Build a meaningful string summary for SSE
+                            _msg = result.get("message")
+                            if isinstance(_msg, str):
+                                summary = _msg
+                            else:
+                                summary = f"{tool_name} completed"
                             error_msg = result.get("error") if status == "error" else None
                             # Ensure error_message is always a string, not a list or other type
                             if error_msg is not None and not isinstance(error_msg, str):
@@ -644,7 +672,8 @@ class OrchestrationService:
                                 status,
                                 tool_duration_ms,
                                 summary,
-                                error_message=error_msg
+                                error_message=error_msg,
+                                result=result
                             )
                     
                     # Update context
