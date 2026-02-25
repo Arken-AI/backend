@@ -916,7 +916,7 @@ class OrchestrationService:
                         inline_parts.append(f'"equipment.{equip_id}.parameters.{param}": {val}')
                 for stream_id, props in feed_edits.items():
                     for prop, val in props.items():
-                        inline_parts.append(f'"feed_streams_override.{stream_id}.{prop}": {val}')
+                        inline_parts.append(f'"feed_streams.{stream_id}.{prop}": {val}')
                 overrides_hint = "{" + ", ".join(inline_parts) + "}" if inline_parts else "{}"
             else:
                 # process_server — single_equipment or process
