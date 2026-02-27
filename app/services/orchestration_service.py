@@ -90,7 +90,6 @@ TOOLS_REQUIRING_USER_ID = {
 }
 from app.services.tool_registry import ToolRegistry
 from app.services.event_emitter import EventEmitter
-from app.core.policy_engine import PolicyEngine, PolicyDecision
 from app.core.llm_provider import ClaudeProvider
 from app.core.mcp_client import MCPClient, MCPServerConfig, MCPClientRegistry
 
@@ -150,7 +149,6 @@ class OrchestrationService:
         self,
         context_manager: ContextManager,
         tool_registry: ToolRegistry,
-        policy_engine: PolicyEngine,
         mcp_client: MCPClient = None,  # Legacy: single client (deprecated)
         mcp_registry: MCPClientRegistry = None,  # New: multi-server registry
         event_emitter: Optional[EventEmitter] = None,
@@ -163,7 +161,6 @@ class OrchestrationService:
         Args:
             context_manager: Context tracking service
             tool_registry: Tool metadata registry
-            policy_engine: Policy enforcement engine
             mcp_client: Legacy single MCP client (deprecated, use mcp_registry)
             mcp_registry: MCP client registry for multiple servers
             event_emitter: Event emitter for real-time updates (optional)
@@ -171,7 +168,6 @@ class OrchestrationService:
         """
         self.context_manager = context_manager
         self.tool_registry = tool_registry
-        self.policy_engine = policy_engine
         self.event_emitter = event_emitter
         
         # Support both legacy single client and new registry
@@ -573,38 +569,6 @@ class OrchestrationService:
                         tool_name = tool_call.name
                         tool_params = tool_call.input if hasattr(tool_call, 'input') else tool_call.arguments
                     
-                    # Check policy
-                    policy_result = await self._enforce_policy(tool_name, context, tool_params)
-                    
-                    if policy_result["decision"] != "allow":
-                        # Policy denied - send error back to LLM (not to user!)
-                        if self.event_emitter:
-                            await self.event_emitter.emit_app_error(
-                                conversation_id,
-                                "policy_violation",
-                                f"Tool {tool_name} denied: {policy_result['reason']}",
-                                details={"tool": tool_name, "reason": policy_result['reason']},
-                                recoverable=True
-                            )
-                        
-                        # Send error back to LLM so it can recover
-                        iteration_tool_results.append({
-                            "name": tool_name,
-                            "result": {
-                                "status": "error",
-                                "error": f"Policy denied: {policy_result['reason']}"
-                            }
-                        })
-                        
-                        all_tool_results.append({
-                            "name": tool_name,
-                            "tool": tool_name,  # For backward compatibility
-                            "arguments": tool_params,
-                            "status": "denied",
-                            "reason": policy_result["reason"]
-                        })
-                        continue
-                    
                     # ── Duplicate call detection ─────────────────────────
                     # Build a stable cache key from tool name + sorted params.
                     # Only cache read-only / idempotent discovery tools;
@@ -890,6 +854,40 @@ class OrchestrationService:
             "- If a tool succeeds, move on to the next step immediately instead of re-querying.",
             "- NEVER guess or invent a process_id. Always use an exact process_id returned by calc_list_processes. Process IDs are case-sensitive and may differ from human-readable names (e.g. 'BenzeneTolueneRecycleDB', not 'benzene-toluene-separation').",
             "- If you are not sure of the exact process_id, call calc_list_processes first before attempting to simulate.",
+            "",
+            "POST-SIMULATION INTELLIGENCE:",
+            "After simulation, results may include a 'validation' field with structured flags.",
+            "If validation flags are present, you MUST:",
+            "1. Present the simulation results normally first (key outputs, mass balance, etc.).",
+            "2. Then explain each validation flag clearly:",
+            "   - What the simulation produced (the value)",
+            "   - Why it is physically problematic (the rule/message)",
+            "   - How to fix it (the fix_hint)",
+            "3. Group flags by severity: CRITICAL issues first, then WARNINGS, then INFO.",
+            "4. For CRITICAL flags: emphasize that the results may be unreliable and the issue must be addressed.",
+            "5. If flags include 'suggested_equipment', propose adding that equipment to the flowsheet:",
+            "   - Explain WHERE it should go (between which two equipment)",
+            "   - Explain WHY it is needed (the physics reason)",
+            "   - Ask the user if they want you to add it and re-simulate",
+            "6. If there are NO validation flags, confirm: 'The simulation looks physically reasonable — no issues detected.'",
+            "",
+            "EXPLAINING PHYSICS (important):",
+            "- Don't just state the flag message — explain it in plain English as if teaching the user.",
+            "- Example: Instead of 'pump_requires_liquid: inlet vapor fraction 0.15', say:",
+            "  'Your pump is receiving a stream with 15% vapor. In a real plant, this would cause cavitation —",
+            "   the pump impeller would be damaged by collapsing vapor bubbles. You need to either cool the",
+            "   stream first or separate the vapor before it enters the pump.'",
+            "- Connect the physics to real-world consequences (damage, inefficiency, safety, cost).",
+            "",
+            "ADVANCED VALIDATION FLAG TYPES:",
+            "- ENERGY BALANCE flags (rule: energy_balance_closure) indicate conservation errors.",
+            "  Explain what energy is unaccounted for — missing heat input, unmodeled losses, or phase change effects.",
+            "- DESIGN HEURISTIC flags (rule: heuristic_*, severity: info/warning) suggest engineering improvements, not errors.",
+            "  Present these as optimization opportunities. Example: 'Your reflux ratio is 2× minimum — you could save energy by reducing it toward 1.3×.'",
+            "- SENSITIVITY flags (rule: sensitivity_near_*) warn about phase boundary proximity.",
+            "  Emphasize the real-world risk: 'This stream is only 4 K from boiling — a small upset could flash it to vapor, damaging the downstream pump.'",
+            "- HEAT INTEGRATION flags (rule: heat_integration_opportunity) suggest energy recovery between equipment.",
+            "  Quantify the savings: 'Cooler X rejects 150 kW while Heater Y needs 120 kW — a heat exchanger between them could save 120 kW of utility.'",
         ]
 
         # ── Re-simulation directive block ──────────────────────────────────────
@@ -1619,42 +1617,6 @@ class OrchestrationService:
             }
     
     # =========================================================================
-    # Policy Enforcement
-    # =========================================================================
-    
-    async def _enforce_policy(
-        self,
-        tool_name: str,
-        context: Dict[str, Any],
-        params: Dict[str, Any]
-    ) -> Dict[str, Any]:
-        """
-        Check if tool execution is allowed by policy.
-        
-        Returns:
-            {
-                "decision": "allow" | "deny",
-                "reason": "...",
-                "metadata": {...}
-            }
-        """
-        # TEMPORARY: Skip policy enforcement for testing
-        # TODO: Re-enable after agentic loop is verified working
-        return {
-            "decision": "allow",
-            "reason": "Policy enforcement temporarily disabled",
-            "metadata": {}
-        }
-        
-        # Original policy enforcement (commented out)
-        # result = self.policy_engine.enforce_policy(tool_name, context, params)
-        # return {
-        #     "decision": result.decision.value,
-        #     "reason": result.reason,
-        #     "metadata": result.metadata
-        # }
-    
-    # =========================================================================
     # Formatting Helpers
     # =========================================================================
     
@@ -1665,16 +1627,6 @@ class OrchestrationService:
             tool_name = result["tool"]
             tool_result = result["result"]
             formatted.append(f"✓ {tool_name}: {json.dumps(tool_result, indent=2)}")
-        
-        return "\n".join(formatted)
-    
-    def _format_policy_violations_for_llm(self, violations: List[Dict[str, Any]]) -> str:
-        """Format policy violations for LLM feedback."""
-        formatted = []
-        for violation in violations:
-            tool_name = violation["tool"]
-            reason = violation["reason"]
-            formatted.append(f"✗ {tool_name}: {reason}")
         
         return "\n".join(formatted)
     
@@ -1709,45 +1661,9 @@ class OrchestrationService:
         
         return "\n".join(formatted)
     
-    def _format_policy_violation_message(
-        self,
-        violations: List[Dict[str, Any]]
-    ) -> str:
-        """Format policy violation message for user."""
-        if not violations:
-            return "Unable to process request."
-        
-        messages = ["I cannot execute the requested tools due to policy restrictions:"]
-        for violation in violations:
-            messages.append(f"- {violation['tool']}: {violation['reason']}")
-        
-        return "\n".join(messages)
-    
     # =========================================================================
     # Public API
     # =========================================================================
-    
-    async def get_policy_summary(self, conversation_id: str) -> Dict[str, Any]:
-        """
-        Get policy summary for current conversation.
-        
-        Useful for debugging and showing user their current state.
-        """
-        context = await self.context_manager.get_context(conversation_id)
-        
-        if not context:
-            return {
-                "status": "error",
-                "message": "Conversation not found"
-            }
-        
-        summary = self.policy_engine.get_policy_summary(context)
-        
-        return {
-            "status": "success",
-            "conversation_id": conversation_id,
-            "summary": summary
-        }
     
     async def reset_conversation(self, conversation_id: str) -> Dict[str, Any]:
         """
