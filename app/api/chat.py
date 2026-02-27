@@ -63,8 +63,7 @@ router = APIRouter()
 )
 async def send_message(
     request: ChatRequest,
-    orchestration: OrchestrationService = Depends(get_orchestration_service),
-    event_emitter: EventEmitter = Depends(get_event_emitter)
+    orchestration: OrchestrationService = Depends(get_orchestration_service)
 ) -> ChatResponse:
     """
     Send a chat message and wait for the complete response.
@@ -78,7 +77,6 @@ async def send_message(
     Args:
         request: Chat request with message and required conversation_id
         orchestration: Orchestration service dependency
-        event_emitter: Event emitter for tool progress events
         
     Returns:
         ChatResponse with complete assistant response
@@ -90,11 +88,6 @@ async def send_message(
         request_id = f"req_{uuid.uuid4().hex[:16]}"
         
         user_id = request.metadata.get("user_id", "default_user") if request.metadata else "default_user"
-        
-        logger.info(
-            f"Processing chat message: conversation_id={conversation_id}, "
-            f"request_id={request_id}, message_length={len(request.message)}"
-        )
         
         # Process message synchronously - wait for complete response
         result = await orchestration.process_message(
