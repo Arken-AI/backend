@@ -458,6 +458,7 @@ class OrchestrationService:
                             "summary": _extract_summary_store(tc),
                             "error": tc.get("result", {}).get("error") if tc.get("result", {}).get("status") in ["error", "failed", "simulation_failed"] else None,
                             "arguments": tc.get("arguments"),
+                            "result": tc.get("result"),
                         }
                         for tc in all_tool_results
                     ]
@@ -500,7 +501,8 @@ class OrchestrationService:
                             "status": "success" if tc.get("result", {}).get("status") != "error" else "error",
                             "duration_ms": tc.get("duration_ms"),
                             "summary": _extract_summary(tc),
-                            "arguments": tc.get("arguments")
+                            "arguments": tc.get("arguments"),
+                            "result": tc.get("result"),
                         }
                         for tc in all_tool_results
                     ]
@@ -732,11 +734,12 @@ class OrchestrationService:
                     "status": "success" if tc.get("result", {}).get("status") != "error" else "error",
                     "duration_ms": tc.get("duration_ms"),
                     "summary": tc.get("result", {}).get("summary", str(tc.get("result", {}))[:100]),
-                    "arguments": tc.get("arguments")
+                    "arguments": tc.get("arguments"),
+                    "result": tc.get("result"),
                 }
                 for tc in all_tool_results
             ]
-            
+
             # Return success - agentic loop completed, Claude's message explains partial results
             return {
                 "status": "success",
