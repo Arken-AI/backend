@@ -930,7 +930,7 @@ class OrchestrationService:
                 )
             directive_lines += [
                 "- Do NOT ask the user for confirmation or additional input.",
-                "- After the tool returns, summarise the changes and new results in 2-3 sentences.",
+                "- After the tool returns, provide full analysis including results, validation flags, and recommendations — same as a normal simulation response.",
             ]
             system_parts.extend(directive_lines)
         # ── End re-simulation directive ────────────────────────────────────────
