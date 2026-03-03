@@ -1288,11 +1288,14 @@ class OrchestrationService:
             context = await self.context_manager.get_context(conversation_id)
             current_run_ids = context.get("run_ids", []) if context else []
             
-            # Only add run_id if it's not None
+            # Only add run_id if it's not None and not already present
             if run_id:
-                updated_run_ids = [run_id] + current_run_ids
-                # Keep only last 10 run IDs
-                updated_run_ids = updated_run_ids[:10]
+                if run_id not in current_run_ids:
+                    updated_run_ids = [run_id] + current_run_ids
+                    # Keep only last 10 run IDs
+                    updated_run_ids = updated_run_ids[:10]
+                else:
+                    updated_run_ids = current_run_ids
             else:
                 updated_run_ids = current_run_ids
 
