@@ -38,26 +38,32 @@ def format_display_name(raw_id: str, raw_name: str = None) -> str:
         return raw_name
     
     name = raw_id
-    
+
     # Remove common prefixes like e01_, s01_, etc.
     name = re.sub(r'^[es]\d+_', '', name)
-    
+
     # Handle camelCase (insert space before capitals)
     name = re.sub(r'([a-z])([A-Z])', r'\1 \2', name)
-    
+
     # Handle run-together words like "ethanolwaterbinary"
     # Common chemical/process terms to split
     name = re.sub(r'(ethanol)(water)', r'\1 \2', name, flags=re.IGNORECASE)
     name = re.sub(r'(water)(binary)', r'\1 \2', name, flags=re.IGNORECASE)
     name = re.sub(r'(methanol)(water)', r'\1 \2', name, flags=re.IGNORECASE)
     name = re.sub(r'(distillation)(column)', r'\1 \2', name, flags=re.IGNORECASE)
-    
-    # Replace underscores with spaces
+
+    # Replace hyphens and underscores with spaces
+    name = name.replace('-', ' ')
     name = name.replace('_', ' ')
-    
+
     # Title case each word
     name = ' '.join(word.capitalize() for word in name.split())
-    
+
+    # Fix common acronyms that should be uppercase
+    acronyms = {'Ipa': 'IPA', 'Etp': 'ETP', 'Hx': 'HX', 'Ph': 'pH', 'Pfd': 'PFD'}
+    for wrong, correct in acronyms.items():
+        name = re.sub(r'\b' + wrong + r'\b', correct, name)
+
     return name
 
 
@@ -142,12 +148,37 @@ class ReportDataCollector:
             
             # Stream data - calc engine uses "stream_results"
             streams = []
+            seen_stream_ids = set()
             stream_results = flowsheet_results.get("stream_results", flowsheet_results.get("streams", {}))
             for stream_id, stream_data in stream_results.items():
+                if stream_id in seen_stream_ids:
+                    continue
+                seen_stream_ids.add(stream_id)
                 streams.append({
                     "id": stream_id,
                     "data": stream_data
                 })
+
+            # Fallback: extract outlet streams from node_results that aren't
+            # already in stream_results (e.g., splitter/product streams that
+            # weren't captured as edges)
+            seen_stream_ids = {s["id"] for s in streams}
+            for eq_id, eq_data in equipment_results.items():
+                outlets = eq_data.get("outlets", {})
+                for port_name, outlet_data in outlets.items():
+                    if not isinstance(outlet_data, dict):
+                        continue
+                    # Only add if this outlet has stream data (flow_rate, composition)
+                    if "flow_rate" not in outlet_data and "temperature_K" not in outlet_data:
+                        continue
+                    # Create a descriptive stream ID from equipment + port
+                    derived_id = f"{eq_id}_{port_name}"
+                    if derived_id not in seen_stream_ids:
+                        seen_stream_ids.add(derived_id)
+                        streams.append({
+                            "id": derived_id,
+                            "data": outlet_data
+                        })
             
             # Input parameters - may be in payload_snapshot or result.input
             input_parameters = run_doc.get("payload_snapshot", input_data)
@@ -222,7 +253,8 @@ class ReportDataCollector:
             return "intermediate"
         else:
             return "product"
-    
+
+
     @staticmethod
     def infer_equipment_type(eq_id: str) -> str:
         """
@@ -236,14 +268,16 @@ class ReportDataCollector:
             flash_drum -> Flash Drum
         """
         eq_lower = eq_id.lower()
-        
+
         # Check for specific equipment types
-        if 'column' in eq_lower or 'distill' in eq_lower:
-            return "Distillation Column"
-        elif 'cooler' in eq_lower:
+        # Note: cooler/heater checks must come before distill check,
+        # since "distillate_cooler" contains "distill" but is a cooler
+        if 'cooler' in eq_lower:
             return "Cooler"
         elif 'heater' in eq_lower:
             return "Heater"
+        elif 'column' in eq_lower or 'distillation' in eq_lower:
+            return "Distillation Column"
         elif 'exchanger' in eq_lower or 'hx' in eq_lower:
             return "Heat Exchanger"
         elif 'pump' in eq_lower:
@@ -590,45 +624,48 @@ class ReportDataCollector:
         # Sum flow rates based on stream naming conventions
         # Inputs: feed, inlet, in, raw, input
         # Outputs: product, outlet, out, waste, output, distillate, bottoms
-        # Note: "cooler" removed from outputs to avoid counting intermediate streams like "column_to_cooler"
         input_keywords = ["feed", "inlet", "in", "raw", "input"]
         output_keywords = ["product", "outlet", "out", "waste", "output", "distillate", "bottoms"]
-        
+        # Terminal destinations - streams going TO these are outputs, not internal
+        terminal_keywords = ["tank", "storage", "etp", "product", "vessel", "silo", "receiver"]
+
         for stream_id, data in stream_data.items():
             flow_rate = data.get("flow_rate", 0) or 0
             stream_lower = stream_id.lower()
-            
+
             # Check if it's an input stream
             is_input = any(kw in stream_lower for kw in input_keywords)
             is_output = any(kw in stream_lower for kw in output_keywords)
-            
-            # Internal streams (e.g., column_to_cooler) should always be skipped
-            is_internal = "_to_" in stream_lower
-            
+
+            # Streams with _to_ are internal UNLESS they go to a terminal destination
+            is_internal = False
+            if "_to_" in stream_lower:
+                # Extract what comes after the last _to_
+                after_to = stream_lower.split("_to_")[-1]
+                goes_to_terminal = any(kw in after_to for kw in terminal_keywords)
+                if goes_to_terminal:
+                    # This is a terminal output stream (e.g., cooler_to_etp, cooler_to_product_tank)
+                    is_output = True
+                else:
+                    is_internal = True
+
             if is_input and not is_internal:
                 total_mass_in += flow_rate
             elif is_output and not is_internal:
-                # Only count terminal output streams
                 total_mass_out += flow_rate
         
-        # If no categorization worked, use equipment-based approach
+        # If no categorization worked, leave as zero and mark closure as unknown
         if total_mass_in == 0 and total_mass_out == 0:
-            # Get total from first/last streams
-            stream_list = list(stream_data.values())
-            if stream_list:
-                total_mass_in = stream_list[0].get("flow_rate", 0) or 0
-                total_mass_out = sum(s.get("flow_rate", 0) or 0 for s in stream_list[1:])
-        
-        # Calculate closure percentage
-        if total_mass_in > 0:
+            closure_percentage = None
+        elif total_mass_in > 0:
             closure_percentage = (total_mass_out / total_mass_in) * 100.0
         else:
-            closure_percentage = 100.0 if total_mass_out == 0 else 0.0
+            closure_percentage = 0.0
         
         return MassBalanceSummary(
             total_mass_in=total_mass_in,
             total_mass_out=total_mass_out,
-            closure_percentage=min(closure_percentage, 100.0)
+            closure_percentage=closure_percentage
         )
     
     def build_energy_balance_summary(
@@ -708,9 +745,13 @@ class ReportDataCollector:
             total_power += abs(power)
         
         # Calculate closure percentage
-        total_energy_in = total_heat_input + total_power
-        if total_energy_in > 0:
-            closure_percentage = (total_heat_output / total_energy_in) * 100.0
+        # Energy in = heat added + shaft work; Energy out = heat removed
+        # When power is present, it contributes to energy input
+        if total_heat_input > 0:
+            closure_percentage = ((total_heat_output) / (total_heat_input + total_power)) * 100.0
+        elif total_power > 0:
+            # Only power input, no heat input
+            closure_percentage = (total_heat_output / total_power) * 100.0
         else:
             closure_percentage = 100.0 if total_heat_output == 0 else 0.0
         
@@ -718,5 +759,5 @@ class ReportDataCollector:
             total_heat_input=total_heat_input,
             total_heat_output=total_heat_output,
             total_power=total_power,
-            closure_percentage=min(closure_percentage, 100.0)
+            closure_percentage=closure_percentage
         )

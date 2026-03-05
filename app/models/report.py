@@ -158,7 +158,7 @@ class MassBalanceSummary(BaseModel):
     """Mass balance summary data"""
     total_mass_in: float = Field(..., description="Total mass input (kg/hr)")
     total_mass_out: float = Field(..., description="Total mass output (kg/hr)")
-    closure_percentage: float = Field(..., description="Mass balance closure percentage")
+    closure_percentage: Optional[float] = Field(..., description="Mass balance closure percentage, None if unable to calculate")
     component_balances: Optional[Dict[str, Dict[str, float]]] = Field(None, description="Per-component balances")
 
 
@@ -186,9 +186,9 @@ class ReportData(BaseModel):
     equipment_table: Optional[EquipmentTableData] = None
     mass_balance: Optional[MassBalanceSummary] = None
     energy_balance: Optional[EnergyBalanceSummary] = None
-    executive_summary: Optional[str] = None  # AI-generated (Phase 2)
-    process_description_sections: Optional[List[ReportSection]] = None  # AI-generated (Phase 2)
-    observations: Optional[str] = None  # AI-generated (Phase 2)
+    executive_summary: Optional[str] = None  # AI-generated
+    observations: Optional[str] = None  # AI-generated
+    ai_narratives_requested: bool = False  # Whether AI content was requested
 
 
 class SimulationRunData(BaseModel):
