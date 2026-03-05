@@ -119,7 +119,18 @@ class ReportGeneratorService:
         # Use default options if not provided
         if options is None:
             options = ReportOptions()
-        
+
+        # Pre-validate that run_id exists before creating report record
+        run_exists = await self.db.calc_simulation_runs.find_one(
+            {"run_id": run_id}, {"_id": 1}
+        )
+        if not run_exists:
+            run_exists = await self.db.runs.find_one(
+                {"run_id": run_id}, {"_id": 1}
+            )
+        if not run_exists:
+            raise ValueError(f"Simulation run not found: {run_id}")
+
         # Generate unique report ID
         report_id = str(uuid.uuid4())
         
@@ -246,8 +257,7 @@ class ReportGeneratorService:
             # ========================================
             executive_summary = None
             observations = None
-            process_description_sections = None
-            
+
             if options.include_ai_narratives and self.narrative_generator.is_available:
                 await self._update_progress(
                     report_id,
@@ -320,8 +330,8 @@ class ReportGeneratorService:
                 energy_balance=energy_balance,
                 # AI-generated content
                 executive_summary=executive_summary,
-                process_description_sections=process_description_sections,
                 observations=observations,
+                ai_narratives_requested=options.include_ai_narratives,
             )
             
             # ========================================

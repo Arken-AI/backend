@@ -39,22 +39,44 @@ logger = logging.getLogger(__name__)
 class NarrativeGeneratorService:
     """
     Service for generating AI-powered narrative sections for simulation reports.
-    
+
     Uses direct Anthropic API calls (NOT MCP) to generate:
     - Executive summary
     - Process descriptions
     - Equipment descriptions
     - Observations and recommendations
-    
+
     All methods return Optional[str] - None indicates failure and the section
     should be skipped in the final PDF (not replaced with placeholder text).
     """
-    
+
+    # =========================================================================
+    # System Prompt
+    # =========================================================================
+
+    SYSTEM_PROMPT = """You are a senior process engineer and technical writer at ARKEN AI, a physics-based process simulation platform for the chemical, sugar, and general process industries.
+
+You write narrative sections for detailed simulation reports (executive summaries, observations, recommendations). Your audience is process engineers, plant managers, and technical decision-makers who rely on these reports for design validation, optimization, and operational decisions.
+
+Domain expertise:
+- Thermodynamics (VLE, enthalpy, phase equilibria), heat and mass transfer, unit operations
+- Equipment: distillation columns, heat exchangers, reactors, flash drums, pumps, compressors, evaporators, mixers, splitters
+- Key metrics: mass/energy balance closure, separation efficiency, heat duties, product purity, recovery rates
+
+Writing guidelines:
+- Write in third person, past tense, professional engineering tone
+- Be specific: always include numbers with units (e.g., "351.2 K (78.1°C)", "1,000 kg/hr", "99.5% purity")
+- State facts from the data — do not speculate or invent values not present in the provided data
+- Keep paragraphs concise (3-5 sentences each)
+- Do NOT use markdown formatting (no **, ##, bullet points, or lists). Write in plain prose paragraphs only
+- When closure is near 100%, state it positively. When it deviates, quantify the gap and note possible causes
+- Round appropriately: temperatures to 1 decimal, pressures to 2 decimals, compositions to 1-2 decimals, closure to 4 decimals"""
+
     # =========================================================================
     # Prompt Templates
     # =========================================================================
-    
-    EXECUTIVE_SUMMARY_PROMPT = """You are a technical writer for a process engineering firm. Generate a comprehensive executive summary (3-4 paragraphs) for a simulation report.
+
+    EXECUTIVE_SUMMARY_PROMPT = """Generate a comprehensive executive summary (3-4 paragraphs) for this simulation report.
 
 === SIMULATION METADATA ===
 - Run ID: {run_id}
@@ -86,12 +108,9 @@ Write a professional executive summary that:
 2. Describes the process configuration (number of equipment units, key streams)
 3. Highlights key operating conditions (temperatures, pressures, compositions)
 4. Summarizes mass and energy balance results with specific numbers
-5. Notes the overall process efficiency and any significant findings
+5. Notes the overall process efficiency and any significant findings"""
 
-Write in third person, past tense. Be specific with numbers and units.
-DO NOT use markdown formatting (no **, ##, or bullet points). Write in plain prose paragraphs."""
-
-    PROCESS_DESCRIPTION_PROMPT = """You are a process engineer documenting a simulation study. Write a technical process description (2-3 paragraphs) for the following process.
+    PROCESS_DESCRIPTION_PROMPT = """Write a technical process description (2-3 paragraphs) for the following process.
 
 === PROCESS OVERVIEW ===
 Process: {process_name}
@@ -106,25 +125,13 @@ Industry: {industry}
 === OPERATING CONDITIONS ===
 {operating_conditions}
 
-Equipment in this section:
-{equipment_list}
-
-Stream connections:
-{stream_connections}
-
-Operating conditions:
-{operating_conditions}
-
 Write a clear technical description that:
 1. Explains the purpose of this process section
 2. Describes how material flows through the equipment
 3. Notes key operating parameters
-4. Mentions any recycle streams or integrations
+4. Mentions any recycle streams or integrations"""
 
-Use professional engineering language. Be specific about equipment types and stream properties.
-DO NOT use markdown formatting. Write in plain prose paragraphs."""
-
-    EQUIPMENT_DESCRIPTION_PROMPT = """You are a process engineer documenting simulation results. Write a brief technical description (2-3 sentences) for this equipment unit.
+    EQUIPMENT_DESCRIPTION_PROMPT = """Write a brief technical description (2-3 sentences) for this equipment unit.
 
 Equipment: {equipment_name}
 Type: {equipment_type}
@@ -145,11 +152,9 @@ Performance Metrics:
 Write a concise description that captures:
 1. The equipment's function in the process
 2. Key operating conditions
-3. Notable performance metrics
+3. Notable performance metrics"""
 
-Be technical and precise. DO NOT use markdown formatting."""
-
-    OBSERVATIONS_PROMPT = """You are a senior process engineer reviewing simulation results. Generate detailed observations and recommendations based on the complete simulation data.
+    OBSERVATIONS_PROMPT = """Generate detailed observations and recommendations based on the complete simulation data.
 
 === SIMULATION OVERVIEW ===
 - Industry: {industry}
@@ -181,10 +186,8 @@ Based on this data, generate 4-6 detailed observations that:
 4. Identify any concerning conditions or limitations
 5. Suggest specific optimization opportunities with expected benefits
 6. Recommend next steps or areas for further investigation
-4. Flag any concerning stream conditions
-5. Suggest areas for further investigation
 
-Write each observation as a separate paragraph starting with a bold topic (e.g., "Mass Balance Quality:"). Be specific and actionable."""
+Write each observation as a separate paragraph. Be specific and actionable."""
 
     def __init__(self):
         """Initialize the narrative generator service."""
