@@ -63,8 +63,7 @@ router = APIRouter()
 )
 async def send_message(
     request: ChatRequest,
-    orchestration: OrchestrationService = Depends(get_orchestration_service),
-    event_emitter: EventEmitter = Depends(get_event_emitter)
+    orchestration: OrchestrationService = Depends(get_orchestration_service)
 ) -> ChatResponse:
     """
     Send a chat message and wait for the complete response.
@@ -78,7 +77,6 @@ async def send_message(
     Args:
         request: Chat request with message and required conversation_id
         orchestration: Orchestration service dependency
-        event_emitter: Event emitter for tool progress events
         
     Returns:
         ChatResponse with complete assistant response
@@ -90,11 +88,6 @@ async def send_message(
         request_id = f"req_{uuid.uuid4().hex[:16]}"
         
         user_id = request.metadata.get("user_id", "default_user") if request.metadata else "default_user"
-        
-        logger.info(
-            f"Processing chat message: conversation_id={conversation_id}, "
-            f"request_id={request_id}, message_length={len(request.message)}"
-        )
         
         # Process message synchronously - wait for complete response
         result = await orchestration.process_message(
@@ -121,12 +114,25 @@ async def send_message(
         # Build tool executions list
         tool_executions = []
         for tool_call in result.get("tool_calls", []):
+            # Summary lives inside the nested "result" dict, not at top level.
+            # Prefer result.message (str), skip result.summary if it's a dict.
+            tool_result = tool_call.get("result") or {}
+            raw_summary = tool_call.get("summary")
+            if not isinstance(raw_summary, str):
+                raw_summary = None
+            if not raw_summary:
+                raw_summary = tool_result.get("message") if isinstance(tool_result.get("message"), str) else None
+            if not raw_summary:
+                raw_summary = tool_result.get("summary") if isinstance(tool_result.get("summary"), str) else None
+            if not raw_summary:
+                raw_summary = str(tool_result)[:200]
             tool_executions.append(ToolExecution(
                 tool_name=tool_call.get("name") or tool_call.get("tool_name") or tool_call.get("tool", "unknown"),
                 status=tool_call.get("status", "success"),
                 duration_ms=tool_call.get("duration_ms"),
-                summary=tool_call.get("summary"),
-                arguments=tool_call.get("arguments")
+                summary=raw_summary,
+                arguments=tool_call.get("arguments"),
+                result=tool_result if tool_result else None
             ))
         
         # Return complete response

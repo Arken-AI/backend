@@ -13,7 +13,6 @@ from app.config import settings
 from app.services.event_emitter import EventEmitter
 from app.core.mongo_client import MongoClient
 from app.core.mcp_client import MCPClient, MCPServerConfig, MCPClientRegistry
-from app.core.policy_engine import PolicyEngine
 from app.services.context_manager import ContextManager
 from app.services.tool_registry import ToolRegistry
 from app.services.orchestration_service import OrchestrationService
@@ -254,14 +253,12 @@ async def get_orchestration_service(
         mongo_client=mongo_client._client  # Pass underlying Motor client
     )
     tool_registry = ToolRegistry()
-    policy_engine = PolicyEngine()  # PolicyEngine takes no arguments
     
     # Create orchestration service with MCP registry (multi-server)
     # Use singleton LLM provider to reuse httpx connection pool
     orchestration = OrchestrationService(
         context_manager=context_manager,
         tool_registry=tool_registry,
-        policy_engine=policy_engine,
         mcp_registry=mcp_registry,  # Use registry instead of single client
         event_emitter=event_emitter,
         anthropic_api_key=settings.anthropic_api_key,

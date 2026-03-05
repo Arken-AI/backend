@@ -90,6 +90,7 @@ class ToolExecution(BaseModel):
     duration_ms: Optional[int] = Field(default=None, description="Execution time in milliseconds")
     summary: Optional[str] = Field(default=None, description="Brief result summary")
     arguments: Optional[Dict[str, Any]] = Field(default=None, description="Arguments passed to the tool")
+    result: Optional[Dict[str, Any]] = Field(default=None, description="Full tool result output")
 
 
 class ChatResponse(BaseModel):

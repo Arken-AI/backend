@@ -214,7 +214,8 @@ class EventEmitter:
         duration_ms: int,
         summary: str,
         error_message: Optional[str] = None,
-        result_id: Optional[str] = None
+        result_id: Optional[str] = None,
+        result: Optional[dict] = None
     ) -> int:
         """
         Emit tool end event (tool execution complete).
@@ -246,7 +247,8 @@ class EventEmitter:
             duration_ms=duration_ms,
             summary=summary,
             error_message=error_message,
-            result_id=result_id
+            result_id=result_id,
+            result=result
         )
         return await self._emit_event(request_id, event)
     

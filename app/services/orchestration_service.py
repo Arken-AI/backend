@@ -90,7 +90,6 @@ TOOLS_REQUIRING_USER_ID = {
 }
 from app.services.tool_registry import ToolRegistry
 from app.services.event_emitter import EventEmitter
-from app.core.policy_engine import PolicyEngine, PolicyDecision
 from app.core.llm_provider import ClaudeProvider
 from app.core.mcp_client import MCPClient, MCPServerConfig, MCPClientRegistry
 
@@ -150,7 +149,6 @@ class OrchestrationService:
         self,
         context_manager: ContextManager,
         tool_registry: ToolRegistry,
-        policy_engine: PolicyEngine,
         mcp_client: MCPClient = None,  # Legacy: single client (deprecated)
         mcp_registry: MCPClientRegistry = None,  # New: multi-server registry
         event_emitter: Optional[EventEmitter] = None,
@@ -163,7 +161,6 @@ class OrchestrationService:
         Args:
             context_manager: Context tracking service
             tool_registry: Tool metadata registry
-            policy_engine: Policy enforcement engine
             mcp_client: Legacy single MCP client (deprecated, use mcp_registry)
             mcp_registry: MCP client registry for multiple servers
             event_emitter: Event emitter for real-time updates (optional)
@@ -171,7 +168,6 @@ class OrchestrationService:
         """
         self.context_manager = context_manager
         self.tool_registry = tool_registry
-        self.policy_engine = policy_engine
         self.event_emitter = event_emitter
         
         # Support both legacy single client and new registry
@@ -443,14 +439,26 @@ class OrchestrationService:
                     
                     # PHASE 2.3: Update assistant message with final content and status=complete
                     # Build per-message tool_executions list for persistent inline display
+                    def _extract_summary_store(tc):
+                        """Extract a string summary from a tool result for storage."""
+                        r = tc.get("result", {})
+                        msg = r.get("message")
+                        if isinstance(msg, str):
+                            return msg
+                        s = r.get("summary")
+                        if isinstance(s, str):
+                            return s
+                        return str(r)[:200]
+
                     tool_executions_to_store = [
                         {
                             "tool_name": tc.get("name", "unknown"),
                             "status": "error" if tc.get("result", {}).get("status") in ["error", "failed", "simulation_failed"] else "success",
                             "duration_ms": tc.get("duration_ms"),
-                            "summary": tc.get("result", {}).get("message") or tc.get("result", {}).get("summary") or str(tc.get("result", {}))[:200],
+                            "summary": _extract_summary_store(tc),
                             "error": tc.get("result", {}).get("error") if tc.get("result", {}).get("status") in ["error", "failed", "simulation_failed"] else None,
                             "arguments": tc.get("arguments"),
+                            "result": tc.get("result"),
                         }
                         for tc in all_tool_results
                     ]
@@ -476,13 +484,25 @@ class OrchestrationService:
                     # LLM includes the result_link from tool output in its message
                     
                     # Format tool executions for response
+                    def _extract_summary(tc):
+                        """Extract a string summary from a tool result dict."""
+                        r = tc.get("result", {})
+                        msg = r.get("message")
+                        if isinstance(msg, str):
+                            return msg
+                        s = r.get("summary")
+                        if isinstance(s, str):
+                            return s
+                        return str(r)[:200]
+
                     tool_executions = [
                         {
                             "tool_name": tc.get("name", "unknown"),
                             "status": "success" if tc.get("result", {}).get("status") != "error" else "error",
                             "duration_ms": tc.get("duration_ms"),
-                            "summary": tc.get("result", {}).get("summary", str(tc.get("result", {}))[:100]),
-                            "arguments": tc.get("arguments")
+                            "summary": _extract_summary(tc),
+                            "arguments": tc.get("arguments"),
+                            "result": tc.get("result"),
                         }
                         for tc in all_tool_results
                     ]
@@ -551,38 +571,6 @@ class OrchestrationService:
                         tool_name = tool_call.name
                         tool_params = tool_call.input if hasattr(tool_call, 'input') else tool_call.arguments
                     
-                    # Check policy
-                    policy_result = await self._enforce_policy(tool_name, context, tool_params)
-                    
-                    if policy_result["decision"] != "allow":
-                        # Policy denied - send error back to LLM (not to user!)
-                        if self.event_emitter:
-                            await self.event_emitter.emit_app_error(
-                                conversation_id,
-                                "policy_violation",
-                                f"Tool {tool_name} denied: {policy_result['reason']}",
-                                details={"tool": tool_name, "reason": policy_result['reason']},
-                                recoverable=True
-                            )
-                        
-                        # Send error back to LLM so it can recover
-                        iteration_tool_results.append({
-                            "name": tool_name,
-                            "result": {
-                                "status": "error",
-                                "error": f"Policy denied: {policy_result['reason']}"
-                            }
-                        })
-                        
-                        all_tool_results.append({
-                            "name": tool_name,
-                            "tool": tool_name,  # For backward compatibility
-                            "arguments": tool_params,
-                            "status": "denied",
-                            "reason": policy_result["reason"]
-                        })
-                        continue
-                    
                     # ── Duplicate call detection ─────────────────────────
                     # Build a stable cache key from tool name + sorted params.
                     # Only cache read-only / idempotent discovery tools;
@@ -608,7 +596,8 @@ class OrchestrationService:
                             await self.event_emitter.emit_tool_start(conversation_id, tool_name, tool_params)
                             await self.event_emitter.emit_tool_end(
                                 conversation_id, tool_name, "success", 0,
-                                f"{tool_name} (cached)", error_message=None
+                                f"{tool_name} (cached)", error_message=None,
+                                result=result
                             )
                     else:
                         # Execute tool
@@ -633,7 +622,12 @@ class OrchestrationService:
                             # Only 'error', 'failed', 'simulation_failed' are actual tool failures
                             result_status = result.get("status", "")
                             status = "error" if result_status in ["error", "failed", "simulation_failed"] else "success"
-                            summary = result.get("message", f"{tool_name} completed")
+                            # Build a meaningful string summary for SSE
+                            _msg = result.get("message")
+                            if isinstance(_msg, str):
+                                summary = _msg
+                            else:
+                                summary = f"{tool_name} completed"
                             error_msg = result.get("error") if status == "error" else None
                             # Ensure error_message is always a string, not a list or other type
                             if error_msg is not None and not isinstance(error_msg, str):
@@ -644,7 +638,8 @@ class OrchestrationService:
                                 status,
                                 tool_duration_ms,
                                 summary,
-                                error_message=error_msg
+                                error_message=error_msg,
+                                result=result
                             )
                     
                     # Update context
@@ -739,11 +734,12 @@ class OrchestrationService:
                     "status": "success" if tc.get("result", {}).get("status") != "error" else "error",
                     "duration_ms": tc.get("duration_ms"),
                     "summary": tc.get("result", {}).get("summary", str(tc.get("result", {}))[:100]),
-                    "arguments": tc.get("arguments")
+                    "arguments": tc.get("arguments"),
+                    "result": tc.get("result"),
                 }
                 for tc in all_tool_results
             ]
-            
+
             # Return success - agentic loop completed, Claude's message explains partial results
             return {
                 "status": "success",
@@ -855,12 +851,28 @@ class OrchestrationService:
             "- Prefer calc_chain_equipment for connecting individual equipment over building a full process template.",
             "",
             "EFFICIENCY RULES:",
-            "- Do NOT call the same tool with the same or similar arguments more than once per conversation turn.",
-            "- If you already got results from calc_list_processes, do NOT call it again — use the results you already have.",
-            "- Plan your tool calls: list → get → simulate → chain. Each step uses output from the previous.",
-            "- If a tool succeeds, move on to the next step immediately instead of re-querying.",
-            "- NEVER guess or invent a process_id. Always use an exact process_id returned by calc_list_processes. Process IDs are case-sensitive and may differ from human-readable names (e.g. 'BenzeneTolueneRecycleDB', not 'benzene-toluene-separation').",
-            "- If you are not sure of the exact process_id, call calc_list_processes first before attempting to simulate.",
+            "- Never call the same tool with the same arguments twice. Use results you already have.",
+            "- Plan tool calls: list → get → simulate → chain. Each step uses output from the previous.",
+            "- NEVER guess a process_id. Always use exact IDs from calc_list_processes (case-sensitive).",
+            "",
+            "POST-SIMULATION INTELLIGENCE:",
+            "Results may include a 'validation' field with structured flags. Each flag has: rule, message, severity, fix_hint, and optionally suggested_equipment.",
+            "If flags are present:",
+            "1. Present simulation results first (key outputs, mass balance).",
+            "2. Explain each flag in plain English — connect to real-world consequences (damage, cost, safety). Don't just repeat the message.",
+            "3. Group by severity: CRITICAL first, then WARNING, then INFO.",
+            "4. For CRITICAL: emphasize results may be unreliable.",
+            "5. If suggested_equipment is present, propose adding it and offer to re-simulate.",
+            "6. If no flags: confirm 'The simulation looks physically reasonable — no issues detected.'",
+            "",
+            "FLAG TYPES (how to present each):",
+            "- energy_balance_closure: Conservation error. Explain what energy is unaccounted for.",
+            "- heuristic_*: Optimization opportunity, not an error. Suggest improvements.",
+            "- sensitivity_near_*: Phase boundary proximity. Emphasize upset risk.",
+            "- heat_integration_opportunity: Energy recovery. Quantify savings in kW.",
+            "- economics_*: Technically valid but costly. Present as cost-saving opportunity.",
+            "- chain_*: Cross-equipment process-level issue. Explain the process cause, not just the symptom.",
+            "- operability_*: Startup/control/turndown issue. Explain operational consequence.",
         ]
 
         # ── Re-simulation directive block ──────────────────────────────────────
@@ -887,7 +899,7 @@ class OrchestrationService:
                         inline_parts.append(f'"equipment.{equip_id}.parameters.{param}": {val}')
                 for stream_id, props in feed_edits.items():
                     for prop, val in props.items():
-                        inline_parts.append(f'"feed_streams_override.{stream_id}.{prop}": {val}')
+                        inline_parts.append(f'"feed_streams.{stream_id}.{prop}": {val}')
                 overrides_hint = "{" + ", ".join(inline_parts) + "}" if inline_parts else "{}"
             else:
                 # process_server — single_equipment or process
@@ -918,7 +930,7 @@ class OrchestrationService:
                 )
             directive_lines += [
                 "- Do NOT ask the user for confirmation or additional input.",
-                "- After the tool returns, summarise the changes and new results in 2-3 sentences.",
+                "- After the tool returns, provide full analysis including results, validation flags, and recommendations — same as a normal simulation response.",
             ]
             system_parts.extend(directive_lines)
         # ── End re-simulation directive ────────────────────────────────────────
@@ -1276,11 +1288,14 @@ class OrchestrationService:
             context = await self.context_manager.get_context(conversation_id)
             current_run_ids = context.get("run_ids", []) if context else []
             
-            # Only add run_id if it's not None
+            # Only add run_id if it's not None and not already present
             if run_id:
-                updated_run_ids = [run_id] + current_run_ids
-                # Keep only last 10 run IDs
-                updated_run_ids = updated_run_ids[:10]
+                if run_id not in current_run_ids:
+                    updated_run_ids = [run_id] + current_run_ids
+                    # Keep only last 10 run IDs
+                    updated_run_ids = updated_run_ids[:10]
+                else:
+                    updated_run_ids = current_run_ids
             else:
                 updated_run_ids = current_run_ids
 
@@ -1590,42 +1605,6 @@ class OrchestrationService:
             }
     
     # =========================================================================
-    # Policy Enforcement
-    # =========================================================================
-    
-    async def _enforce_policy(
-        self,
-        tool_name: str,
-        context: Dict[str, Any],
-        params: Dict[str, Any]
-    ) -> Dict[str, Any]:
-        """
-        Check if tool execution is allowed by policy.
-        
-        Returns:
-            {
-                "decision": "allow" | "deny",
-                "reason": "...",
-                "metadata": {...}
-            }
-        """
-        # TEMPORARY: Skip policy enforcement for testing
-        # TODO: Re-enable after agentic loop is verified working
-        return {
-            "decision": "allow",
-            "reason": "Policy enforcement temporarily disabled",
-            "metadata": {}
-        }
-        
-        # Original policy enforcement (commented out)
-        # result = self.policy_engine.enforce_policy(tool_name, context, params)
-        # return {
-        #     "decision": result.decision.value,
-        #     "reason": result.reason,
-        #     "metadata": result.metadata
-        # }
-    
-    # =========================================================================
     # Formatting Helpers
     # =========================================================================
     
@@ -1636,16 +1615,6 @@ class OrchestrationService:
             tool_name = result["tool"]
             tool_result = result["result"]
             formatted.append(f"✓ {tool_name}: {json.dumps(tool_result, indent=2)}")
-        
-        return "\n".join(formatted)
-    
-    def _format_policy_violations_for_llm(self, violations: List[Dict[str, Any]]) -> str:
-        """Format policy violations for LLM feedback."""
-        formatted = []
-        for violation in violations:
-            tool_name = violation["tool"]
-            reason = violation["reason"]
-            formatted.append(f"✗ {tool_name}: {reason}")
         
         return "\n".join(formatted)
     
@@ -1680,45 +1649,9 @@ class OrchestrationService:
         
         return "\n".join(formatted)
     
-    def _format_policy_violation_message(
-        self,
-        violations: List[Dict[str, Any]]
-    ) -> str:
-        """Format policy violation message for user."""
-        if not violations:
-            return "Unable to process request."
-        
-        messages = ["I cannot execute the requested tools due to policy restrictions:"]
-        for violation in violations:
-            messages.append(f"- {violation['tool']}: {violation['reason']}")
-        
-        return "\n".join(messages)
-    
     # =========================================================================
     # Public API
     # =========================================================================
-    
-    async def get_policy_summary(self, conversation_id: str) -> Dict[str, Any]:
-        """
-        Get policy summary for current conversation.
-        
-        Useful for debugging and showing user their current state.
-        """
-        context = await self.context_manager.get_context(conversation_id)
-        
-        if not context:
-            return {
-                "status": "error",
-                "message": "Conversation not found"
-            }
-        
-        summary = self.policy_engine.get_policy_summary(context)
-        
-        return {
-            "status": "success",
-            "conversation_id": conversation_id,
-            "summary": summary
-        }
     
     async def reset_conversation(self, conversation_id: str) -> Dict[str, Any]:
         """
