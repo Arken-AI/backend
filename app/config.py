@@ -185,7 +185,7 @@ class Settings(BaseSettings):
         description="Directory path for storing generated PDF reports"
     )
     report_max_streams_per_table: int = Field(
-        default=10,
+        default=5,
         description="Maximum number of streams to display per table (splits if exceeded)"
     )
     report_llm_model: str = Field(

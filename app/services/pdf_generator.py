@@ -47,7 +47,6 @@ from app.models.report import (
     EquipmentTableData,
     MassBalanceSummary,
     EnergyBalanceSummary,
-    ReportSection,
 )
 from app.services.table_formatter import (
     StreamTableFormatter,
@@ -531,16 +530,25 @@ class PDFReportGenerator:
         
         # Format the stream data into a 2D table
         formatted_table = self.table_formatter.format_stream_table(stream_data)
-        
+
         # Split if necessary
         table_chunks = self.table_formatter.split_wide_table(formatted_table)
-        
+
+        # Style for wrapping header text in narrow columns
+        header_para_style = ParagraphStyle(
+            'TableHeader',
+            fontSize=8,
+            fontName='Helvetica-Bold',
+            alignment=TA_CENTER,
+            leading=10,
+        )
+
         for idx, chunk in enumerate(table_chunks):
             if len(table_chunks) > 1:
                 caption = f"Table {table_number}: Stream Data - Mass Flows (Part {idx + 1} of {len(table_chunks)})"
             else:
                 caption = f"Table {table_number}: Stream Data - Mass Flows"
-            
+
             # Calculate column widths
             num_cols = len(chunk[0]) if chunk else 0
             if num_cols > 0:
@@ -549,9 +557,17 @@ class PDFReportGenerator:
                 remaining_width = self.page_width - 2 * inch - first_col_width
                 other_col_width = remaining_width / (num_cols - 1) if num_cols > 1 else remaining_width
                 col_widths = [first_col_width] + [other_col_width] * (num_cols - 1)
+
+                # Wrap header cells in Paragraph objects for text wrapping
+                if chunk and len(chunk) > 0:
+                    header_row = chunk[0]
+                    wrapped_header = [header_row[0]]  # Keep "Property" as plain text
+                    for cell in header_row[1:]:
+                        wrapped_header.append(Paragraph(str(cell), header_para_style))
+                    chunk[0] = wrapped_header
             else:
                 col_widths = None
-            
+
             # Create table
             table = Table(chunk, colWidths=col_widths)
             table.setStyle(self._get_table_style(has_header=True))
@@ -607,25 +623,32 @@ class PDFReportGenerator:
         self,
         story: List,
         mass_balance: Optional[MassBalanceSummary],
-        energy_balance: Optional[EnergyBalanceSummary]
+        energy_balance: Optional[EnergyBalanceSummary],
+        section_number: int = 5
     ):
         """
         Add mass and energy balance summary section.
-        
+
         Args:
             story: List of flowables to append to
             mass_balance: MassBalanceSummary object (optional)
             energy_balance: EnergyBalanceSummary object (optional)
+            section_number: The parent section number for correct subsection numbering
         """
         # Mass Balance subsection
         if mass_balance:
-            self.add_subsection_header(story, "6.1", "Mass Balance")
+            self.add_subsection_header(story, f"{section_number}.1", "Mass Balance")
             
+            closure_display = (
+                f"{format_number(mass_balance.closure_percentage, 'efficiency')}%"
+                if mass_balance.closure_percentage is not None
+                else "N/A"
+            )
             balance_data = [
                 ["Property", "Value"],
                 ["Total Mass In", f"{format_with_thousands_separator(mass_balance.total_mass_in, 'mass_flow')} kg/hr"],
                 ["Total Mass Out", f"{format_with_thousands_separator(mass_balance.total_mass_out, 'mass_flow')} kg/hr"],
-                ["Closure", f"{format_number(mass_balance.closure_percentage, 'efficiency')}%"],
+                ["Closure", closure_display],
             ]
             
             table = Table(balance_data, colWidths=[2 * inch, 2.5 * inch])
@@ -635,7 +658,7 @@ class PDFReportGenerator:
         
         # Energy Balance subsection
         if energy_balance:
-            self.add_subsection_header(story, "6.2", "Energy Balance")
+            self.add_subsection_header(story, f"{section_number}.2", "Energy Balance")
             
             balance_data = [
                 ["Property", "Value"],
@@ -740,8 +763,8 @@ class PDFReportGenerator:
         sections_config = []
         section_number = 1
         
-        # Executive Summary
-        if report_data.executive_summary:
+        # Executive Summary (include section if content exists OR if AI was requested but unavailable)
+        if report_data.executive_summary or report_data.ai_narratives_requested:
             sections_config.append({
                 "id": "executive_summary",
                 "number": section_number,
@@ -784,8 +807,8 @@ class PDFReportGenerator:
             })
             section_number += 1
         
-        # Observations
-        if report_data.observations:
+        # Observations (include section if content exists OR if AI was requested but unavailable)
+        if report_data.observations or report_data.ai_narratives_requested:
             sections_config.append({
                 "id": "observations",
                 "number": section_number,
@@ -825,11 +848,17 @@ class PDFReportGenerator:
         current_section = 1
         
         # Executive Summary
-        if report_data.executive_summary:
+        if report_data.executive_summary or report_data.ai_narratives_requested:
             # Add section marker for page tracking
             story.append(SectionMarker("executive_summary", page_tracker if is_first_pass else None))
             self.add_section_header(story, str(current_section), "Executive Summary")
-            self.add_paragraph(story, report_data.executive_summary)
+            if report_data.executive_summary:
+                self.add_paragraph(story, report_data.executive_summary)
+            else:
+                story.append(Paragraph(
+                    "<i>AI-generated content unavailable</i>",
+                    self.styles['body']
+                ))
             story.append(PageBreak())
             current_section += 1
         
@@ -860,15 +889,21 @@ class PDFReportGenerator:
         if report_data.mass_balance or report_data.energy_balance:
             story.append(SectionMarker("balance", page_tracker if is_first_pass else None))
             self.add_section_header(story, str(current_section), "Mass & Energy Balance")
-            self.add_balance_summary(story, report_data.mass_balance, report_data.energy_balance)
+            self.add_balance_summary(story, report_data.mass_balance, report_data.energy_balance, section_number=current_section)
             story.append(PageBreak())
             current_section += 1
         
         # Observations & Conclusions
-        if report_data.observations:
+        if report_data.observations or report_data.ai_narratives_requested:
             story.append(SectionMarker("observations", page_tracker if is_first_pass else None))
             self.add_section_header(story, str(current_section), "Observations & Conclusions")
-            self.add_paragraph(story, report_data.observations)
+            if report_data.observations:
+                self.add_paragraph(story, report_data.observations)
+            else:
+                story.append(Paragraph(
+                    "<i>AI-generated content unavailable</i>",
+                    self.styles['body']
+                ))
         
         # Build the PDF
         doc.build(story)
