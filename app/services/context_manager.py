@@ -176,6 +176,121 @@ class ContextManager:
         await self._save_to_redis(conversation_id, context)
         await self._save_to_mongo_async(conversation_id, context)
     
+    async def update_simulation_summary(
+        self,
+        conversation_id: str,
+        tool_name: str,
+        result: Dict[str, Any],
+        params: Dict[str, Any]
+    ) -> None:
+        """
+        Extract and store a condensed simulation summary from a tool result.
+
+        This populates ``last_simulation_summary`` in the context so that the
+        LLM can compare successive runs without an extra ``get_run`` call.
+
+        Handles both process-server results (top-level dict) and calc-engine
+        results (nested under ``results``).
+        """
+        try:
+            status = result.get("status", "unknown")
+            sim_status = result.get("simulation_status", status)
+            run_id = result.get("calc_run_id") or result.get("run_id")
+            process_id = result.get("process_id") or params.get("process_id")
+
+            # ── Determine the payload that contains actual outputs ───────
+            # Calc-engine wraps outputs under result["results"];
+            # process-server returns them at the top level.
+            outputs = result.get("results") or result
+
+            # ── Extract KPIs ─────────────────────────────────────────────
+            # Try common locations; each server stores them differently.
+            kpis = {}
+
+            # 1. Explicit "kpis" / "summary_kpis" block
+            if isinstance(outputs.get("kpis"), dict):
+                kpis = outputs["kpis"]
+            elif isinstance(outputs.get("summary_kpis"), dict):
+                kpis = outputs["summary_kpis"]
+
+            # 2. Walk node_results to collect per-equipment KPIs
+            node_results = outputs.get("node_results")
+            if isinstance(node_results, dict):
+                equip_kpis = []
+                for eq_id, eq_data in node_results.items():
+                    if not isinstance(eq_data, dict):
+                        continue
+                    entry = {"equipment_id": eq_id}
+                    for field in ("duty", "duty_kW", "efficiency", "separation_quality",
+                                  "equipment_type", "type"):
+                        if field in eq_data:
+                            entry[field] = eq_data[field]
+                    if len(entry) > 1:          # has at least one KPI
+                        equip_kpis.append(entry)
+                if equip_kpis:
+                    kpis["equipment_kpis"] = equip_kpis[:8]  # limit for token efficiency
+
+            # 3. Top-level sugar-industry metrics
+            for metric in ("overall_recovery", "extraction_efficiency",
+                           "juice_extraction_efficiency", "throughput_tcd",
+                           "energy_consumption_gj_per_ton", "pol_in_bagasse",
+                           "fibre_percent", "mixed_juice_brix", "mixed_juice_purity"):
+                if metric in outputs and metric not in kpis:
+                    kpis[metric] = outputs[metric]
+
+            # ── Mass / energy balance closures ───────────────────────────
+            mass_balance = (
+                outputs.get("mass_balance_closure")
+                or outputs.get("mass_balance", {}).get("closure")
+            )
+            energy_balance = (
+                outputs.get("energy_balance_closure")
+                or outputs.get("energy_balance", {}).get("closure")
+            )
+
+            # ── Convergence info ─────────────────────────────────────────
+            converged = sim_status not in ("not_converged", "error", "failed",
+                                           "simulation_failed")
+
+            # ── Validation flag counts ───────────────────────────────────
+            flag_counts = {"critical": 0, "warning": 0, "info": 0}
+            validation = result.get("validation")
+            if isinstance(validation, dict):
+                for flags in validation.values():
+                    if isinstance(flags, list):
+                        for f in flags:
+                            sev = (f.get("severity") or "").lower()
+                            if sev in flag_counts:
+                                flag_counts[sev] += 1
+            elif isinstance(validation, list):
+                for f in validation:
+                    sev = (f.get("severity") or "").lower()
+                    if sev in flag_counts:
+                        flag_counts[sev] += 1
+
+            summary = {
+                "run_id": run_id,
+                "process_id": process_id,
+                "tool": tool_name,
+                "converged": converged,
+                "simulation_status": sim_status,
+                "kpis": kpis if kpis else None,
+                "mass_balance_closure": mass_balance,
+                "energy_balance_closure": energy_balance,
+                "validation_flag_count": flag_counts,
+                "execution_time_ms": result.get("execution_time_ms"),
+                "timestamp": datetime.utcnow().isoformat(),
+            }
+
+            await self.update_context(
+                conversation_id,
+                {"last_simulation_summary": summary}
+            )
+        except Exception:
+            # Never let summary extraction break the main flow
+            import traceback as _tb
+            _tb.print_exc()
+
     async def update_mcp_server(
         self,
         conversation_id: str,
