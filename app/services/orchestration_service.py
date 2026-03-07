@@ -80,6 +80,10 @@ TOOLS_REQUIRING_USER_ID = {
     "calc_get_process",  # Optional: merges user's active version
     "calc_simulate_process",  # Required
     "calc_get_run", "calc_list_runs",  # Required for run tracking
+    # Calc Engine Phase 5 tools (equipment chaining)
+    "calc_chain_equipment",  # Required: user_id needed for run tracking and saving
+    # Calc Engine Phase 6 tools (post-simulation intelligence)
+    "calc_analyze_parameter_impact",  # Required: user_id needed to load process template overrides
     # Calc Engine Phase 2 tools (parameter versioning)
     "get_editable_parameters",  # Required
     "validate_parameters",  # Uses user overrides for validation context
@@ -550,6 +554,24 @@ class OrchestrationService:
                 # Execute tools and collect results
                 iteration_tool_results = []
                 
+                # ── POLICY GATE: Impact-before-simulate ──────────────
+                # If the LLM tries to call calc_analyze_parameter_impact
+                # AND calc_simulate_process in the same turn, block the
+                # simulate. The user must see impact results and choose
+                # Option A/B before simulation runs.
+                tool_names_this_turn = set()
+                for tc in tool_calls_list:
+                    if isinstance(tc, dict):
+                        tool_names_this_turn.add(tc.get("name", ""))
+                    else:
+                        tool_names_this_turn.add(getattr(tc, "name", ""))
+                
+                impact_and_simulate_same_turn = (
+                    "calc_analyze_parameter_impact" in tool_names_this_turn
+                    and "calc_simulate_process" in tool_names_this_turn
+                )
+                # ─────────────────────────────────────────────────────
+                
                 for tool_call in tool_calls_list:
                     # Safety check: don't exceed tool call limit
                     total_tool_calls += 1
@@ -570,6 +592,32 @@ class OrchestrationService:
                     else:
                         tool_name = tool_call.name
                         tool_params = tool_call.input if hasattr(tool_call, 'input') else tool_call.arguments
+                    
+                    # ── POLICY GATE: Block simulate if impact analysis is in same turn ──
+                    # The user must see the downstream impact and choose before simulating.
+                    if impact_and_simulate_same_turn and tool_name == "calc_simulate_process":
+                        gate_result = {
+                            "status": "blocked",
+                            "error": (
+                                "POLICY: calc_simulate_process was blocked because calc_analyze_parameter_impact "
+                                "was called in the same turn. You MUST present the impact analysis results to the "
+                                "user first and wait for their choice (Option A or Option B) before simulating. "
+                                "Do NOT call calc_simulate_process until the user responds."
+                            ),
+                        }
+                        iteration_tool_results.append({
+                            "name": tool_name,
+                            "result": gate_result
+                        })
+                        all_tool_results.append({
+                            "name": tool_name,
+                            "tool": tool_name,
+                            "arguments": tool_params,
+                            "result": gate_result,
+                            "duration_ms": 0,
+                            "status": "blocked"
+                        })
+                        continue
                     
                     # ── Duplicate call detection ─────────────────────────
                     # Build a stable cache key from tool name + sorted params.
@@ -607,7 +655,7 @@ class OrchestrationService:
                                 tool_name,
                                 tool_params
                             )
-                        
+
                         tool_start_time = datetime.now()
                         result = await self._execute_tool(tool_name, tool_params, conversation_id, context)
                         tool_duration_ms = int((datetime.now() - tool_start_time).total_seconds() * 1000)
@@ -615,7 +663,7 @@ class OrchestrationService:
                         # Store in cache for cacheable tools on success
                         if _cache_key and tool_name in _CACHEABLE_TOOLS and result.get("status") != "error":
                             tool_result_cache[_cache_key] = {"result": result}
-                    
+
                         # Emit tool end (only for non-cached — cached already emitted above)
                         if self.event_emitter:
                             # Treat 'not_converged' as success - simulation ran, just didn't converge
@@ -649,7 +697,7 @@ class OrchestrationService:
                         result,
                         tool_params
                     )
-                    
+
                     # Reload context for next tool call
                     context = await self.context_manager.get_context(conversation_id)
                     
@@ -829,50 +877,94 @@ class OrchestrationService:
 
         # Build minimal system prompt - let Claude learn from tool descriptions and errors
         system_parts = [
-            "You are a process simulation assistant with access to tools for industrial process simulation.",
-            "Use the available tools to help users. If a tool fails, read the error message to understand what went wrong.",
-            "If you need more information from the user to proceed, ask them directly.",
-            "When a simulation tool returns a result_link field, include it exactly as-is in your response so the user can click it. Do NOT modify or reconstruct the link.",
+            # ── ROLE ──
+            "You are a senior process engineer assistant specialising in distillation, evaporation, heat exchange, pumping, flash separation, and sugar/ethanol processing.",
+            "You think before you simulate. Never fabricate thermodynamic data, experiment results, or equipment specs — use tools to retrieve real values.",
+            "When a tool fails, read the error and adapt. Ask the user when you need information.",
+            "When a tool returns a result_link, include it exactly as-is in your response.",
             "",
-            "SINGLE-EQUIPMENT SIMULATION:",
-            "- Use calc_list_processes with template_type='single_equipment' to find standalone equipment templates.",
-            "- Single-equipment templates use generic compound placeholders (compound_1, compound_2, etc.).",
-            "- When you see generic compounds in a template, ask the user which real compounds to use.",
-            "- Pass the compound_mapping parameter (e.g., {\"compound_1\": \"ethanol\", \"compound_2\": \"water\"}) when simulating.",
-            "- If the user asks to simulate a single piece of equipment (e.g., 'simulate a distillation column'), search for single-equipment templates first.",
+            # ── SERVER ROUTING ──
+            "SERVER ROUTING:",
+            "- calc_* tools → Calculation Engine (generic flowsheets, single-equipment, chaining).",
+            "- Tools without prefix → Process Server (sugar industry, fixed templates).",
             "",
-            "EQUIPMENT CHAINING:",
-            "- Use calc_chain_equipment to feed the output of one simulation into another piece of equipment.",
-            "- The user may say things like 'feed the heater output to a distillation column' — use chaining for this.",
-            "- When chaining, you need: source_run_id, source_equipment_id, source_port, and target_process_id.",
-            "- For multi-outlet equipment (e.g., flash drum with vapor_outlet and liquid_outlet), ask the user which outlet to use.",
-            "- If a connection is invalid (phase mismatch, zero flow, etc.), relay the error and suggestion to the user clearly.",
-            "- Suggest intermediate equipment when connections are blocked (e.g., 'add a condenser between flash drum vapor and pump').",
-            "- Prefer calc_chain_equipment for connecting individual equipment over building a full process template.",
+            # ── TOOL USAGE ──
+            "TOOL USAGE:",
+            "- Never guess a process_id. Use exact IDs from calc_list_processes (case-sensitive).",
+            "- Never call the same tool with the same arguments twice.",
+            "- Before suggesting parameter values, call calc_get_editable_params to check valid min/max ranges.",
+            "- Parameter paths in calc_simulate_process use the EXACT equipment ID: 'equipment.distillation_column.parameters.reflux_ratio', NOT 'equipment.column.parameters.reflux_ratio'. Get IDs from calc_get_process.",
+            "- Single-equipment templates use generic compound placeholders — ask the user for real compounds and pass compound_mapping.",
+            "- For chaining, use calc_chain_equipment with source_run_id, source_equipment_id, source_port, target_process_id.",
+            "- For multi-outlet equipment, ask the user which outlet to use. Suggest intermediate equipment when connections are blocked.",
+            "- If the user's first message is open-ended (e.g., 'what can you do?'), list the available process templates using calc_list_processes and list_processes.",
             "",
-            "EFFICIENCY RULES:",
-            "- Never call the same tool with the same arguments twice. Use results you already have.",
-            "- Plan tool calls: list → get → simulate → chain. Each step uses output from the previous.",
-            "- NEVER guess a process_id. Always use exact IDs from calc_list_processes (case-sensitive).",
+            # ── NEW SIMULATION SEQUENCE ──
+            "NEW SIMULATION SEQUENCE:",
+            "Calc Engine: calc_list_processes → calc_get_process → (optional: calc_get_editable_params) → calc_simulate_process. Each step uses IDs from the previous.",
+            "Process Server: list_industries → list_processes → get_process → simulate_process. Each step uses IDs from the previous.",
             "",
-            "POST-SIMULATION INTELLIGENCE:",
-            "Results may include a 'validation' field with structured flags. Each flag has: rule, message, severity, fix_hint, and optionally suggested_equipment.",
-            "If flags are present:",
-            "1. Present simulation results first (key outputs, mass balance).",
-            "2. Explain each flag in plain English — connect to real-world consequences (damage, cost, safety). Don't just repeat the message.",
-            "3. Group by severity: CRITICAL first, then WARNING, then INFO.",
-            "4. For CRITICAL: emphasize results may be unreliable.",
-            "5. If suggested_equipment is present, propose adding it and offer to re-simulate.",
-            "6. If no flags: confirm 'The simulation looks physically reasonable — no issues detected.'",
+            # ── PARAMETER CHANGE WORKFLOW (the one and only workflow) ──
+            "PARAMETER CHANGE WORKFLOW:",
+            "When a user changes any equipment parameter, follow these three steps across SEPARATE turns. No exceptions.",
             "",
-            "FLAG TYPES (how to present each):",
-            "- energy_balance_closure: Conservation error. Explain what energy is unaccounted for.",
-            "- heuristic_*: Optimization opportunity, not an error. Suggest improvements.",
-            "- sensitivity_near_*: Phase boundary proximity. Emphasize upset risk.",
-            "- heat_integration_opportunity: Energy recovery. Quantify savings in kW.",
-            "- economics_*: Technically valid but costly. Present as cost-saving opportunity.",
-            "- chain_*: Cross-equipment process-level issue. Explain the process cause, not just the symptom.",
-            "- operability_*: Startup/control/turndown issue. Explain operational consequence.",
+            "Step 1 — ANALYZE (turn 1 — tool calls only):",
+            "  Call calc_analyze_parameter_impact ONCE PER changed parameter.",
+            "  Each call takes ONE equipment_id (exact ID from the template, e.g. 'distillation_column' not 'column') and ONE parameter name (bare name, not a dot-path).",
+            "  Example: calc_analyze_parameter_impact(process_id=\"benzenetoluenerecycledb\", equipment_id=\"distillation_column\", parameter=\"num_stages\")",
+            "  This is always the first tool call. Even if the user says 'just run it'.",
+            "  CRITICAL: Do NOT call calc_simulate_process in the same turn as calc_analyze_parameter_impact.",
+            "  The backend will block it if you try.",
+            "",
+            "Step 2 — REASON AND PRESENT (turn 1 — text response, NO tool calls):",
+            "  After receiving impact results, STOP calling tools and respond to the user with:",
+            "  - Which downstream equipment will be affected and how.",
+            "  - Co-dependent parameters that may need adjustment, with suggested values.",
+            "  - Risks from the ENGINEERING CHECKLIST below.",
+            "  - Two options:",
+            "    Option A: Simulate with only the user's change.",
+            "    Option B: Simulate with the user's change plus your suggested adjustments.",
+            "  Wait for the user to choose. If user said 'just run it', present the analysis and use Option A.",
+            "",
+            "Step 3 — SIMULATE (turn 2 — after user responds):",
+            "  Only after the user picks Option A or B, call calc_simulate_process once with all agreed changes combined.",
+            "",
+            # ── ERROR RECOVERY ──
+            "ERROR RECOVERY:",
+            "When a tool returns an error, use these recovery actions:",
+            "- 'Process not found' or 'Target process template not found' → call calc_list_processes to get valid IDs.",
+            "- 'Invalid parameter path(s)' → call calc_get_editable_params for the correct parameter names and paths.",
+            "- 'Source run not found' → call calc_list_runs to find valid run IDs.",
+            "- 'Convergence failed' / 'not_converged' → report which equipment failed, suggest smaller parameter steps, offer to re-simulate.",
+            "- Any other error → report it to the user in plain English and suggest an alternative approach.",
+            "",
+            # ── ENGINEERING CHECKLIST (concise, not a textbook) ──
+            "ENGINEERING CHECKLIST (apply during Step 2):",
+            "When reasoning about a parameter change, check each of these. Flag any that apply:",
+            "□ [CRITICAL] PHASE BOUNDARIES: Could T/P change cross a bubble/dew point? Warn about downstream phase mismatch.",
+            "□ [CRITICAL] PARAMETER LIMITS: Verify suggested values are within min/max from calc_get_editable_params.",
+            "□ [WARNING] SAME-EQUIPMENT COUPLING: distillation (num_stages ↔ reflux_ratio ↔ feed_stage), heat_exchanger (T ↔ UA ↔ area), evaporator (effects ↔ steam_pressure), pump (ΔP ↔ efficiency).",
+            "□ [WARNING] OPERABILITY: Distillation <30% load → weeping. Pump <20% flow → damage. Flash <15% → level instability. High reflux + high feed → flooding.",
+            "□ [INFO] CAPEX vs OPEX: More stages = less reflux (save energy, cost column). More effects = better steam economy. Mention the trade-off.",
+            "□ [INFO] RECYCLE LOOPS: Small changes amplify. Suggest incremental steps. Recommend splitting large changes if convergence fails.",
+            "",
+            # ── POST-SIMULATION RESPONSE FORMAT ──
+            "POST-SIMULATION RESPONSE FORMAT:",
+            "After any simulation, structure your response as:",
+            "1. KEY RESULTS: Primary KPIs, mass/energy balance.",
+            "2. COMPARISON: If a parent run exists, quantify what changed (e.g., 'purity dropped from 99.5% to 94.2%'). Use compare_parameters or compare_process_runs tools.",
+            "3. VALIDATION FLAGS: Group by severity (CRITICAL → WARNING → INFO).",
+            "   - Explain each flag in plain English with real-world consequences.",
+            "   - For quick_fix fields: present as a concrete action the user can approve.",
+            "   - For fix_hint fields: propose a specific parameter change.",
+            "   - For suggested_equipment: offer to add it and re-simulate.",
+            "   - Flag types: energy_balance_closure (conservation error), heuristic_* (optimization opportunity),",
+            "     sensitivity_near_* (phase boundary risk), heat_integration_opportunity (quantify kW savings),",
+            "     economics_* (cost opportunity), chain_* (cross-equipment issue), operability_* (control/turndown).",
+            "   - No flags? Say: 'Simulation looks physically reasonable — no issues detected.'",
+            "4. SUGGESTIONS: Identify suboptimal co-dependent parameters, suggest specific values, offer to re-simulate.",
+            "",
+            "NON-CONVERGENCE: Report which equipment failed and which converged. Show residuals. Suggest targeted parameter adjustments for the failing equipment.",
         ]
 
         # ── Re-simulation directive block ──────────────────────────────────────
@@ -906,32 +998,51 @@ class OrchestrationService:
                 tool_hint = "simulate_equipment" if template_type == "single_equipment" else "simulate_process"
                 overrides_hint = str({"node_params": eq_edits, "feeds": feed_edits})
 
+            # Build the list of equipment IDs and parameters being changed
+            # for the dependency analysis directive
+            changed_params_info = []
+            for equip_id, params in eq_edits.items():
+                for param_name, param_val in params.items():
+                    changed_params_info.append({
+                        "equipment_id": equip_id,
+                        "parameter": param_name,
+                        "new_value": param_val
+                    })
+
             directive_lines = [
                 "",
-                "RE-SIMULATION REQUEST (respond with tool call ONLY — no questions):",
-                f"- This is a parameter update re-simulation. Parent run: {parent_run_id}",
+                "RE-SIMULATION REQUEST (from UI parameter edit):",
+                f"- Parent run: {parent_run_id}",
                 f"- Source: {source} | Process: {process_id} | Template: {template_type}",
-                f"- Call tool: {tool_hint}",
-                f"- Use process_id: \"{process_id}\"",
-                f"- Apply these parameter overrides: {overrides_hint}",
+                f"- Parameters changed: {changed_params_info}",
+                f"- Simulation tool: {tool_hint}",
+                f"- process_id: \"{process_id}\"",
+                f"- Parameter overrides: {overrides_hint}",
             ]
             if compound_map:
-                # Explicit mapping provided — pass it through verbatim
-                directive_lines.append(f"- REQUIRED compound_mapping: {compound_map}")
+                directive_lines.append(f"- compound_mapping: {compound_map}")
             elif template_type == "single_equipment" and source == "calc_engine":
-                # Single-equipment template but no mapping supplied.
-                # The template likely uses generic compounds; tell the LLM
-                # to reuse whatever mapping the original run used.
                 directive_lines.append(
-                    "- This is a single-equipment template that uses generic compound "
-                    "placeholders. You MUST include the same compound_mapping that was "
-                    "used in the parent run. Retrieve it from the parent run if needed "
-                    f"(parent_run_id: {parent_run_id})."
+                    f"- Single-equipment template — reuse compound_mapping from parent run ({parent_run_id})."
                 )
-            directive_lines += [
-                "- Do NOT ask the user for confirmation or additional input.",
-                "- After the tool returns, provide full analysis including results, validation flags, and recommendations — same as a normal simulation response.",
-            ]
+
+            if changed_params_info and source == "calc_engine":
+                # Tell LLM to follow the PARAMETER CHANGE WORKFLOW with specific tool args
+                directive_lines.append("")
+                directive_lines.append("Follow the PARAMETER CHANGE WORKFLOW above. Specific tool calls for Step 1:")
+                for cp in changed_params_info:
+                    directive_lines.append(
+                        f"  - calc_analyze_parameter_impact(process_id=\"{process_id}\", "
+                        f"equipment_id=\"{cp['equipment_id']}\", parameter=\"{cp['parameter']}\")"
+                    )
+                directive_lines.append(f"For Step 3, use {tool_hint} with process_id=\"{process_id}\".")
+                directive_lines.append(f"After simulation, compare results against parent run {parent_run_id}.")
+            else:
+                # Process server — no dependency analysis, just simulate
+                directive_lines.append("")
+                directive_lines.append(f"Call {tool_hint} with the parameter overrides above. Do not ask for confirmation.")
+                directive_lines.append("After simulation, use POST-SIMULATION RESPONSE FORMAT above.")
+
             system_parts.extend(directive_lines)
         # ── End re-simulation directive ────────────────────────────────────────
         
@@ -958,7 +1069,47 @@ class OrchestrationService:
         run_ids = context.get("run_ids", [])
         if run_ids:
             system_parts.append(f"\n{len(run_ids)} previous simulation(s) available in this conversation.")
-        
+
+        # ── Inject last simulation summary (Step 1 intelligence) ────────
+        # Gives the LLM memory of the most recent run's KPIs so it can
+        # answer follow-up questions and compare without calling get_run.
+        sim_summary = context.get("last_simulation_summary")
+        if sim_summary and isinstance(sim_summary, dict):
+            summary_lines = ["\nLAST SIMULATION SUMMARY (use for comparison and follow-ups):"]
+            summary_lines.append(f"  Run ID: {sim_summary.get('run_id', 'N/A')}")
+            summary_lines.append(f"  Process: {sim_summary.get('process_id', 'N/A')}")
+            summary_lines.append(f"  Status: {'converged' if sim_summary.get('converged') else sim_summary.get('simulation_status', 'unknown')}")
+
+            kpis = sim_summary.get("kpis")
+            if kpis and isinstance(kpis, dict):
+                # Show scalar KPIs first
+                scalar_kpis = {k: v for k, v in kpis.items() if not isinstance(v, (dict, list))}
+                if scalar_kpis:
+                    kpi_str = ", ".join(f"{k}={v}" for k, v in scalar_kpis.items())
+                    summary_lines.append(f"  KPIs: {kpi_str}")
+                # Show per-equipment KPIs if present
+                equip_kpis = kpis.get("equipment_kpis")
+                if equip_kpis and isinstance(equip_kpis, list):
+                    for ek in equip_kpis[:5]:  # limit to top 5
+                        parts = [f"{k}={v}" for k, v in ek.items() if k != "equipment_id"]
+                        summary_lines.append(f"    {ek.get('equipment_id', '?')}: {', '.join(parts)}")
+
+            mb = sim_summary.get("mass_balance_closure")
+            if mb is not None:
+                summary_lines.append(f"  Mass balance closure: {mb}")
+            eb = sim_summary.get("energy_balance_closure")
+            if eb is not None:
+                summary_lines.append(f"  Energy balance closure: {eb}")
+
+            flags = sim_summary.get("validation_flag_count", {})
+            if any(v > 0 for v in flags.values()):
+                flag_str = ", ".join(f"{k}: {v}" for k, v in flags.items() if v > 0)
+                summary_lines.append(f"  Validation flags: {flag_str}")
+
+            summary_lines.append(f"  Timestamp: {sim_summary.get('timestamp', 'N/A')}")
+            summary_lines.append("Use this summary to compare with new simulation results. Highlight improvements and regressions in KPIs.")
+            system_parts.append("\n".join(summary_lines))
+
         system = "\n".join(system_parts)
         
         # Optimize conversation history using sliding window
@@ -1280,7 +1431,7 @@ class OrchestrationService:
             )
         
         # Update simulation params if this was a simulation
-        if tool_name in ["simulate_process", "simulate_equipment", "calc_simulate_process"]:
+        if tool_name in ["simulate_process", "simulate_equipment", "calc_simulate_process", "calc_chain_equipment"]:
             # Extract run_id - could be 'calc_run_id' or 'run_id' depending on the tool
             run_id = result.get("calc_run_id") or result.get("run_id")
             
@@ -1336,6 +1487,14 @@ class OrchestrationService:
                     "run_ids": updated_run_ids,
                     "confirmed_process_ids": confirmed_process_ids,
                 }
+            )
+
+            # ── Populate last_simulation_summary (Step 1 intelligence) ──
+            # Gives the LLM memory of the most recent simulation's KPIs,
+            # convergence status, and validation flags so it can compare
+            # across turns without a separate get_run call.
+            await self.context_manager.update_simulation_summary(
+                conversation_id, tool_name, result, params
             )
         
         # Capture confirmed process_ids from discovery tools so the LLM can
