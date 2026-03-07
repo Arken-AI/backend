@@ -351,11 +351,6 @@ def get_settings() -> Settings:
             return {"status": "ok", "environment": settings.environment}
     """
     return settings
-    ENVIRONMENT: str = "development"
-    
-    class Config:
-        env_file = ".env"
-        case_sensitive = True
 
 
 # Global settings instance

@@ -348,7 +348,7 @@ class ReportGeneratorService:
                 "Saving PDF file"
             )
             
-            filename = self._generate_filename(report_id, run_data.process_name)
+            filename = self._generate_filename(report_id, formatted_process_name)
             file_path = await self._save_pdf_to_storage(pdf_bytes, filename)
             
             # ========================================

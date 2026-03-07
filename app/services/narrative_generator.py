@@ -16,15 +16,16 @@ Usage:
         # Section will be skipped in PDF
         pass
     
-    # Generate all equipment descriptions
-    descriptions = await service.generate_all_equipment_descriptions(equipment_data)
+    # Generate observations
+    observations = await service.generate_observations(simulation_data, ...)
 """
 
 import logging
-from typing import Optional, Dict, Any, List
-from anthropic import Anthropic, APIError, APIConnectionError, RateLimitError
+from typing import Optional
+from anthropic import AsyncAnthropic, APIError, APIConnectionError, RateLimitError
 
 from app.config import settings
+from app.services.report_data_collector import format_display_name
 from app.models.report import (
     SimulationRunData,
     StreamTableData,
@@ -42,8 +43,6 @@ class NarrativeGeneratorService:
 
     Uses direct Anthropic API calls (NOT MCP) to generate:
     - Executive summary
-    - Process descriptions
-    - Equipment descriptions
     - Observations and recommendations
 
     All methods return Optional[str] - None indicates failure and the section
@@ -110,50 +109,6 @@ Write a professional executive summary that:
 4. Summarizes mass and energy balance results with specific numbers
 5. Notes the overall process efficiency and any significant findings"""
 
-    PROCESS_DESCRIPTION_PROMPT = """Write a technical process description (2-3 paragraphs) for the following process.
-
-=== PROCESS OVERVIEW ===
-Process: {process_name}
-Industry: {industry}
-
-=== EQUIPMENT LIST ===
-{equipment_list}
-
-=== STREAM CONNECTIONS ===
-{stream_connections}
-
-=== OPERATING CONDITIONS ===
-{operating_conditions}
-
-Write a clear technical description that:
-1. Explains the purpose of this process section
-2. Describes how material flows through the equipment
-3. Notes key operating parameters
-4. Mentions any recycle streams or integrations"""
-
-    EQUIPMENT_DESCRIPTION_PROMPT = """Write a brief technical description (2-3 sentences) for this equipment unit.
-
-Equipment: {equipment_name}
-Type: {equipment_type}
-Industry: {industry}
-
-Inlet Streams:
-{inlet_streams}
-
-Outlet Streams:
-{outlet_streams}
-
-Operating Parameters:
-{parameters}
-
-Performance Metrics:
-{performance}
-
-Write a concise description that captures:
-1. The equipment's function in the process
-2. Key operating conditions
-3. Notable performance metrics"""
-
     OBSERVATIONS_PROMPT = """Generate detailed observations and recommendations based on the complete simulation data.
 
 === SIMULATION OVERVIEW ===
@@ -191,7 +146,7 @@ Write each observation as a separate paragraph. Be specific and actionable."""
 
     def __init__(self):
         """Initialize the narrative generator service."""
-        self._client: Optional[Anthropic] = None
+        self._client: Optional[AsyncAnthropic] = None
         self._model = settings.report_llm_model
         self._max_tokens = settings.report_llm_max_tokens
         
@@ -203,10 +158,10 @@ Write each observation as a separate paragraph. Be specific and actionable."""
             )
     
     @property
-    def client(self) -> Optional[Anthropic]:
+    def client(self) -> Optional[AsyncAnthropic]:
         """Lazy-load the Anthropic client."""
         if self._client is None and settings.anthropic_api_key:
-            self._client = Anthropic(api_key=settings.anthropic_api_key)
+            self._client = AsyncAnthropic(api_key=settings.anthropic_api_key)
         return self._client
     
     @property
@@ -247,12 +202,12 @@ Write each observation as a separate paragraph. Be specific and actionable."""
             # Build the message request
             messages = [{"role": "user", "content": prompt}]
             
-            # Call the API (synchronous, but we wrap in async context)
-            response = self.client.messages.create(
+            # Call the API asynchronously
+            response = await self.client.messages.create(
                 model=self._model,
                 max_tokens=self._max_tokens,
                 temperature=temperature,
-                system=system_message or "You are a professional technical writer for process engineering reports.",
+                system=system_message or self.SYSTEM_PROMPT,
                 messages=messages,
             )
             
@@ -461,35 +416,40 @@ Stream {i}: {display_name} ({stream_type})
         # Get mass balance values
         mass_in = mass_balance.total_mass_in if mass_balance else 0
         mass_out = mass_balance.total_mass_out if mass_balance else 0
-        mass_closure = mass_balance.closure_percentage if mass_balance else 100
-        
+        mass_closure = (mass_balance.closure_percentage if mass_balance and mass_balance.closure_percentage is not None else 100.0)
+
         # Determine mass balance status
-        closure_error = abs(100.0 - mass_closure)
-        if closure_error < 0.01:
-            mass_status = "Excellent - Perfect closure"
-        elif closure_error < 0.1:
-            mass_status = "Good - Minor imbalance"
-        elif closure_error < 1.0:
-            mass_status = "Acceptable - Small imbalance"
+        if mass_balance and mass_balance.closure_percentage is None:
+            mass_status = "Unable to calculate - streams could not be categorized as inlet/outlet"
         else:
-            mass_status = f"Warning - {closure_error:.2f}% imbalance"
-        
+            closure_error = abs(100.0 - mass_closure)
+            if closure_error < 0.01:
+                mass_status = "Excellent - Perfect closure"
+            elif closure_error < 0.1:
+                mass_status = "Good - Minor imbalance"
+            elif closure_error < 1.0:
+                mass_status = "Acceptable - Small imbalance"
+            else:
+                mass_status = f"Warning - {closure_error:.2f}% imbalance"
+
         # Get energy balance values
         heat_in = energy_balance.total_heat_input if energy_balance else 0
         heat_out = energy_balance.total_heat_output if energy_balance else 0
         net_heat = heat_in - heat_out
-        
+
         # Determine energy balance status
         if heat_in > 0 or heat_out > 0:
             energy_status = f"Heat duty: {abs(net_heat):.1f} kW net {'input' if net_heat > 0 else 'removal'}"
         else:
             energy_status = "No significant heat duties"
-        
+
         # Format the prompt with full data
+        formatted_name = format_display_name(run_data.process_name) if run_data.process_name else "Simulation"
+
         prompt = self.EXECUTIVE_SUMMARY_PROMPT.format(
             run_id=run_data.run_id,
             industry=run_data.industry or "Chemical Process",
-            process_name=run_data.process_name or "Simulation",
+            process_name=formatted_name,
             timestamp=run_data.timestamp.isoformat() if run_data.timestamp else "Unknown",
             status=run_data.status or "completed",
             stream_details=stream_details,
@@ -505,200 +465,7 @@ Stream {i}: {display_name} ({stream_type})
         )
         
         return await self._call_llm(prompt, temperature=0.5)
-    
-    async def generate_process_description(
-        self,
-        section_name: str,
-        industry: str,
-        equipment_list: List[Dict[str, Any]],
-        stream_data: List[Dict[str, Any]],
-    ) -> Optional[str]:
-        """
-        Generate a description for a process section.
-        
-        Args:
-            section_name: Name of the process section
-            industry: Industry type (e.g., "sugar", "chemical")
-            equipment_list: List of equipment in this section
-            stream_data: Stream data for connections
-            
-        Returns:
-            Process description text or None on failure
-        """
-        logger.info(f"Generating process description for section: {section_name}")
-        
-        # Format equipment list
-        equip_lines = []
-        for eq in equipment_list[:10]:  # Limit to 10
-            name = eq.get("name", eq.get("equipment_id", "Unknown"))
-            eq_type = eq.get("type", eq.get("equipment_type", "Unknown"))
-            equip_lines.append(f"  - {name} ({eq_type})")
-        equipment_str = "\n".join(equip_lines) if equip_lines else "No equipment data"
-        
-        # Format stream connections
-        connection_lines = []
-        for stream in stream_data[:10]:  # Limit to 10
-            name = stream.get("name", "Unknown")
-            source = stream.get("source", "Unknown")
-            dest = stream.get("destination", "Unknown")
-            connection_lines.append(f"  - {name}: {source} → {dest}")
-        connections_str = "\n".join(connection_lines) if connection_lines else "No connection data"
-        
-        # Extract operating conditions
-        conditions = []
-        for eq in equipment_list[:5]:
-            params = eq.get("parameters", eq.get("params", {}))
-            if params:
-                for key, value in list(params.items())[:3]:
-                    conditions.append(f"  - {key}: {value}")
-        conditions_str = "\n".join(conditions) if conditions else "Standard conditions"
-        
-        prompt = self.PROCESS_DESCRIPTION_PROMPT.format(
-            section_name=section_name,
-            industry=industry,
-            equipment_list=equipment_str,
-            stream_connections=connections_str,
-            operating_conditions=conditions_str,
-        )
-        
-        return await self._call_llm(prompt, temperature=0.6)
-    
-    async def generate_equipment_description(
-        self,
-        equipment_name: str,
-        equipment_type: str,
-        industry: str,
-        inlet_streams: List[Dict[str, Any]],
-        outlet_streams: List[Dict[str, Any]],
-        parameters: Dict[str, Any],
-        performance: Dict[str, Any],
-    ) -> Optional[str]:
-        """
-        Generate a description for a single equipment unit.
-        
-        Args:
-            equipment_name: Name/ID of the equipment
-            equipment_type: Type of equipment (e.g., "mill", "evaporator")
-            industry: Industry type
-            inlet_streams: Inlet stream data
-            outlet_streams: Outlet stream data
-            parameters: Operating parameters
-            performance: Performance metrics
-            
-        Returns:
-            Equipment description text or None on failure
-        """
-        logger.debug(f"Generating description for equipment: {equipment_name}")
-        
-        # Format inlet streams
-        inlet_lines = []
-        for s in inlet_streams[:5]:
-            name = s.get("name", "Unknown")
-            flow = s.get("mass_flow_kg_s", s.get("flow_rate", "N/A"))
-            temp = s.get("temperature_K", s.get("temperature", "N/A"))
-            inlet_lines.append(f"  - {name}: {flow} kg/s, {temp} K")
-        inlet_str = "\n".join(inlet_lines) if inlet_lines else "No inlet data"
-        
-        # Format outlet streams
-        outlet_lines = []
-        for s in outlet_streams[:5]:
-            name = s.get("name", "Unknown")
-            flow = s.get("mass_flow_kg_s", s.get("flow_rate", "N/A"))
-            temp = s.get("temperature_K", s.get("temperature", "N/A"))
-            outlet_lines.append(f"  - {name}: {flow} kg/s, {temp} K")
-        outlet_str = "\n".join(outlet_lines) if outlet_lines else "No outlet data"
-        
-        # Format parameters
-        param_lines = []
-        for key, value in list(parameters.items())[:8]:
-            param_lines.append(f"  - {key}: {value}")
-        param_str = "\n".join(param_lines) if param_lines else "No parameter data"
-        
-        # Format performance
-        perf_lines = []
-        for key, value in list(performance.items())[:5]:
-            perf_lines.append(f"  - {key}: {value}")
-        perf_str = "\n".join(perf_lines) if perf_lines else "No performance data"
-        
-        prompt = self.EQUIPMENT_DESCRIPTION_PROMPT.format(
-            equipment_name=equipment_name,
-            equipment_type=equipment_type,
-            industry=industry,
-            inlet_streams=inlet_str,
-            outlet_streams=outlet_str,
-            parameters=param_str,
-            performance=perf_str,
-        )
-        
-        return await self._call_llm(prompt, temperature=0.5)
-    
-    async def generate_all_equipment_descriptions(
-        self,
-        equipment_table: EquipmentTableData,
-        stream_table: Optional[StreamTableData],
-        industry: str,
-    ) -> Dict[str, Optional[str]]:
-        """
-        Generate descriptions for all equipment units.
-        
-        Args:
-            equipment_table: Equipment data
-            stream_table: Stream data for context
-            industry: Industry type
-            
-        Returns:
-            Dict mapping equipment_id to description (or None if failed)
-        """
-        logger.info(f"Generating descriptions for {len(equipment_table.equipment)} equipment units")
-        
-        descriptions: Dict[str, Optional[str]] = {}
-        
-        # Build stream lookup by equipment
-        inlet_map: Dict[str, List[Dict]] = {}
-        outlet_map: Dict[str, List[Dict]] = {}
-        
-        if stream_table:
-            for stream in stream_table.streams:
-                source = stream.get("source", "")
-                dest = stream.get("destination", "")
-                
-                if source:
-                    if source not in outlet_map:
-                        outlet_map[source] = []
-                    outlet_map[source].append(stream)
-                
-                if dest:
-                    if dest not in inlet_map:
-                        inlet_map[dest] = []
-                    inlet_map[dest].append(stream)
-        
-        # Generate description for each equipment
-        for equipment in equipment_table.equipment:
-            eq_id = equipment.get("equipment_id", equipment.get("name", "Unknown"))
-            eq_type = equipment.get("type", equipment.get("equipment_type", "Unknown"))
-            params = equipment.get("parameters", equipment.get("params", {}))
-            perf = equipment.get("performance", equipment.get("results", {}))
-            
-            inlet_streams = inlet_map.get(eq_id, [])
-            outlet_streams = outlet_map.get(eq_id, [])
-            
-            description = await self.generate_equipment_description(
-                equipment_name=eq_id,
-                equipment_type=eq_type,
-                industry=industry,
-                inlet_streams=inlet_streams,
-                outlet_streams=outlet_streams,
-                parameters=params,
-                performance=perf,
-            )
-            
-            descriptions[eq_id] = description
-        
-        successful = sum(1 for d in descriptions.values() if d is not None)
-        logger.info(f"Generated {successful}/{len(descriptions)} equipment descriptions")
-        
-        return descriptions
-    
+
     async def generate_observations(
         self,
         run_data: SimulationRunData,
@@ -729,33 +496,38 @@ Stream {i}: {display_name} ({stream_type})
         # Get mass balance values
         mass_in = mass_balance.total_mass_in if mass_balance else 0
         mass_out = mass_balance.total_mass_out if mass_balance else 0
-        mass_closure = mass_balance.closure_percentage if mass_balance else 100
-        
+        mass_closure = (mass_balance.closure_percentage if mass_balance and mass_balance.closure_percentage is not None else 100.0)
+
         # Determine mass balance status
-        closure_error = abs(100.0 - mass_closure)
-        if closure_error < 0.01:
-            mass_status = "Excellent - Perfect closure"
-        elif closure_error < 0.1:
-            mass_status = "Good - Minor imbalance"
-        elif closure_error < 1.0:
-            mass_status = "Acceptable - Small imbalance"
+        if mass_balance and mass_balance.closure_percentage is None:
+            mass_status = "Unable to calculate - streams could not be categorized as inlet/outlet"
         else:
-            mass_status = f"Warning - {closure_error:.2f}% imbalance"
-        
+            closure_error = abs(100.0 - mass_closure)
+            if closure_error < 0.01:
+                mass_status = "Excellent - Perfect closure"
+            elif closure_error < 0.1:
+                mass_status = "Good - Minor imbalance"
+            elif closure_error < 1.0:
+                mass_status = "Acceptable - Small imbalance"
+            else:
+                mass_status = f"Warning - {closure_error:.2f}% imbalance"
+
         # Get energy balance values
         heat_in = energy_balance.total_heat_input if energy_balance else 0
         heat_out = energy_balance.total_heat_output if energy_balance else 0
         net_heat = heat_in - heat_out
-        
+
         # Determine energy balance status
         if heat_in > 0 or heat_out > 0:
             energy_status = f"Heat duty: {abs(net_heat):.1f} kW net {'input' if net_heat > 0 else 'removal'}"
         else:
             energy_status = "No significant heat duties"
-        
+
+        formatted_name = format_display_name(run_data.process_name) if run_data.process_name else "Simulation"
+
         prompt = self.OBSERVATIONS_PROMPT.format(
             industry=run_data.industry or "Chemical Process",
-            process_name=run_data.process_name or "Simulation",
+            process_name=formatted_name,
             run_id=run_data.run_id,
             stream_details=stream_details,
             equipment_details=equipment_details,

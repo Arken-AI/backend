@@ -170,14 +170,6 @@ class EnergyBalanceSummary(BaseModel):
     closure_percentage: float = Field(..., description="Energy balance closure percentage")
 
 
-class ReportSection(BaseModel):
-    """A section of the report with title and content"""
-    section_number: str = Field(..., description="Section number (e.g., '1', '2.1')")
-    title: str = Field(..., description="Section title")
-    content: str = Field(..., description="Section content (plain text or markdown)")
-    section_type: str = Field(..., description="Type of section (text, table, image)")
-
-
 class ReportData(BaseModel):
     """Complete data package for report generation"""
     metadata: ReportMetadata
