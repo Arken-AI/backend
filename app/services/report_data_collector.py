@@ -19,42 +19,91 @@ from app.models.report import (
 )
 
 
+# Known chemical and process terms for splitting concatenated names (longest first)
+_KNOWN_WORDS = sorted([
+    # chemicals
+    'acetaldehyde', 'formaldehyde', 'propylene', 'ethylene', 'butylene',
+    'benzene', 'toluene', 'xylene', 'ethanol', 'methanol', 'propanol', 'butanol',
+    'ammonia', 'methane', 'ethane', 'propane', 'butane', 'pentane', 'hexane',
+    'acetone', 'phenol', 'styrene', 'glycol', 'sucrose', 'glucose', 'fructose',
+    'water',
+    # process equipment
+    'distillation', 'crystallizer', 'evaporator', 'compressor', 'separator',
+    'condenser', 'reboiler', 'exchanger', 'absorber', 'stripper', 'reactor',
+    'splitter', 'heater', 'cooler', 'column', 'mixer', 'flash', 'pump',
+    # process concepts
+    'temperature', 'simulation', 'pressure', 'recycle', 'product', 'process',
+    'ternary', 'binary', 'stream', 'system', 'plant', 'multi', 'feed', 'heat',
+    'flow', 'unit',
+], key=len, reverse=True)
+
+
+def _split_concatenated(text: str) -> str:
+    """Split run-together lowercase words using known dictionary (greedy longest-match)."""
+    text_lower = text.lower()
+    parts = []
+    i = 0
+    while i < len(text_lower):
+        matched = False
+        for word in _KNOWN_WORDS:
+            if text_lower[i:].startswith(word):
+                parts.append(word)
+                i += len(word)
+                matched = True
+                break
+        if not matched:
+            # Accumulate unrecognized characters into current fragment
+            if parts and ' ' not in parts[-1]:
+                parts[-1] += text_lower[i]
+            else:
+                parts.append(text_lower[i])
+            i += 1
+    return ' '.join(parts)
+
+
 def format_display_name(raw_id: str, raw_name: str = None) -> str:
     """
     Format a raw ID or name into a human-readable display name.
-    
+
     Module-level function for use across the codebase.
-    
+
     Examples:
+        Benzenetoluenerecycledb -> Benzene Toluene Recycle
         ethanolwaterbinary -> Ethanol Water Binary
         dilute_ethanol_feed -> Dilute Ethanol Feed
         e01_column_to_cooler -> Column to Cooler
         concentration_column -> Concentration Column
     """
     import re
-    
+
     # Use provided name if it's meaningfully different from ID
     if raw_name and raw_name != raw_id and not raw_name.startswith(raw_id[:3] if len(raw_id) >= 3 else raw_id):
         return raw_name
-    
+
     name = raw_id
 
     # Remove common prefixes like e01_, s01_, etc.
     name = re.sub(r'^[es]\d+_', '', name)
 
+    # Strip trailing 'db' suffix (database artifact)
+    name = re.sub(r'db$', '', name, flags=re.IGNORECASE)
+
     # Handle camelCase (insert space before capitals)
     name = re.sub(r'([a-z])([A-Z])', r'\1 \2', name)
-
-    # Handle run-together words like "ethanolwaterbinary"
-    # Common chemical/process terms to split
-    name = re.sub(r'(ethanol)(water)', r'\1 \2', name, flags=re.IGNORECASE)
-    name = re.sub(r'(water)(binary)', r'\1 \2', name, flags=re.IGNORECASE)
-    name = re.sub(r'(methanol)(water)', r'\1 \2', name, flags=re.IGNORECASE)
-    name = re.sub(r'(distillation)(column)', r'\1 \2', name, flags=re.IGNORECASE)
 
     # Replace hyphens and underscores with spaces
     name = name.replace('-', ' ')
     name = name.replace('_', ' ')
+
+    # For single run-together words, use dictionary-based splitting
+    words = name.split()
+    split_words = []
+    for word in words:
+        if len(word) > 10 and word.isalpha():
+            split_words.append(_split_concatenated(word))
+        else:
+            split_words.append(word)
+    name = ' '.join(split_words)
 
     # Title case each word
     name = ' '.join(word.capitalize() for word in name.split())
