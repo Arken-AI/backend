@@ -35,7 +35,7 @@ from .mcp_client import MCPTool
 # Configuration
 # =============================================================================
 
-DEFAULT_MODEL = "claude-sonnet-4-20250514"
+DEFAULT_MODEL = "claude-sonnet-4-6"
 DEFAULT_MAX_TOKENS = 4096
 DEFAULT_TEMPERATURE = 1.0
 

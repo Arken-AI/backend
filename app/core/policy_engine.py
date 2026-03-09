@@ -75,7 +75,7 @@ class PolicyEngine:
     # CALC ENGINE SERVER - Validation Tools
     # ========================================
     CALC_ENGINE_VALIDATION_TOOLS = {
-        "validate_parameters"
+        "calc_validate_parameters"
     }
     
     # All validation tools
@@ -103,11 +103,11 @@ class PolicyEngine:
     # CALC ENGINE SERVER - Parameter Editing Tools
     # ========================================
     CALC_ENGINE_PARAMETER_TOOLS = {
-        "get_editable_parameters",
+        "calc_get_editable_parameters",
         # "edit_parameters",  # REMOVED: auto-saved by calc_simulate_process now
-        "get_user_parameters",
-        "switch_parameter_version",
-        "compare_parameters"
+        "calc_get_user_parameters",
+        "calc_switch_parameter_version",
+        "calc_compare_parameters"
     }
     
     # ========================================
@@ -135,8 +135,8 @@ class PolicyEngine:
         "simulate_process": ["validate_process_inputs"],
         # Process Server: simulate_equipment requires validate_equipment_inputs
         "simulate_equipment": ["validate_equipment_inputs"],
-        # Calc Engine: calc_simulate_process requires validate_parameters
-        "calc_simulate_process": ["validate_parameters"],
+        # Calc Engine: calc_simulate_process requires calc_validate_parameters
+        "calc_simulate_process": ["calc_validate_parameters"],
     }
     
     # ========================================
