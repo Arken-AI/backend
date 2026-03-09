@@ -85,12 +85,12 @@ TOOLS_REQUIRING_USER_ID = {
     # Calc Engine Phase 6 tools (post-simulation intelligence)
     "calc_analyze_parameter_impact",  # Required: user_id needed to load process template overrides
     # Calc Engine Phase 2 tools (parameter versioning)
-    "get_editable_parameters",  # Required
-    "validate_parameters",  # Uses user overrides for validation context
+    "calc_get_editable_parameters",  # Required
+    "calc_validate_parameters",  # Uses user overrides for validation context
     # "edit_parameters",  # REMOVED: calc_simulate_process now auto-saves parameters on success
-    "get_user_parameters",  # Required: retrieves user's versions
-    "switch_parameter_version",  # Required: changes user's active version
-    "compare_parameters",  # Required: compares user's versions
+    "calc_get_user_parameters",  # Required: retrieves user's versions
+    "calc_switch_parameter_version",  # Required: changes user's active version
+    "calc_compare_parameters",  # Required: compares user's versions
 }
 from app.services.tool_registry import ToolRegistry
 from app.services.event_emitter import EventEmitter
@@ -626,8 +626,14 @@ class OrchestrationService:
                     _CACHEABLE_TOOLS = {
                         "calc_list_processes", "calc_get_process",
                         "calc_list_runs", "calc_get_run",
-                        "calc_get_editable_params",
+                        "calc_get_editable_parameters",
                         "list_industries", "list_processes", "get_process",
+                    }
+                    # Optional filter keys per tool — a cached result with fewer
+                    # filters subsumes a request with more filters.
+                    _SUBSUMABLE_FILTER_KEYS = {
+                        "calc_list_processes": {"category", "template_type", "equipment_type"},
+                        "calc_get_editable_parameters": {"equipment_id"},
                     }
                     try:
                         _cache_key = f"{tool_name}::{json.dumps(tool_params, sort_keys=True, default=str)}"
@@ -635,6 +641,25 @@ class OrchestrationService:
                         _cache_key = None  # unhashable params — skip cache
 
                     cached_result = tool_result_cache.get(_cache_key) if (_cache_key and tool_name in _CACHEABLE_TOOLS) else None
+
+                    # If no exact cache hit, check for a broader (fewer filters) cached result
+                    if cached_result is None and _cache_key and tool_name in _SUBSUMABLE_FILTER_KEYS:
+                        filter_keys = _SUBSUMABLE_FILTER_KEYS[tool_name]
+                        base_params = {k: v for k, v in tool_params.items() if k not in filter_keys}
+                        our_filters = {k: v for k, v in tool_params.items() if k in filter_keys and v is not None}
+                        if our_filters:  # only check if we're actually filtering
+                            for ck, cv in tool_result_cache.items():
+                                if not ck.startswith(f"{tool_name}::"):
+                                    continue
+                                try:
+                                    cached_params = json.loads(ck.split("::", 1)[1])
+                                except (json.JSONDecodeError, IndexError):
+                                    continue
+                                cached_base = {k: v for k, v in cached_params.items() if k not in filter_keys}
+                                cached_filters = {k: v for k, v in cached_params.items() if k in filter_keys and v is not None}
+                                if cached_base == base_params and len(cached_filters) < len(our_filters):
+                                    cached_result = cv
+                                    break
 
                     if cached_result is not None:
                         # Return cached result without re-executing
@@ -891,9 +916,11 @@ class OrchestrationService:
             # ── TOOL USAGE ──
             "TOOL USAGE:",
             "- Never guess a process_id. Use exact IDs from calc_list_processes (case-sensitive).",
-            "- Never call the same tool with the same arguments twice.",
-            "- Before suggesting parameter values, call calc_get_editable_params to check valid min/max ranges.",
-            "- Parameter paths in calc_simulate_process use the EXACT equipment ID: 'equipment.distillation_column.parameters.reflux_ratio', NOT 'equipment.column.parameters.reflux_ratio'. Get IDs from calc_get_process.",
+            "- Never guess equipment IDs or parameter names. They vary per template and CANNOT be inferred from the equipment type or process name.",
+            "- BROAD QUERIES FIRST: When calling discovery tools (calc_list_processes, calc_get_editable_parameters), call with NO optional filters on the first attempt. Only add filters (category, equipment_type, equipment_id) if you already know the exact valid values from a previous tool result. Never guess filter values — getting 0 results from over-filtering wastes a round-trip.",
+            "- Never call the same discovery tool twice — if you already have a broader result, filter it yourself from the returned data.",
+            "- MANDATORY: Before calling calc_simulate_process or calc_analyze_parameter_impact, ALWAYS call calc_get_editable_parameters first to discover exact equipment IDs, parameter names, and valid ranges.",
+            "- Copy equipment IDs and parameter paths exactly from calc_get_editable_parameters output into calc_simulate_process parameters dict.",
             "- Single-equipment templates use generic compound placeholders — ask the user for real compounds and pass compound_mapping.",
             "- For chaining, use calc_chain_equipment with source_run_id, source_equipment_id, source_port, target_process_id.",
             "- For multi-outlet equipment, ask the user which outlet to use. Suggest intermediate equipment when connections are blocked.",
@@ -901,18 +928,22 @@ class OrchestrationService:
             "",
             # ── NEW SIMULATION SEQUENCE ──
             "NEW SIMULATION SEQUENCE:",
-            "Calc Engine: calc_list_processes → calc_get_process → (optional: calc_get_editable_params) → calc_simulate_process. Each step uses IDs from the previous.",
+            "Calc Engine: calc_list_processes → calc_get_editable_parameters(process_id, user_id) → calc_simulate_process (using exact paths from previous step). Never skip calc_get_editable_parameters.",
             "Process Server: list_industries → list_processes → get_process → simulate_process. Each step uses IDs from the previous.",
             "",
             # ── PARAMETER CHANGE WORKFLOW (the one and only workflow) ──
             "PARAMETER CHANGE WORKFLOW:",
             "When a user changes any equipment parameter, follow these three steps across SEPARATE turns. No exceptions.",
             "",
+            "Step 0 — DISCOVER (prerequisite — if not already done):",
+            "  Call calc_get_editable_parameters(process_id, user_id) WITHOUT the equipment_id filter to get ALL equipment IDs and parameter names.",
+            "  This step is MANDATORY if you haven't already called it for this process in this conversation.",
+            "  Do NOT call it again with an equipment_id filter — you already have the full data.",
+            "",
             "Step 1 — ANALYZE (turn 1 — tool calls only):",
             "  Call calc_analyze_parameter_impact ONCE PER changed parameter.",
-            "  Each call takes ONE equipment_id (exact ID from the template, e.g. 'distillation_column' not 'column') and ONE parameter name (bare name, not a dot-path).",
-            "  Example: calc_analyze_parameter_impact(process_id=\"benzenetoluenerecycledb\", equipment_id=\"distillation_column\", parameter=\"num_stages\")",
-            "  This is always the first tool call. Even if the user says 'just run it'.",
+            "  Each call takes ONE equipment_id (exact ID from calc_get_editable_parameters) and ONE parameter name (bare name, not a dot-path).",
+            "  This is always the first tool call after discovery. Even if the user says 'just run it'.",
             "  CRITICAL: Do NOT call calc_simulate_process in the same turn as calc_analyze_parameter_impact.",
             "  The backend will block it if you try.",
             "",
@@ -933,7 +964,7 @@ class OrchestrationService:
             "ERROR RECOVERY:",
             "When a tool returns an error, use these recovery actions:",
             "- 'Process not found' or 'Target process template not found' → call calc_list_processes to get valid IDs.",
-            "- 'Invalid parameter path(s)' → call calc_get_editable_params for the correct parameter names and paths.",
+            "- 'Invalid parameter path(s)' → call calc_get_editable_parameters for the correct equipment IDs, parameter names, and paths.",
             "- 'Source run not found' → call calc_list_runs to find valid run IDs.",
             "- 'Convergence failed' / 'not_converged' → report which equipment failed, suggest smaller parameter steps, offer to re-simulate.",
             "- Any other error → report it to the user in plain English and suggest an alternative approach.",
@@ -942,7 +973,7 @@ class OrchestrationService:
             "ENGINEERING CHECKLIST (apply during Step 2):",
             "When reasoning about a parameter change, check each of these. Flag any that apply:",
             "□ [CRITICAL] PHASE BOUNDARIES: Could T/P change cross a bubble/dew point? Warn about downstream phase mismatch.",
-            "□ [CRITICAL] PARAMETER LIMITS: Verify suggested values are within min/max from calc_get_editable_params.",
+            "□ [CRITICAL] PARAMETER LIMITS: Verify suggested values are within min/max from calc_get_editable_parameters.",
             "□ [WARNING] SAME-EQUIPMENT COUPLING: distillation (num_stages ↔ reflux_ratio ↔ feed_stage), heat_exchanger (T ↔ UA ↔ area), evaporator (effects ↔ steam_pressure), pump (ΔP ↔ efficiency).",
             "□ [WARNING] OPERABILITY: Distillation <30% load → weeping. Pump <20% flow → damage. Flash <15% → level instability. High reflux + high feed → flooding.",
             "□ [INFO] CAPEX vs OPEX: More stages = less reflux (save energy, cost column). More effects = better steam economy. Mention the trade-off.",

@@ -437,9 +437,9 @@ class ContextManager:
         # Fallback: determine from tool name
         calc_engine_tools = {
             "calc_simulate_process", "calc_list_processes", "calc_get_process",
-            "calc_get_run", "calc_list_runs", "get_editable_parameters",
-            "validate_parameters", "get_user_parameters",
-            "switch_parameter_version", "compare_parameters"
+            "calc_get_run", "calc_list_runs", "calc_get_editable_parameters",
+            "calc_validate_parameters", "calc_get_user_parameters",
+            "calc_switch_parameter_version", "calc_compare_parameters"
         }
         
         if tool_name in calc_engine_tools or tool_name.startswith("calc_"):
