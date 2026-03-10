@@ -35,6 +35,8 @@ from .mcp_client import MCPTool
 # Configuration
 # =============================================================================
 
+# Model is configured via settings.llm_model_claude (single source of truth)
+# Kept as fallback only for direct instantiation outside of dependency injection
 DEFAULT_MODEL = "claude-sonnet-4-6"
 DEFAULT_MAX_TOKENS = 4096
 DEFAULT_TEMPERATURE = 1.0
