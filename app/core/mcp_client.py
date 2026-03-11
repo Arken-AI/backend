@@ -456,7 +456,7 @@ class MCPClientRegistry:
         if self._initialized:
             return
         
-        # Load process server config
+        # Load process server config (disabled by default — not required)
         process_config = MCPServerConfig.from_env_process_server()
         if process_config.enabled and process_config.url:
             client = MCPClient(process_config)
@@ -465,7 +465,9 @@ class MCPClientRegistry:
                 self._clients["process_server"] = client
                 print(f"INFO: Process server connected with {len(await client.list_tools())} tools")
             except Exception as e:
-                print(f"ERROR: Failed to connect process server: {e}")
+                print(f"WARNING: Failed to connect process server (non-critical): {e}")
+        else:
+            print(f"INFO: Process server disabled or URL not configured, skipping")
         
         # Load calc engine config
         calc_config = MCPServerConfig.from_env_calc_engine()
