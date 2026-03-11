@@ -47,7 +47,7 @@ def test_llm_configuration():
     assert settings.get_llm_provider() == "gemini"
     
     # Models should be configured
-    assert settings.llm_model_claude == "claude-3-5-sonnet-20241022"
+    assert settings.llm_model_claude == "claude-sonnet-4-6"
     assert settings.llm_model_gemini == "gemini-2.0-flash"
 
 
