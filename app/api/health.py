@@ -124,7 +124,7 @@ async def check_llm_health() -> ServiceStatus:
             return ServiceStatus(
                 name="LLM Provider",
                 status="healthy",
-                message="Claude API key configured (model: claude-sonnet-4-20250514)"
+                message=f"Claude API key configured (model: {settings.llm_model_claude})"
             )
         else:
             return ServiceStatus(

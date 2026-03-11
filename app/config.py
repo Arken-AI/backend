@@ -114,7 +114,7 @@ class Settings(BaseSettings):
     )
     
     llm_model_claude: str = Field(
-        default="claude-3-5-sonnet-20241022",
+        default="claude-sonnet-4-6",
         description="Claude model to use"
     )
     llm_model_gemini: str = Field(
@@ -189,7 +189,7 @@ class Settings(BaseSettings):
         description="Maximum number of streams to display per table (splits if exceeded)"
     )
     report_llm_model: str = Field(
-        default="claude-sonnet-4-20250514",
+        default="claude-sonnet-4-6",
         description="LLM model to use for report narrative generation"
     )
     report_llm_max_tokens: int = Field(
