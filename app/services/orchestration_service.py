@@ -395,9 +395,8 @@ class OrchestrationService:
                     })
 
                 # Call LLM with conversation history (non-streaming, response via HTTP)
-                # Retry logic for rate limits
-                max_retries = 2
-                retry_delay = 60  # seconds
+                # Retry logic for rate limits and transient API errors (429, 529)
+                max_retries = 3
                 
                 thinking_start = datetime.now()
                 llm_response = None
@@ -417,12 +416,20 @@ class OrchestrationService:
                     except Exception as e:
                         error_message = str(e)
                         is_rate_limit = "rate_limit_error" in error_message or "429" in error_message
+                        is_overloaded = "overloaded_error" in error_message or "529" in error_message
+                        is_retryable = is_rate_limit or is_overloaded
                         
-                        if is_rate_limit and retry < max_retries:
+                        if is_retryable and retry < max_retries:
+                            # Exponential backoff: 5s, 10s, 20s for overloaded; 30s, 60s, 120s for rate limit
+                            if is_overloaded:
+                                retry_delay = 5 * (2 ** retry)  # 5s, 10s, 20s
+                            else:
+                                retry_delay = 30 * (2 ** retry)  # 30s, 60s, 120s
+                            print(f"LLM API {'overloaded' if is_overloaded else 'rate limited'}, retrying in {retry_delay}s (attempt {retry + 1}/{max_retries})")
                             await asyncio.sleep(retry_delay)
                             continue
                         
-                        # Not a rate limit or out of retries - re-raise
+                        # Not retryable or out of retries - re-raise
                         raise
                 
                 if llm_response is None:
@@ -846,31 +853,45 @@ class OrchestrationService:
                 )
             
         except Exception as e:
-            error_msg = f"Error processing your request: {str(e)}"
+            raw_error = str(e)
+            
+            # Map known API errors to user-friendly messages
+            error_msg = self._get_user_friendly_error(raw_error)
             
             # PHASE 2.4: Update assistant message with error status and any partial content
             # Use total_accumulated_text if available, otherwise just error message
             try:
                 from app.services.context_manager import MessageStatus
                 partial_content = total_accumulated_text if total_accumulated_text else ""
-                final_content = partial_content + ("\n\n[Error: " + str(e)[:200] + "]" if partial_content else error_msg)
+                final_content = partial_content + ("\n\n[" + error_msg + "]" if partial_content else error_msg)
                 
                 await self.context_manager.update_message(
                     conversation_id,
                     assistant_message_id,
                     content=final_content,
                     status=MessageStatus.ERROR,
-                    metadata={"error": str(e)[:500]}
+                    metadata={"error": raw_error[:500]}
                 )
             except Exception as update_error:
                 print(f"Failed to update message with error: {update_error}")
             
             if self.event_emitter:
+                # Determine error type for structured event
+                from app.models.events import ErrorType
+                if "overloaded_error" in raw_error or "529" in raw_error:
+                    event_error_type = ErrorType.LLM_ERROR
+                elif "rate_limit_error" in raw_error or "429" in raw_error:
+                    event_error_type = ErrorType.RATE_LIMIT_ERROR
+                elif "API usage limits" in raw_error:
+                    event_error_type = ErrorType.RATE_LIMIT_ERROR
+                else:
+                    event_error_type = ErrorType.INTERNAL_ERROR
+                
                 await self.event_emitter.emit_app_error(
                     conversation_id,
-                    "internal_error",
-                    error_msg,
-                    details={"exception": str(e)},
+                    error_type=event_error_type,
+                    error_message=error_msg,
+                    details={"exception": raw_error[:300]},
                     recoverable=True
                 )
                 # Response returned via HTTP (no emit_message_final needed)
@@ -878,7 +899,7 @@ class OrchestrationService:
             print(f"ERROR: Error processing message: {e}"); import traceback; traceback.print_exc()
             return {
                 "status": "error",
-                "message": f"Error processing your request: {str(e)}",
+                "message": error_msg,
                 "conversation_id": conversation_id,
                 "tool_executions": [],
                 "run_ids": [],
@@ -889,6 +910,28 @@ class OrchestrationService:
                 }
             }
     
+    # =========================================================================
+    # Error Message Helpers
+    # =========================================================================
+    
+    @staticmethod
+    def _get_user_friendly_error(raw_error: str) -> str:
+        """Map raw API/system errors to user-friendly messages."""
+        if "overloaded_error" in raw_error or "529" in raw_error:
+            return "Our AI service is temporarily busy due to high demand. Please try again in a few seconds."
+        elif "rate_limit_error" in raw_error or "429" in raw_error:
+            return "Too many requests — please wait a moment and try again."
+        elif "API usage limits" in raw_error or "You have reached your specified" in raw_error:
+            return "API usage limit reached. Service will resume after the limit resets."
+        elif "authentication_error" in raw_error or "401" in raw_error:
+            return "AI service authentication error. Please contact support."
+        elif "invalid_request_error" in raw_error or "400" in raw_error:
+            return "There was an issue processing your request. Please try rephrasing your message."
+        elif "connection" in raw_error.lower() or "timeout" in raw_error.lower():
+            return "Connection issue with the AI service. Please check your network and try again."
+        else:
+            return "Something went wrong while processing your request. Please try again."
+
     # =========================================================================
     # LLM Communication
     # =========================================================================
@@ -1228,9 +1271,37 @@ class OrchestrationService:
             
             # Check for different types of API errors
             is_rate_limit = "rate_limit_error" in error_message or "429" in error_message
+            is_overloaded = "overloaded_error" in error_message or "529" in error_message
             is_usage_limit = "API usage limits" in error_message or "You have reached your specified" in error_message
             
-            if is_usage_limit:
+            if is_overloaded:
+                # API server overloaded (529) - transient, will be retried by caller
+                if assistant_message_id:
+                    try:
+                        from app.services.context_manager import MessageStatus
+                        await self.context_manager.update_message(
+                            conversation_id,
+                            assistant_message_id,
+                            content="[AI service temporarily busy - retrying automatically]",
+                            status=MessageStatus.ERROR,
+                            metadata={"error": "overloaded"}
+                        )
+                    except Exception:
+                        pass
+                
+                if self.event_emitter and conversation_id:
+                    from app.models.events import ErrorType
+                    await self.event_emitter.emit_app_error(
+                        conversation_id,
+                        error_type=ErrorType.LLM_ERROR,
+                        error_message="AI service is temporarily busy. Retrying automatically...",
+                        details={
+                            "error": "Anthropic API overloaded (529)",
+                            "suggestion": "This is a temporary issue and will be retried automatically",
+                        }
+                    )
+            
+            elif is_usage_limit:
                 # API usage limit reached (monthly/daily limit)
                 if assistant_message_id:
                     try:
