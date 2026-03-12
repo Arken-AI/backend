@@ -4,6 +4,7 @@ Dependency Injection
 Provides dependency injection for database connections, clients, and services.
 """
 
+import asyncio
 import logging
 from typing import AsyncGenerator
 import redis.asyncio as redis
@@ -127,40 +128,73 @@ async def get_event_emitter() -> EventEmitter:
 # =============================================================================
 
 _mongo_client: MongoClient | None = None
+_mongo_lock: asyncio.Lock = asyncio.Lock()
 
 
 async def get_mongo_client() -> MongoClient:
     """
     Dependency to get MongoDB client instance (singleton).
     
-    Validates the connection is alive and recreates if stale.
+    Uses an asyncio.Lock to prevent race conditions where concurrent
+    coroutines could close/recreate the Motor client while another
+    coroutine is still using it (causes "Cannot use MongoClient after close").
     
     Returns:
         MongoClient: Async MongoDB client
     """
     global _mongo_client
     
+    # Fast path: if connected, return without acquiring lock
     if _mongo_client is not None:
-        # Verify connection is alive
         try:
-            await _mongo_client._client.admin.command("ping")
+            if _mongo_client._client is not None:
+                await _mongo_client._client.admin.command("ping")
+                return _mongo_client
         except Exception:
-            logger.warning("MongoDB connection stale, reconnecting...")
-            try:
-                _mongo_client._client.close()
-            except Exception:
-                pass
-            _mongo_client = None
+            pass  # Fall through to locked reconnection
     
-    if _mongo_client is None:
-        _mongo_client = MongoClient(
+    # Slow path: acquire lock to safely reconnect
+    async with _mongo_lock:
+        # Double-check after acquiring lock (another coroutine may have fixed it)
+        if _mongo_client is not None:
+            try:
+                if _mongo_client._client is not None:
+                    await _mongo_client._client.admin.command("ping")
+                    return _mongo_client
+            except Exception:
+                logger.warning("MongoDB connection stale, reconnecting...")
+                try:
+                    _mongo_client._client.close()
+                except Exception:
+                    pass
+                _mongo_client = None
+        
+        # Create and connect new client
+        new_client = MongoClient(
             connection_url=settings.mongodb_url,
             database_name=settings.mongodb_db_name
         )
-        # Initialize connection
-        await _mongo_client.connect()
+        try:
+            await new_client.connect()
+        except Exception:
+            # Don't leave a half-initialized singleton
+            try:
+                await new_client.disconnect()
+            except Exception:
+                pass
+            raise
+        
+        _mongo_client = new_client
     
     return _mongo_client
+
+
+async def close_mongo_client():
+    """Close MongoDB client on application shutdown."""
+    global _mongo_client
+    if _mongo_client:
+        await _mongo_client.disconnect()
+        _mongo_client = None
 
 
 # =============================================================================
