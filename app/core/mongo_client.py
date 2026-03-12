@@ -79,6 +79,15 @@ class MongoClient:
             PyMongoError: If unable to connect to MongoDB
         """
         try:
+            # Close any existing client before creating a new one
+            if self._client is not None:
+                try:
+                    self._client.close()
+                except Exception:
+                    pass
+                self._client = None
+                self._db = None
+            
             # Create Motor client with connection pool
             self._client = AsyncIOMotorClient(
                 self.connection_url,
@@ -98,6 +107,14 @@ class MongoClient:
             logger.info("Successfully connected to MongoDB")
             
         except Exception as e:
+            # Clean up on failure so we don't leave a half-open client
+            if self._client is not None:
+                try:
+                    self._client.close()
+                except Exception:
+                    pass
+            self._client = None
+            self._db = None
             logger.error(f"Failed to connect to MongoDB: {e}")
             raise PyMongoError(f"MongoDB connection failed: {e}")
     

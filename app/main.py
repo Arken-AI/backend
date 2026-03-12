@@ -58,7 +58,7 @@ logging.config.dictConfig({
 })
 
 from app.api import stream, health, chat, test_stream, runs, reports, auth
-from app.dependencies import close_redis_client, close_mcp_clients, close_llm_provider
+from app.dependencies import close_redis_client, close_mcp_clients, close_llm_provider, close_mongo_client
 from app.config import settings
 
 logger = logging.getLogger(__name__)
@@ -108,6 +108,7 @@ async def lifespan(app: FastAPI):
     # Shutdown
     await close_llm_provider()  # Close LLM httpx connection pool
     await close_mcp_clients()  # Close both MCP server connections
+    await close_mongo_client()  # Close MongoDB connection pool
     await close_redis_client()
 
 
