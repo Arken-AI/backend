@@ -19,6 +19,7 @@ from app.models.events import (
     MessageDeltaEvent,
     MessageFinalEvent,
     AppErrorEvent,
+    AgentTextEvent,
     ToolStatus,
     ErrorType,
 )
@@ -202,6 +203,48 @@ class TestToolEvents:
         event_data = call_args[0][1]
         assert '"status":' in event_data["data"] and '"error"' in event_data["data"]
         assert '"error_message"' in event_data["data"]
+
+
+class TestAgentTextEvents:
+    """Test agent text event emission"""
+
+    @pytest.mark.asyncio
+    async def test_emit_agent_text(self, emitter, mock_redis):
+        """Test emitting agent text event"""
+        mock_redis.incr.return_value = 6
+
+        seq = await emitter.emit_agent_text(
+            "req_123",
+            content="Let me check the processes",
+            iteration=0
+        )
+
+        assert seq == 6
+        mock_redis.xadd.assert_called_once()
+
+        # Check event data
+        call_args = mock_redis.xadd.call_args
+        event_data = call_args[0][1]
+        assert event_data["event_type"] == "agent_text"
+        assert '"content"' in event_data["data"]
+        assert "Let me check the processes" in event_data["data"]
+        assert '"iteration"' in event_data["data"]
+
+    @pytest.mark.asyncio
+    async def test_emit_agent_text_with_iteration(self, emitter, mock_redis):
+        """Test emitting agent text with correct iteration number"""
+        mock_redis.incr.return_value = 7
+
+        seq = await emitter.emit_agent_text(
+            "req_123",
+            content="Now checking results",
+            iteration=2
+        )
+
+        assert seq == 7
+        call_args = mock_redis.xadd.call_args
+        event_data = call_args[0][1]
+        assert '"iteration":2' in event_data["data"] or '"iteration": 2' in event_data["data"]
 
 
 class TestProgressEvents:
