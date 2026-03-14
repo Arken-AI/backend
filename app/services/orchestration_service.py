@@ -904,7 +904,9 @@ class OrchestrationService:
                     details={"exception": raw_error[:300]},
                     recoverable=True
                 )
-                # Response returned via HTTP (no emit_message_final needed)
+                # Emit thinking_end so SSE stream terminates and frontend
+                # doesn't hang waiting for it in waitForCompletion()
+                await self.event_emitter.emit_thinking_end(conversation_id, 0)
             
             print(f"ERROR: Error processing message: {e}"); import traceback; traceback.print_exc()
             return {
