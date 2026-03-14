@@ -17,6 +17,7 @@ from app.models.events import (
     MessageDeltaEvent,
     MessageFinalEvent,
     AppErrorEvent,
+    AgentTextEvent,
     EventType,
     ToolStatus,
     ErrorType,
@@ -359,6 +360,64 @@ class TestAppErrorEvent:
         assert event.details["tool"] == "simulate_process"
 
 
+class TestAgentTextEvent:
+    """Test agent text events"""
+
+    def test_agent_text_event_creation(self):
+        """Test AgentTextEvent creation"""
+        event = AgentTextEvent(
+            request_id="req_123",
+            content="Let me check the available processes",
+            iteration=0
+        )
+        assert event.event_type == EventType.AGENT_TEXT
+        assert event.content == "Let me check the available processes"
+        assert event.iteration == 0
+
+    def test_agent_text_event_requires_content(self):
+        """Test that AgentTextEvent requires content"""
+        with pytest.raises(Exception):
+            AgentTextEvent(request_id="req_123", iteration=0)
+
+    def test_agent_text_event_requires_iteration(self):
+        """Test that AgentTextEvent requires iteration"""
+        with pytest.raises(Exception):
+            AgentTextEvent(request_id="req_123", content="text")
+
+    def test_agent_text_sse_format(self):
+        """Test AgentTextEvent SSE serialization"""
+        event = AgentTextEvent(
+            request_id="req_123",
+            content="Checking processes",
+            iteration=1,
+            sequence=3
+        )
+        sse = event.to_sse_format()
+        assert "id: 3" in sse
+        assert "event: agent_text" in sse
+        assert "Checking processes" in sse
+
+    def test_agent_text_redis_round_trip(self):
+        """Test AgentTextEvent round-trip via Redis dict"""
+        original = AgentTextEvent(
+            request_id="req_123",
+            content="Intermediate text",
+            iteration=2,
+            sequence=5
+        )
+        redis_dict = original.to_redis_dict()
+        restored = BaseEvent.from_redis_dict(redis_dict)
+
+        assert isinstance(restored, AgentTextEvent)
+        assert restored.content == "Intermediate text"
+        assert restored.iteration == 2
+        assert restored.sequence == 5
+
+    def test_agent_text_in_event_type_map(self):
+        """Test that agent_text is in EVENT_TYPE_MAP"""
+        assert "agent_text" in EVENT_TYPE_MAP or EventType.AGENT_TEXT in EVENT_TYPE_MAP
+
+
 class TestEventParsing:
     """Test event parsing and factory functions"""
     
@@ -411,7 +470,7 @@ class TestEventParsing:
         """Test getting list of all event types"""
         types = get_all_event_types()
         
-        assert len(types) == 8  # We have 8 event types
+        assert len(types) == 9  # We have 9 event types
         assert "thinking_start" in types
         assert "thinking_end" in types
         assert "tool_start" in types

@@ -33,6 +33,7 @@ from app.models.events import (
     MessageDeltaEvent,
     MessageFinalEvent,
     AppErrorEvent,
+    AgentTextEvent,
     ToolStatus,
     ErrorType,
 )
@@ -340,6 +341,32 @@ class EventEmitter:
         )
         return await self._emit_event(request_id, event)
     
+    # ========== Agent Text Events ==========
+
+    async def emit_agent_text(
+        self,
+        request_id: str,
+        content: str,
+        iteration: int
+    ) -> int:
+        """
+        Emit agent text event (intermediate LLM text between tool calls).
+
+        Args:
+            request_id: Request identifier
+            content: Intermediate text content
+            iteration: Agentic loop iteration number (0-indexed)
+
+        Returns:
+            Sequence number
+        """
+        event = AgentTextEvent(
+            request_id=request_id,
+            content=content,
+            iteration=iteration
+        )
+        return await self._emit_event(request_id, event)
+
     # ========== Error Events ==========
     
     async def emit_app_error(

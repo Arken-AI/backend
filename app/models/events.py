@@ -34,6 +34,7 @@ class EventType(str, Enum):
     MESSAGE_DELTA = "message_delta"
     MESSAGE_FINAL = "message_final"
     APP_ERROR = "app_error"
+    AGENT_TEXT = "agent_text"
 
 
 class ToolStatus(str, Enum):
@@ -336,6 +337,24 @@ class AppErrorEvent(BaseEvent):
     recoverable: bool = Field(default=True, description="Can user retry/fix this error?")
 
 
+class AgentTextEvent(BaseEvent):
+    """
+    Emitted during the agentic loop when the LLM produces intermediate text
+    between tool calls.
+
+    Triggered:
+    - Each iteration of the agentic loop, before tool execution
+    - Only when the LLM has text content alongside tool calls
+
+    Frontend behavior:
+    - Display text block interleaved with tool execution cards
+    - Show step-by-step reasoning in real-time
+    """
+    event_type: Literal[EventType.AGENT_TEXT] = EventType.AGENT_TEXT
+    content: str = Field(..., description="Intermediate LLM text block")
+    iteration: int = Field(..., description="Agentic loop iteration number (0-indexed)")
+
+
 # Type union for type-safe event parsing
 Event = Union[
     ThinkingStartEvent,
@@ -345,7 +364,8 @@ Event = Union[
     RunProgressEvent,
     MessageDeltaEvent,
     MessageFinalEvent,
-    AppErrorEvent
+    AppErrorEvent,
+    AgentTextEvent
 ]
 
 # Mapping from event_type string to event class (for deserialization)
@@ -358,6 +378,7 @@ EVENT_TYPE_MAP: Dict[str, Type[BaseEvent]] = {
     EventType.MESSAGE_DELTA: MessageDeltaEvent,
     EventType.MESSAGE_FINAL: MessageFinalEvent,
     EventType.APP_ERROR: AppErrorEvent,
+    EventType.AGENT_TEXT: AgentTextEvent,
 }
 
 

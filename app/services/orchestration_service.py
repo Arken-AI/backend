@@ -310,6 +310,7 @@ class OrchestrationService:
             
             # Track state across iterations
             all_tool_results = []
+            agent_steps_log = []  # Tracks interleaved text + tool steps for persistence
             total_tool_calls = 0
 
             # Tool result cache — prevents duplicate calls with identical arguments
@@ -492,12 +493,13 @@ class OrchestrationService:
                         }
                         for tc in all_tool_results
                     ]
+                    agent_steps_log.append({"type": "text", "content": message_text, "is_final": True})
                     await self.context_manager.update_message(
                         conversation_id,
                         assistant_message_id,
                         content=message_text,
                         status=MessageStatus.COMPLETE,
-                        metadata={"iterations": iteration + 1, "tool_calls": len(all_tool_results), "tool_executions": tool_executions_to_store}
+                        metadata={"iterations": iteration + 1, "tool_calls": len(all_tool_results), "tool_executions": tool_executions_to_store, "agent_steps": agent_steps_log}
                     )
                     
                     # Emit thinking end
@@ -568,8 +570,12 @@ class OrchestrationService:
                 # =====================================================
                 # TOOL EXECUTION: Process each tool call
                 # =====================================================
-                # Intermediate text before tool calls is now included in final HTTP response
-                # (No need to emit separately)
+                # Emit intermediate text to frontend via SSE for step-by-step display
+                if message_text and message_text.strip() and self.event_emitter:
+                    await self.event_emitter.emit_agent_text(
+                        conversation_id, message_text.strip(), iteration
+                    )
+                    agent_steps_log.append({"type": "text", "content": message_text.strip(), "iteration": iteration})
                 
                 # Add assistant message with BOTH text and tool calls to history
                 assistant_msg = {"role": "assistant", "tool_calls": tool_calls_list}
@@ -687,6 +693,7 @@ class OrchestrationService:
                                 f"{tool_name} (duplicate)", error_message=None,
                                 result=dup_result
                             )
+                        agent_steps_log.append({"type": "tool", "tool_name": tool_name, "status": "success", "duration_ms": 0})
                         continue
 
                     cached_result = tool_result_cache.get(_cache_key) if (_cache_key and tool_name in _CACHEABLE_TOOLS) else None
@@ -721,6 +728,7 @@ class OrchestrationService:
                                 f"{tool_name} (cached)", error_message=None,
                                 result=result
                             )
+                        agent_steps_log.append({"type": "tool", "tool_name": tool_name, "status": "success", "duration_ms": 0})
                     else:
                         # Execute tool
                         if self.event_emitter:
@@ -767,6 +775,7 @@ class OrchestrationService:
                                 error_message=error_msg,
                                 result=result
                             )
+                        agent_steps_log.append({"type": "tool", "tool_name": tool_name, "status": status, "duration_ms": tool_duration_ms})
                     
                     # Update context
                     await self._update_context(
@@ -850,6 +859,7 @@ class OrchestrationService:
                     metadata=metadata,
                     total_input_tokens=total_input_tokens,
                     total_output_tokens=total_output_tokens,
+                    agent_steps_log=agent_steps_log,
                 )
             
         except Exception as e:
@@ -1895,6 +1905,7 @@ class OrchestrationService:
         metadata: Optional[Dict[str, Any]],
         total_input_tokens: int = 0,
         total_output_tokens: int = 0,
+        agent_steps_log: List[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Force the LLM to produce a natural text response with no tool calls."""
         from app.services.context_manager import MessageStatus
@@ -1951,11 +1962,18 @@ class OrchestrationService:
             for tc in all_tool_results
         ]
 
+        if agent_steps_log is None:
+            agent_steps_log = []
+        # Emit the forced response text via SSE so the UI shows it in real-time
+        if message_text and message_text.strip() and self.event_emitter:
+            await self.event_emitter.emit_agent_text(conversation_id, message_text.strip(), -1)
+        agent_steps_log.append({"type": "text", "content": message_text, "is_final": True})
+
         # Update message as COMPLETE (not ERROR)
         await self.context_manager.update_message(
             conversation_id, assistant_message_id,
             content=message_text, status=MessageStatus.COMPLETE,
-            metadata={"iterations": len(all_tool_results), "tool_calls": len(all_tool_results), "tool_executions": tool_executions}
+            metadata={"iterations": len(all_tool_results), "tool_calls": len(all_tool_results), "tool_executions": tool_executions, "agent_steps": agent_steps_log}
         )
 
         if self.event_emitter:
