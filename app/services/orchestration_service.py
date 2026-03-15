@@ -693,7 +693,7 @@ class OrchestrationService:
                                 f"{tool_name} (duplicate)", error_message=None,
                                 result=dup_result
                             )
-                        agent_steps_log.append({"type": "tool", "tool_name": tool_name, "status": "success", "duration_ms": 0})
+                        agent_steps_log.append({"type": "tool", "tool_name": tool_name, "status": "success", "duration_ms": 0, "arguments": tool_params, "result": dup_result})
                         continue
 
                     cached_result = tool_result_cache.get(_cache_key) if (_cache_key and tool_name in _CACHEABLE_TOOLS) else None
@@ -728,7 +728,7 @@ class OrchestrationService:
                                 f"{tool_name} (cached)", error_message=None,
                                 result=result
                             )
-                        agent_steps_log.append({"type": "tool", "tool_name": tool_name, "status": "success", "duration_ms": 0})
+                        agent_steps_log.append({"type": "tool", "tool_name": tool_name, "status": "success", "duration_ms": 0, "arguments": tool_params, "result": result})
                     else:
                         # Execute tool
                         if self.event_emitter:
@@ -775,7 +775,7 @@ class OrchestrationService:
                                 error_message=error_msg,
                                 result=result
                             )
-                        agent_steps_log.append({"type": "tool", "tool_name": tool_name, "status": status, "duration_ms": tool_duration_ms})
+                        agent_steps_log.append({"type": "tool", "tool_name": tool_name, "status": status, "duration_ms": tool_duration_ms, "arguments": tool_params, "result": result})
                     
                     # Update context
                     await self._update_context(
