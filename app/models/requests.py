@@ -46,44 +46,57 @@ class TokenUsage(BaseModel):
 # Maximum total payload size for attachments (20 MB)
 MAX_ATTACHMENT_SIZE_BYTES = 20 * 1024 * 1024
 
-# Allowed MIME types for image attachments
-ALLOWED_IMAGE_TYPES = {
+# Allowed MIME types for attachments (images + documents)
+ALLOWED_ATTACHMENT_TYPES = {
     "image/png",
     "image/jpeg",
     "image/jpg",
     "image/gif",
     "image/webp",
+    "application/pdf",
 }
+
+# Convenience alias for backward compatibility
+ALLOWED_IMAGE_TYPES = ALLOWED_ATTACHMENT_TYPES
 
 
 class ImageAttachment(BaseModel):
-    """An image attachment sent alongside a chat message.
+    """A file attachment sent alongside a chat message.
     
-    The image data is base64-encoded and sent inline in the JSON body.
+    Supports images (png, jpeg, gif, webp) and documents (pdf).
+    The file data is base64-encoded and sent inline in the JSON body.
     For the multipart/form-data upload endpoint the backend converts
     the uploaded file into this format internally.
     """
     
     media_type: str = Field(
         ...,
-        description="MIME type of the image (e.g. image/png, image/jpeg)"
+        description="MIME type of the attachment (e.g. image/png, application/pdf)"
     )
     data: str = Field(
         ...,
-        description="Base64-encoded image data (no data-URI prefix)"
+        description="Base64-encoded file data (no data-URI prefix)"
     )
     filename: Optional[str] = Field(
         default=None,
         description="Original filename (for display purposes only)"
     )
     
+    @property
+    def is_pdf(self) -> bool:
+        return self.media_type == "application/pdf"
+    
+    @property
+    def is_image(self) -> bool:
+        return self.media_type.startswith("image/")
+    
     @field_validator("media_type")
     @classmethod
     def validate_media_type(cls, v: str) -> str:
-        if v not in ALLOWED_IMAGE_TYPES:
+        if v not in ALLOWED_ATTACHMENT_TYPES:
             raise ValueError(
-                f"Unsupported image type '{v}'. "
-                f"Allowed: {', '.join(sorted(ALLOWED_IMAGE_TYPES))}"
+                f"Unsupported attachment type '{v}'. "
+                f"Allowed: {', '.join(sorted(ALLOWED_ATTACHMENT_TYPES))}"
             )
         return v
     
@@ -132,7 +145,7 @@ class ChatRequest(BaseModel):
         if v is None:
             return v
         if len(v) > 5:
-            raise ValueError("Maximum 5 image attachments per message")
+            raise ValueError("Maximum 5 attachments per message")
         # Rough size check (base64 is ~4/3 of raw bytes)
         import base64
         total_bytes = 0

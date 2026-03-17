@@ -53,6 +53,9 @@ dependencies = [
     # Report generation
     "reportlab>=4.0.0,<5.0.0", # PDF generation
     "Pillow>=10.0.0,<11.0.0",  # Image processing
+
+    # PDF processing (text extraction + page-to-image rendering)
+    "PyMuPDF>=1.24.0,<2.0.0",
 ]
 
 [project.optional-dependencies]

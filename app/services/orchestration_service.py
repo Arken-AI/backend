@@ -24,6 +24,7 @@ The LLM can:
 """
 
 import json
+import logging
 import traceback
 import asyncio
 from typing import Dict, Any, List, Optional
@@ -31,6 +32,8 @@ from datetime import datetime
 
 from app.config import settings
 from app.services.context_manager import ContextManager
+
+logger = logging.getLogger(__name__)
 
 # =============================================================================
 # Context Optimization Constants
@@ -356,19 +359,41 @@ class OrchestrationService:
                     "content": content if content and content.strip() else "[Tool execution in progress]"
                 })
             
-            # Add current user message (with optional image attachments)
+            # Add current user message (with optional image/PDF attachments)
             if attachments:
                 # Build multimodal content blocks for LLM
                 content_blocks = []
                 for att in attachments:
-                    content_blocks.append({
-                        "type": "image",
-                        "source": {
-                            "type": "base64",
-                            "media_type": att["media_type"],
-                            "data": att["data"],
-                        }
-                    })
+                    media_type = att["media_type"]
+                    
+                    if media_type == "application/pdf":
+                        # PDF: extract text + render pages as images
+                        import base64 as _b64
+                        from app.services.pdf_processor import pdf_to_llm_content_blocks
+                        
+                        try:
+                            pdf_bytes = _b64.b64decode(att["data"])
+                            pdf_blocks = pdf_to_llm_content_blocks(
+                                pdf_bytes,
+                                filename=att.get("filename", "document.pdf"),
+                            )
+                            content_blocks.extend(pdf_blocks)
+                        except Exception as e:
+                            logger.error(f"PDF processing failed: {e}")
+                            content_blocks.append({
+                                "type": "text",
+                                "text": f"[PDF attachment '{att.get('filename', 'document.pdf')}' could not be processed: {str(e)}]"
+                            })
+                    else:
+                        # Image: pass through as base64 image block
+                        content_blocks.append({
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": media_type,
+                                "data": att["data"],
+                            }
+                        })
                 content_blocks.append({"type": "text", "text": user_message})
                 conversation_history.append({"role": "user", "content": content_blocks})
             else:
@@ -1015,6 +1040,15 @@ class OrchestrationService:
             "- Photos of plant equipment — identify type, condition, nameplate data.",
             "When an image is attached, analyze it thoroughly in the context of process engineering.",
             "Describe what you see, extract relevant data, and suggest next steps (e.g., setting up a simulation based on the diagram).",
+            "",
+            "PDF / DOCUMENT CAPABILITIES:",
+            "You CAN analyze PDF documents attached by the user. The system extracts text and renders pages as images for you.",
+            "Typical use-cases:",
+            "- Technical reports and papers — extract key findings, parameters, correlations.",
+            "- Equipment datasheets (PDF) — read specifications, operating ranges, materials.",
+            "- Process design documents — extract flowsheet data, mass/energy balances, stream tables.",
+            "- Regulatory documents, standards — identify relevant requirements.",
+            "When a PDF is attached, analyze both the extracted text and page images to provide thorough analysis.",
             "",
             "Always use tools to retrieve real values. If unsure about a parameter's physical meaning or valid range, ask the user rather than assuming.",
             "When a tool returns a result_link, include it verbatim in your response.",
