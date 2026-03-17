@@ -384,6 +384,24 @@ class OrchestrationService:
                                 "type": "text",
                                 "text": f"[PDF attachment '{att.get('filename', 'document.pdf')}' could not be processed: {str(e)}]"
                             })
+                    elif media_type == "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
+                        # DOCX: extract text
+                        import base64 as _b64
+                        from app.services.pdf_processor import docx_to_llm_content_blocks
+                        
+                        try:
+                            docx_bytes = _b64.b64decode(att["data"])
+                            docx_blocks = docx_to_llm_content_blocks(
+                                docx_bytes,
+                                filename=att.get("filename", "document.docx"),
+                            )
+                            content_blocks.extend(docx_blocks)
+                        except Exception as e:
+                            logger.error(f"DOCX processing failed: {e}")
+                            content_blocks.append({
+                                "type": "text",
+                                "text": f"[DOCX attachment '{att.get('filename', 'document.docx')}' could not be processed: {str(e)}]"
+                            })
                     else:
                         # Image: pass through as base64 image block
                         content_blocks.append({
@@ -1041,14 +1059,15 @@ class OrchestrationService:
             "When an image is attached, analyze it thoroughly in the context of process engineering.",
             "Describe what you see, extract relevant data, and suggest next steps (e.g., setting up a simulation based on the diagram).",
             "",
-            "PDF / DOCUMENT CAPABILITIES:",
-            "You CAN analyze PDF documents attached by the user. The system extracts text and renders pages as images for you.",
+            "PDF / DOCX / DOCUMENT CAPABILITIES:",
+            "You CAN analyze PDF and DOCX (Word) documents attached by the user.",
+            "For PDFs the system extracts text and renders pages as images. For DOCX files, full text and table content is extracted.",
             "Typical use-cases:",
             "- Technical reports and papers — extract key findings, parameters, correlations.",
-            "- Equipment datasheets (PDF) — read specifications, operating ranges, materials.",
+            "- Equipment datasheets (PDF/DOCX) — read specifications, operating ranges, materials.",
             "- Process design documents — extract flowsheet data, mass/energy balances, stream tables.",
             "- Regulatory documents, standards — identify relevant requirements.",
-            "When a PDF is attached, analyze both the extracted text and page images to provide thorough analysis.",
+            "When a document is attached, analyze the extracted text (and page images for PDFs) to provide thorough analysis.",
             "",
             "Always use tools to retrieve real values. If unsure about a parameter's physical meaning or valid range, ask the user rather than assuming.",
             "When a tool returns a result_link, include it verbatim in your response.",
