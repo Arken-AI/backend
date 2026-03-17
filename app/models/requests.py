@@ -54,6 +54,7 @@ ALLOWED_ATTACHMENT_TYPES = {
     "image/gif",
     "image/webp",
     "application/pdf",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",  # .docx
 }
 
 # Convenience alias for backward compatibility
@@ -63,7 +64,7 @@ ALLOWED_IMAGE_TYPES = ALLOWED_ATTACHMENT_TYPES
 class ImageAttachment(BaseModel):
     """A file attachment sent alongside a chat message.
     
-    Supports images (png, jpeg, gif, webp) and documents (pdf).
+    Supports images (png, jpeg, gif, webp) and documents (pdf, docx).
     The file data is base64-encoded and sent inline in the JSON body.
     For the multipart/form-data upload endpoint the backend converts
     the uploaded file into this format internally.
@@ -85,6 +86,14 @@ class ImageAttachment(BaseModel):
     @property
     def is_pdf(self) -> bool:
         return self.media_type == "application/pdf"
+    
+    @property
+    def is_docx(self) -> bool:
+        return self.media_type == "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    
+    @property
+    def is_document(self) -> bool:
+        return self.is_pdf or self.is_docx
     
     @property
     def is_image(self) -> bool:

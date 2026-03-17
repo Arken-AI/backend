@@ -1,16 +1,20 @@
 """
-PDF Processing Service
+Document Processing Service (PDF + DOCX)
 
-Extracts text and renders pages as images from PDF files for LLM analysis.
+Extracts text and renders pages as images from document files for LLM analysis.
 
-Uses PyMuPDF (fitz) for:
+PDF (via PyMuPDF / fitz):
 - Text extraction (structured, per-page)
 - Page-to-image rendering (for diagrams, tables, charts the LLM can "see")
 
+DOCX (via python-docx):
+- Full text extraction (paragraphs + tables)
+- Heading structure preserved
+
 Strategy:
-- Extract text from all pages (cheap, fast)
-- Render first N pages as images (for visual content like P&IDs, flowsheets)
-- Return both so the LLM gets text AND visual context
+- Extract text from all pages/paragraphs (cheap, fast)
+- Render first N pages as images for PDFs (for visual content like P&IDs)
+- Return content blocks so the LLM gets text AND visual context
 """
 
 import base64
@@ -200,3 +204,106 @@ def pdf_to_llm_content_blocks(
         })
 
     return blocks
+
+
+# =============================================================================
+# DOCX Processing
+# =============================================================================
+
+def extract_docx_text(docx_bytes: bytes, filename: str = "document.docx") -> str:
+    """
+    Extract all text from a DOCX file (paragraphs + tables).
+
+    Args:
+        docx_bytes: Raw .docx file bytes
+        filename: Original filename for logging
+
+    Returns:
+        Extracted text as a single string, or an error message.
+    """
+    try:
+        from docx import Document
+    except ImportError:
+        logger.error("python-docx not installed. Run: pip install python-docx")
+        return "[DOCX processing unavailable (python-docx not installed)]"
+
+    try:
+        doc = Document(io.BytesIO(docx_bytes))
+    except Exception as e:
+        logger.error(f"Failed to open DOCX '{filename}': {e}")
+        return f"[Failed to open DOCX: {str(e)}]"
+
+    parts: List[str] = []
+
+    # Extract paragraphs with heading markers
+    for para in doc.paragraphs:
+        text = para.text.strip()
+        if not text:
+            continue
+        # para.style can be None for some DOCX files (compatibility mode,
+        # corrupted XML, custom styles, etc.)
+        style = para.style
+        style_name = (style.name if style else "").lower() if style is not None else ""
+        if "heading" in style_name:
+            # Preserve heading hierarchy
+            level = ""
+            for ch in style_name:
+                if ch.isdigit():
+                    level = ch
+                    break
+            prefix = "#" * int(level) + " " if level else "## "
+            parts.append(f"{prefix}{text}")
+        else:
+            parts.append(text)
+
+    # Extract tables
+    for table_idx, table in enumerate(doc.tables):
+        try:
+            rows_text: List[str] = []
+            for row in table.rows:
+                cells = [cell.text.strip() for cell in row.cells]
+                rows_text.append(" | ".join(cells))
+            if rows_text:
+                parts.append(f"\n[Table {table_idx + 1}]")
+                # Add markdown-style header separator after first row
+                parts.append(rows_text[0])
+                if len(rows_text) > 1:
+                    col_count = len(table.rows[0].cells)
+                    parts.append(" | ".join(["---"] * col_count))
+                    parts.extend(rows_text[1:])
+        except Exception as e:
+            logger.warning(f"Table {table_idx + 1} extraction failed in '{filename}': {e}")
+            parts.append(f"\n[Table {table_idx + 1} — could not be extracted]")
+
+    full_text = "\n".join(parts)
+
+    # Truncate if too long
+    if len(full_text) > MAX_TEXT_CHARS:
+        full_text = full_text[:MAX_TEXT_CHARS] + "\n[... text truncated ...]"
+
+    logger.info(f"DOCX '{filename}': {len(doc.paragraphs)} paragraphs, {len(doc.tables)} tables, {len(full_text)} chars")
+    return full_text
+
+
+def docx_to_llm_content_blocks(
+    docx_bytes: bytes,
+    filename: str = "document.docx",
+) -> List[dict]:
+    """
+    Convert a DOCX file into LLM content blocks (text only — no visual rendering).
+
+    Returns:
+        [{"type": "text", "text": "📄 DOCX: report.docx\n\n..."}]
+    """
+    text = extract_docx_text(docx_bytes, filename)
+
+    header = f"📄 DOCX: {filename}"
+
+    if text.startswith("["):
+        # Error message
+        return [{"type": "text", "text": f"{header}\n\n{text}"}]
+
+    if not text.strip():
+        return [{"type": "text", "text": f"{header}\n\n(Document appears to be empty or contains only images/embedded objects.)"}]
+
+    return [{"type": "text", "text": f"{header}\n\nExtracted text:\n{text}"}]
