@@ -572,10 +572,17 @@ class OrchestrationService:
                         metadata={"iterations": iteration + 1, "tool_calls": len(all_tool_results), "tool_executions": tool_executions_to_store, "agent_steps": agent_steps_log}
                     )
                     
-                    # Emit thinking end
+                    # Stream the final text via SSE message_delta events
+                    # so the frontend shows a typing effect.
+                    # NOTE: deltas MUST be emitted BEFORE thinking_end because
+                    # the SSE stream terminates when it sees thinking_end.
+                    if self.event_emitter and message_text:
+                        await self._stream_text_via_sse(conversation_id, message_text)
+
+                    # Emit thinking end (terminates the SSE stream)
                     if self.event_emitter:
                         await self.event_emitter.emit_thinking_end(conversation_id, thinking_duration_ms)
-                    # Response returned via HTTP (no emit_message_final needed)
+                    
                     print(f"[TIMING] thinking_end emitted for {conversation_id}, HTTP response returning NOW")
                     
                     # Get updated context with run_ids
@@ -1326,6 +1333,42 @@ class OrchestrationService:
             conversation_id,
             assistant_message_id
         )
+
+    # =========================================================================
+    # SSE Text Streaming
+    # =========================================================================
+
+    async def _stream_text_via_sse(
+        self,
+        conversation_id: str,
+        text: str,
+        chunk_size: int = 12,
+    ):
+        """
+        Emit the final LLM text as message_delta SSE events in small chunks.
+
+        This creates a typing-effect in the frontend.  The full text is still
+        returned in the HTTP response; the deltas are an *optional* preview
+        layer that fires BEFORE the HTTP body arrives.
+
+        Args:
+            conversation_id: Used as the SSE request_id.
+            text: Complete text to stream.
+            chunk_size: Characters per delta event (~12 = one short word).
+        """
+        if not self.event_emitter or not text:
+            return
+
+        accumulated = 0
+        for i in range(0, len(text), chunk_size):
+            chunk = text[i : i + chunk_size]
+            accumulated += len(chunk)
+            await self.event_emitter.emit_message_delta(
+                conversation_id, chunk, accumulated
+            )
+            # Tiny yield to let the event-loop flush SSE without blocking;
+            # no artificial sleep — we want the text to appear fast.
+            await asyncio.sleep(0)
     
     async def _call_llm(
         self,
