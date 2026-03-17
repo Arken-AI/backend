@@ -39,6 +39,62 @@ class TokenUsage(BaseModel):
     }
 
 
+# =============================================================================
+# Image / File Attachments
+# =============================================================================
+
+# Maximum total payload size for attachments (20 MB)
+MAX_ATTACHMENT_SIZE_BYTES = 20 * 1024 * 1024
+
+# Allowed MIME types for image attachments
+ALLOWED_IMAGE_TYPES = {
+    "image/png",
+    "image/jpeg",
+    "image/jpg",
+    "image/gif",
+    "image/webp",
+}
+
+
+class ImageAttachment(BaseModel):
+    """An image attachment sent alongside a chat message.
+    
+    The image data is base64-encoded and sent inline in the JSON body.
+    For the multipart/form-data upload endpoint the backend converts
+    the uploaded file into this format internally.
+    """
+    
+    media_type: str = Field(
+        ...,
+        description="MIME type of the image (e.g. image/png, image/jpeg)"
+    )
+    data: str = Field(
+        ...,
+        description="Base64-encoded image data (no data-URI prefix)"
+    )
+    filename: Optional[str] = Field(
+        default=None,
+        description="Original filename (for display purposes only)"
+    )
+    
+    @field_validator("media_type")
+    @classmethod
+    def validate_media_type(cls, v: str) -> str:
+        if v not in ALLOWED_IMAGE_TYPES:
+            raise ValueError(
+                f"Unsupported image type '{v}'. "
+                f"Allowed: {', '.join(sorted(ALLOWED_IMAGE_TYPES))}"
+            )
+        return v
+    
+    @field_validator("data")
+    @classmethod
+    def validate_data_not_empty(cls, v: str) -> str:
+        if not v or not v.strip():
+            raise ValueError("Image data cannot be empty")
+        return v.strip()
+
+
 class ChatRequest(BaseModel):
     """Request model for sending a chat message"""
     
@@ -51,6 +107,10 @@ class ChatRequest(BaseModel):
         min_length=1,
         max_length=10000,
         description="User message to send to the assistant"
+    )
+    attachments: Optional[List[ImageAttachment]] = Field(
+        default=None,
+        description="Optional list of image attachments to include with the message"
     )
     metadata: Optional[Dict[str, Any]] = Field(
         default=None,
@@ -65,6 +125,29 @@ class ChatRequest(BaseModel):
             raise ValueError("Message cannot be empty or whitespace only")
         return v.strip()
     
+    @field_validator('attachments')
+    @classmethod
+    def validate_attachments(cls, v):
+        """Limit number of attachments and total size."""
+        if v is None:
+            return v
+        if len(v) > 5:
+            raise ValueError("Maximum 5 image attachments per message")
+        # Rough size check (base64 is ~4/3 of raw bytes)
+        import base64
+        total_bytes = 0
+        for att in v:
+            try:
+                total_bytes += len(base64.b64decode(att.data))
+            except Exception:
+                raise ValueError(f"Invalid base64 data for attachment '{att.filename}'")
+        if total_bytes > MAX_ATTACHMENT_SIZE_BYTES:
+            raise ValueError(
+                f"Total attachment size ({total_bytes / 1024 / 1024:.1f} MB) "
+                f"exceeds limit ({MAX_ATTACHMENT_SIZE_BYTES / 1024 / 1024:.0f} MB)"
+            )
+        return v
+    
     model_config = {
         "json_schema_extra": {
             "examples": [
@@ -74,7 +157,14 @@ class ChatRequest(BaseModel):
                 },
                 {
                     "conversation_id": "conv_123abc456def789a",
-                    "message": "Simulate sugar mill with 1000kg cane",
+                    "message": "Analyze this P&ID diagram",
+                    "attachments": [
+                        {
+                            "media_type": "image/png",
+                            "data": "<base64-encoded-image>",
+                            "filename": "pfd_diagram.png"
+                        }
+                    ],
                     "metadata": {"user_id": "user_456"}
                 }
             ]

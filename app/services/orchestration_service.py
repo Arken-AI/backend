@@ -202,7 +202,8 @@ class OrchestrationService:
         conversation_id: str,
         user_message: str,
         user_id: str = "default_user",
-        metadata: Optional[Dict[str, Any]] = None
+        metadata: Optional[Dict[str, Any]] = None,
+        attachments: Optional[List[Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
         """
         Main entry point: Process user message using an agentic loop.
@@ -355,11 +356,37 @@ class OrchestrationService:
                     "content": content if content and content.strip() else "[Tool execution in progress]"
                 })
             
-            # Add current user message
-            conversation_history.append({"role": "user", "content": user_message})
+            # Add current user message (with optional image attachments)
+            if attachments:
+                # Build multimodal content blocks for LLM
+                content_blocks = []
+                for att in attachments:
+                    content_blocks.append({
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": att["media_type"],
+                            "data": att["data"],
+                        }
+                    })
+                content_blocks.append({"type": "text", "text": user_message})
+                conversation_history.append({"role": "user", "content": content_blocks})
+            else:
+                conversation_history.append({"role": "user", "content": user_message})
             
             # Save user message to context for future turns
-            await self.context_manager.add_message(conversation_id, "user", user_message)
+            # (store text only — image data is not persisted in conversation history
+            #  to keep Redis/MongoDB payloads small)
+            attachment_meta = None
+            if attachments:
+                attachment_meta = [
+                    {"media_type": a["media_type"], "filename": a.get("filename")}
+                    for a in attachments
+                ]
+            await self.context_manager.add_message(
+                conversation_id, "user", user_message,
+                metadata={"attachments": attachment_meta} if attachment_meta else None,
+            )
             
             # Emit thinking start
             if self.event_emitter:
@@ -978,6 +1005,17 @@ class OrchestrationService:
             "You are a senior process engineer assistant for chemical and sugar/ethanol plant simulation.",
             "Scope: distillation, evaporation, heat exchange, pumping, flash separation, adsorption, and sugar/ethanol processing.",
             "Out of scope: questions unrelated to process engineering — politely redirect.",
+            "",
+            "IMAGE / VISION CAPABILITIES:",
+            "You CAN see and analyze images attached by the user. Typical use-cases:",
+            "- P&ID (piping and instrumentation diagrams) — identify equipment, streams, instruments.",
+            "- PFD (process flow diagrams) — extract topology, operating conditions, stream data.",
+            "- Equipment datasheets / spec sheets — read design parameters.",
+            "- Plots, charts, experiment data — interpret trends and values.",
+            "- Photos of plant equipment — identify type, condition, nameplate data.",
+            "When an image is attached, analyze it thoroughly in the context of process engineering.",
+            "Describe what you see, extract relevant data, and suggest next steps (e.g., setting up a simulation based on the diagram).",
+            "",
             "Always use tools to retrieve real values. If unsure about a parameter's physical meaning or valid range, ask the user rather than assuming.",
             "When a tool returns a result_link, include it verbatim in your response.",
             "",
