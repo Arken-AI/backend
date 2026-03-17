@@ -10,17 +10,21 @@ Note: SSE streaming is still available for real-time tool progress updates,
 but the final response is returned directly in the HTTP response.
 """
 
+import base64
 import logging
 import uuid
 from datetime import datetime
-from typing import Dict, Any, Optional
+from typing import Dict, Any, List, Optional
 
-from fastapi import APIRouter, HTTPException, Depends, status
+from fastapi import APIRouter, File, Form, HTTPException, Depends, UploadFile, status
 from fastapi.responses import JSONResponse
 
 from app.models.requests import (
     ChatRequest,
     ChatResponse,
+    ImageAttachment,
+    ALLOWED_IMAGE_TYPES,
+    MAX_ATTACHMENT_SIZE_BYTES,
     ConversationContextResponse,
     ConversationListResponse,
     ConversationListItem,
@@ -89,12 +93,25 @@ async def send_message(
         
         user_id = request.metadata.get("user_id", "default_user") if request.metadata else "default_user"
         
+        # Convert attachments to dicts for the orchestration layer
+        attachments = None
+        if request.attachments:
+            attachments = [
+                {
+                    "media_type": att.media_type,
+                    "data": att.data,
+                    "filename": att.filename,
+                }
+                for att in request.attachments
+            ]
+        
         # Process message synchronously - wait for complete response
         result = await orchestration.process_message(
             conversation_id=conversation_id,
             user_message=request.message,
             user_id=user_id,
-            metadata=request.metadata or {}
+            metadata=request.metadata or {},
+            attachments=attachments,
         )
         
         logger.info(
@@ -154,6 +171,147 @@ async def send_message(
         
         return ChatResponse(
             conversation_id=error_conversation_id,
+            request_id=f"req_{uuid.uuid4().hex[:16]}",
+            status="error",
+            message=f"Internal error: {str(e)}"
+        )
+
+
+# =============================================================================
+# Multipart File Upload Endpoint
+# =============================================================================
+
+@router.post(
+    "/chat/upload",
+    response_model=ChatResponse,
+    summary="Send Chat Message with File Uploads",
+    description="Send a message with image attachments via multipart form data.",
+    responses={
+        200: {"description": "Message processed successfully", "model": ChatResponse},
+        400: {"description": "Invalid request", "model": ErrorResponse},
+        413: {"description": "File too large", "model": ErrorResponse},
+        500: {"description": "Internal server error", "model": ErrorResponse},
+    }
+)
+async def send_message_with_files(
+    conversation_id: str = Form(..., description="Client-generated conversation ID"),
+    message: str = Form(..., min_length=1, max_length=10000, description="User message"),
+    metadata_json: Optional[str] = Form(default=None, description="JSON-encoded metadata"),
+    files: List[UploadFile] = File(default=[], description="Image files to attach"),
+    orchestration: OrchestrationService = Depends(get_orchestration_service),
+) -> ChatResponse:
+    """
+    Send a chat message with image file uploads.
+    
+    This is an alternative to POST /chat for when the client wants to upload
+    real files instead of base64-encoding them in JSON.  The backend reads
+    each file, validates the MIME type and total size, base64-encodes the
+    bytes, and feeds them into the same orchestration pipeline.
+    """
+    try:
+        request_id = f"req_{uuid.uuid4().hex[:16]}"
+        
+        # Parse optional metadata
+        import json as _json
+        metadata: Dict[str, Any] = {}
+        if metadata_json:
+            try:
+                metadata = _json.loads(metadata_json)
+            except _json.JSONDecodeError:
+                raise HTTPException(status_code=400, detail="metadata_json is not valid JSON")
+        
+        user_id = metadata.get("user_id", "default_user")
+        
+        # Validate and convert uploaded files
+        attachments: List[Dict[str, Any]] = []
+        if len(files) > 5:
+            raise HTTPException(status_code=400, detail="Maximum 5 image attachments per message")
+        
+        total_bytes = 0
+        for f in files:
+            # Validate MIME type
+            content_type = f.content_type or "application/octet-stream"
+            if content_type not in ALLOWED_IMAGE_TYPES:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Unsupported file type '{content_type}' for file '{f.filename}'. "
+                           f"Allowed: {', '.join(sorted(ALLOWED_IMAGE_TYPES))}"
+                )
+            
+            raw_bytes = await f.read()
+            total_bytes += len(raw_bytes)
+            if total_bytes > MAX_ATTACHMENT_SIZE_BYTES:
+                raise HTTPException(
+                    status_code=413,
+                    detail=f"Total upload size exceeds {MAX_ATTACHMENT_SIZE_BYTES // (1024*1024)} MB limit"
+                )
+            
+            attachments.append({
+                "media_type": content_type,
+                "data": base64.b64encode(raw_bytes).decode("ascii"),
+                "filename": f.filename,
+            })
+        
+        # Process through the same orchestration pipeline
+        result = await orchestration.process_message(
+            conversation_id=conversation_id,
+            user_message=message.strip(),
+            user_id=user_id,
+            metadata=metadata,
+            attachments=attachments if attachments else None,
+        )
+        
+        logger.info(
+            f"Upload chat completed: conversation_id={conversation_id}, "
+            f"files={len(attachments)}, status={result.get('status', 'unknown')}"
+        )
+        
+        # Build response (same as send_message)
+        token_usage = None
+        if result.get("token_usage"):
+            token_usage = TokenUsage(
+                input_tokens=result["token_usage"].get("input_tokens", 0),
+                output_tokens=result["token_usage"].get("output_tokens", 0),
+                total_tokens=result["token_usage"].get("total_tokens", 0)
+            )
+        
+        tool_executions = []
+        for tool_call in result.get("tool_calls", []):
+            tool_result = tool_call.get("result") or {}
+            raw_summary = tool_call.get("summary")
+            if not isinstance(raw_summary, str):
+                raw_summary = None
+            if not raw_summary:
+                raw_summary = tool_result.get("message") if isinstance(tool_result.get("message"), str) else None
+            if not raw_summary:
+                raw_summary = tool_result.get("summary") if isinstance(tool_result.get("summary"), str) else None
+            if not raw_summary:
+                raw_summary = str(tool_result)[:200]
+            tool_executions.append(ToolExecution(
+                tool_name=tool_call.get("name") or tool_call.get("tool_name") or "unknown",
+                status=tool_call.get("status", "success"),
+                duration_ms=tool_call.get("duration_ms"),
+                summary=raw_summary,
+                arguments=tool_call.get("arguments"),
+                result=tool_result if tool_result else None
+            ))
+        
+        return ChatResponse(
+            conversation_id=conversation_id,
+            request_id=request_id,
+            status="completed" if result.get("status") == "success" else "error",
+            message=result.get("message", ""),
+            token_usage=token_usage,
+            run_ids=result.get("run_ids", []),
+            tool_executions=tool_executions
+        )
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error processing upload chat message: {e}", exc_info=True)
+        return ChatResponse(
+            conversation_id=conversation_id,
             request_id=f"req_{uuid.uuid4().hex[:16]}",
             status="error",
             message=f"Internal error: {str(e)}"

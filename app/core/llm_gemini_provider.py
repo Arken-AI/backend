@@ -300,17 +300,42 @@ class GeminiProvider:
                 # Gemini uses "model" instead of "assistant"
                 gemini_role = "model" if role == "assistant" else role
                 
-                # Content can be a string or a list of parts
+                # Content can be a string, a list of content blocks, or Gemini parts
                 if isinstance(content, str):
                     gemini_messages.append({
                         "role": gemini_role,
                         "parts": [{"text": content}]
                     })
                 elif isinstance(content, list):
-                    # Already in parts format
+                    # Could be orchestration multimodal blocks or Gemini parts
+                    parts = []
+                    for block in content:
+                        if isinstance(block, dict):
+                            block_type = block.get("type")
+                            if block_type == "text":
+                                parts.append({"text": block["text"]})
+                            elif block_type == "image":
+                                # Convert from orchestration image format to Gemini inline_data
+                                # google-genai SDK expects data as raw bytes, not base64 string
+                                import base64 as _b64
+                                source = block.get("source", {})
+                                raw_data = source.get("data", "")
+                                if isinstance(raw_data, str):
+                                    raw_data = _b64.b64decode(raw_data)
+                                parts.append(
+                                    types.Part.from_bytes(
+                                        data=raw_data,
+                                        mime_type=source.get("media_type", "image/png"),
+                                    )
+                                )
+                            else:
+                                # Already in Gemini parts format or unknown — pass through
+                                parts.append(block)
+                        else:
+                            parts.append(block)
                     gemini_messages.append({
                         "role": gemini_role,
-                        "parts": content
+                        "parts": parts
                     })
         
         return gemini_messages

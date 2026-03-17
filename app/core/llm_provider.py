@@ -175,11 +175,29 @@ def convert_messages_to_anthropic(messages: List[Dict[str, Any]]) -> List[Dict[s
         role = msg.get("role")
         
         if role == "user":
-            # Simple user message - skip empty content
+            # User message — can be plain text or multimodal (list of content blocks)
             content = msg.get("content", "")
             if isinstance(content, str) and not content.strip():
                 continue
-            if isinstance(content, str):
+            if isinstance(content, list):
+                # Already a list of content blocks (text + image)
+                # Convert to Anthropic's expected format
+                anthropic_blocks = []
+                for block in content:
+                    block_type = block.get("type")
+                    if block_type == "text":
+                        anthropic_blocks.append({"type": "text", "text": block["text"]})
+                    elif block_type == "image":
+                        # Anthropic expects: {"type": "image", "source": {"type": "base64", ...}}
+                        anthropic_blocks.append({
+                            "type": "image",
+                            "source": block["source"]
+                        })
+                    else:
+                        # Pass through unknown block types
+                        anthropic_blocks.append(block)
+                converted.append({"role": "user", "content": anthropic_blocks})
+            elif isinstance(content, str):
                 converted.append({"role": "user", "content": content})
             else:
                 converted.append({"role": "user", "content": content})
