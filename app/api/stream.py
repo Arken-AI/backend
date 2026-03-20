@@ -122,21 +122,14 @@ async def event_stream_generator(
                         last_sequence = event.sequence
                     
                     # Check if stream is complete
-                    # Terminate on thinking_end (always the last event from the
-                    # agentic loop) or message_final (legacy / explicit close).
-                    if event.event_type in (EventType.THINKING_END, EventType.MESSAGE_FINAL):
-                        # For message_final, skip intermediate messages
-                        if event.event_type == EventType.MESSAGE_FINAL:
-                            is_intermediate = False
-                            if hasattr(event, 'metadata') and event.metadata:
-                                is_intermediate = event.metadata.get('is_intermediate', False)
-                            if is_intermediate:
-                                logger.info(f"Intermediate message_final for {request_id}, continuing stream...")
-                                last_keepalive = current_time
-                                continue
-
-                        logger.info(f"[SSE STREAM] Sending {event.event_type} to client for {request_id} at sequence {last_sequence}")
-                        logger.info(f"Stream complete for {request_id} at sequence {last_sequence} ({event.event_type})")
+                    # Only terminate on thinking_end — it's always the last
+                    # meaningful event for a turn. message_final is NOT used
+                    # as a termination signal because a leftover message_final
+                    # from the previous turn (seq = prev_thinking_end + 1)
+                    # can still be in Redis and would prematurely close the
+                    # stream before the new turn's events arrive.
+                    if event.event_type == EventType.THINKING_END:
+                        print(f"[SSE STREAM] thinking_end for {request_id} at seq={last_sequence} — closing stream")
                         stream_complete = True
                         break
                     
