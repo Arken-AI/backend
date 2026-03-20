@@ -33,9 +33,7 @@ from anthropic.types.message_create_params import MessageCreateParamsNonStreamin
 # Configuration
 # =============================================================================
 
-# Model is configured via settings.llm_model (single source of truth)
-# Kept as fallback only for direct instantiation outside of dependency injection
-DEFAULT_MODEL = "claude-haiku-4"
+# Model is always passed from settings.llm_model (single source of truth)
 DEFAULT_MAX_TOKENS = 4096
 DEFAULT_TEMPERATURE = 1.0
 
@@ -307,7 +305,7 @@ class ClaudeProvider:
     def __init__(
         self,
         api_key: Optional[str] = None,
-        model: str = DEFAULT_MODEL,
+        model: str = "claude-haiku-4-5",  # override via settings.llm_model
         max_tokens: int = DEFAULT_MAX_TOKENS,
         temperature: float = DEFAULT_TEMPERATURE,
         max_retries: int = 3,
