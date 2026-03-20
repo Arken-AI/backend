@@ -129,30 +129,23 @@ class OrchestrationService:
             input_tokens = 0
             output_tokens = 0
 
-            async for event in self.llm_provider.create_message_stream(
+            async with self.llm_provider.create_message_stream(
                 messages=messages,
                 system=SYSTEM_PROMPT,
-            ):
-                # Handle different event types from Anthropic streaming
-                if event.type == "content_block_delta":
-                    if hasattr(event.delta, "text"):
-                        chunk = event.delta.text
-                        full_response += chunk
-                        await self.event_emitter.emit_message_delta(
-                            request_id=request_id,
-                            delta=chunk,
-                            accumulated_length=len(full_response),
-                        )
+            ) as stream:
+                # Simplified text streaming — SDK filters to just text chunks
+                async for text in stream.text_stream:
+                    full_response += text
+                    await self.event_emitter.emit_message_delta(
+                        request_id=request_id,
+                        delta=text,
+                        accumulated_length=len(full_response),
+                    )
 
-                elif event.type == "message_start":
-                    if hasattr(event.message, "usage"):
-                        input_tokens = event.message.usage.input_tokens
-
-                elif event.type == "message_delta":
-                    if hasattr(event, "usage") and event.usage:
-                        output_tokens = getattr(
-                            event.usage, "output_tokens", 0
-                        )
+                # Get the complete message for token usage
+                final_message = await stream.get_final_message()
+                input_tokens = final_message.usage.input_tokens
+                output_tokens = final_message.usage.output_tokens
 
             # ── 6. Emit thinking end + final message ─────────────────────
             elapsed_so_far = int(
