@@ -22,9 +22,9 @@ Architecture:
 import asyncio
 import traceback
 import httpx
-from typing import Any, AsyncGenerator, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Union
 from anthropic import Anthropic, AsyncAnthropic
-from anthropic.types import Message, MessageStreamEvent
+from anthropic.types import Message
 from anthropic.types.message_create_params import MessageCreateParamsNonStreaming
 
 
@@ -35,7 +35,7 @@ from anthropic.types.message_create_params import MessageCreateParamsNonStreamin
 
 # Model is configured via settings.llm_model_claude (single source of truth)
 # Kept as fallback only for direct instantiation outside of dependency injection
-DEFAULT_MODEL = "claude-sonnet-4-6"
+DEFAULT_MODEL = "claude-haiku-4"
 DEFAULT_MAX_TOKENS = 4096
 DEFAULT_TEMPERATURE = 1.0
 
@@ -421,20 +421,21 @@ class ClaudeProvider:
             print(f"ERROR: Claude API error: {e}")
             raise
     
-    async def create_message_stream(
+    def create_message_stream(
         self,
         messages: List[Dict[str, str]],
         tools: Optional[List[Dict[str, Any]]] = None,
         system: Optional[str] = None,
         **kwargs
-    ) -> AsyncGenerator[MessageStreamEvent, None]:
+    ):
         """
         Create a streaming message with Claude.
         
-        This yields events as Claude generates the response. Use this when:
-        - You want real-time user feedback (typing effect)
-        - Building chat UIs with streaming
-        - Need to show progress for long responses
+        Returns an async context manager (MessageStream) that provides:
+        - stream.text_stream: async iterator yielding text chunks only
+        - stream.get_final_message(): complete Message object after streaming
+        
+        Uses the Anthropic SDK's simplified streaming interface.
         
         Args:
             messages: Conversation history in Anthropic format
@@ -442,28 +443,19 @@ class ClaudeProvider:
             system: Optional system prompt
             **kwargs: Additional parameters for message creation
             
-        Yields:
-            MessageStreamEvent objects as they arrive
-            
-        Event types:
-            - message_start: Message begins
-            - content_block_start: New content block (text or tool_use)
-            - content_block_delta: Incremental content (text delta)
-            - content_block_stop: Content block complete
-            - message_delta: Message metadata updates
-            - message_stop: Message complete
+        Returns:
+            AsyncContextManager[MessageStream] — use with ``async with``
             
         Example:
-            async for event in provider.create_message_stream(
-                messages=[{"role": "user", "content": "Simulate sugar factory"}],
-                tools=mcp_tools
-            ):
-                if event.type == "content_block_delta":
-                    if event.delta.type == "text_delta":
-                        print(event.delta.text, end="", flush=True)
-                elif event.type == "content_block_start":
-                    if event.content_block.type == "tool_use":
-                        print(f"\\n[Calling tool: {event.content_block.name}]")
+            async with provider.create_message_stream(
+                messages=[{"role": "user", "content": "Hello"}],
+                system="You are a helpful assistant"
+            ) as stream:
+                async for text in stream.text_stream:
+                    print(text, end="", flush=True)
+                
+                final = await stream.get_final_message()
+                print(final.usage)
         """
         # Convert tools to Anthropic format
         anthropic_tools = None
@@ -487,14 +479,9 @@ class ClaudeProvider:
         if anthropic_tools:
             params["tools"] = anthropic_tools
         
-        try:
-            async with self.client.messages.stream(**params) as stream:
-                async for event in stream:
-                    yield event
-            
-        except Exception as e:
-            print(f"ERROR: Claude streaming error: {e}")
-            raise
+        # Return the stream context manager directly
+        # Caller uses: async with provider.create_message_stream(...) as stream:
+        return self.client.messages.stream(**params)
     
     async def close(self):
         """Close the Anthropic client connection."""
