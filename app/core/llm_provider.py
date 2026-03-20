@@ -33,7 +33,7 @@ from anthropic.types.message_create_params import MessageCreateParamsNonStreamin
 # Configuration
 # =============================================================================
 
-# Model is configured via settings.llm_model_claude (single source of truth)
+# Model is configured via settings.llm_model (single source of truth)
 # Kept as fallback only for direct instantiation outside of dependency injection
 DEFAULT_MODEL = "claude-haiku-4"
 DEFAULT_MAX_TOKENS = 4096

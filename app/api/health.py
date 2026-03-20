@@ -86,7 +86,7 @@ async def check_llm_health() -> ServiceStatus:
             return ServiceStatus(
                 name="LLM Provider",
                 status="healthy",
-                message=f"Claude API key configured (model: {settings.llm_model_claude})"
+                message=f"Claude API key configured (model: {settings.llm_model})"
             )
         else:
             return ServiceStatus(
@@ -137,7 +137,7 @@ async def check_llm_health() -> ServiceStatus:
                             "llm": {
                                 "name": "LLM Provider",
                                 "status": "healthy",
-                                "message": "Google Gemini client initialized (model: gemini-2.0-flash)"
+                                "message": "Claude API key configured (model: claude-haiku-4)"
                             }
                         },
                         "timestamp": "2026-01-07T10:00:00Z",

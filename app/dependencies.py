@@ -39,7 +39,7 @@ def get_llm_provider() -> ClaudeProvider:
     if _llm_provider is None:
         _llm_provider = ClaudeProvider(
             api_key=settings.anthropic_api_key,
-            model=settings.llm_model_claude
+            model=settings.llm_model
         )
     
     return _llm_provider
