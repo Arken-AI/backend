@@ -11,10 +11,14 @@ No tools, no MCP, no agentic loop. Just clean conversational AI.
 When HX Engine tools become available, they will be added here.
 """
 
+import base64
+import io
 import logging
 import traceback
 from typing import Dict, Any, List, Optional
 from datetime import datetime
+
+from docx import Document as DocxDocument
 
 from app.config import settings
 from app.services.context_manager import ContextManager
@@ -247,9 +251,6 @@ class OrchestrationService:
                 })
             elif media_type == DOCX_MIME:
                 try:
-                    import base64
-                    import io
-                    from docx import Document as DocxDocument
                     raw = base64.b64decode(data)
                     doc = DocxDocument(io.BytesIO(raw))
                     extracted = "\n".join(p.text for p in doc.paragraphs if p.text.strip())
