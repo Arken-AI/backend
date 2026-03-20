@@ -3,13 +3,13 @@ requires = ["setuptools>=68.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "mcp-chat-backend"
-version = "0.1.0"
-description = "Production-grade chat backend for MCP Process Server"
+name = "arken-backend"
+version = "0.2.0"
+description = "AI-powered chat backend for ARKEN process engineering platform"
 readme = "README.md"
 requires-python = ">=3.10"
 authors = [{ name = "Arken AI", email = "info@arken.ai" }]
-keywords = ["mcp", "chat", "backend", "fastapi", "anthropic"]
+keywords = ["arken", "chat", "backend", "fastapi", "anthropic", "engineering"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
@@ -44,10 +44,8 @@ dependencies = [
     # Utilities
     "python-multipart>=0.0.6,<0.1.0", # For file uploads
 
-    # MCP SDK (SSE client for connecting to MCP servers)
-    "mcp>=1.0.0,<2.0.0",
+    # HTTP client
     "httpx>=0.27.0,<0.29.0",
-    "httpx-sse>=0.4.0,<0.5.0",
     "sse-starlette>=2.0.0,<4.0.0",
 
     # Report generation

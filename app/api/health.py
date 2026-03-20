@@ -14,10 +14,8 @@ from fastapi.responses import JSONResponse
 from app.dependencies import (
     get_redis_client,
     get_mongo_client,
-    get_mcp_registry
 )
 from app.config import settings
-from app.core.mcp_client import MCPClientRegistry
 from app.models.requests import HealthResponse, ServiceStatus
 
 
@@ -75,42 +73,6 @@ async def check_mongodb_health(mongo_client) -> ServiceStatus:
         print(f"ERROR: " + str(f"MongoDB health check failed: {e}"))
         return ServiceStatus(
             name="MongoDB",
-            status="unhealthy",
-            message=f"Connection failed: {str(e)}"
-        )
-
-
-async def check_mcp_health(mcp_registry: MCPClientRegistry) -> ServiceStatus:
-    """Check MCP server connection via registry (calc_engine only)"""
-    try:
-        start_time = time.time()
-
-        # Check if any server in the registry is connected
-        health_status = mcp_registry.get_health_status()
-        connected = [name for name, info in health_status.items() if info["connected"]]
-
-        if not connected:
-            return ServiceStatus(
-                name="MCP Server",
-                status="unhealthy",
-                message="No MCP servers connected"
-            )
-
-        # List tools from connected servers
-        tools = await mcp_registry.list_all_tools()
-        response_time = (time.time() - start_time) * 1000
-        tool_count = len(tools) if tools else 0
-
-        return ServiceStatus(
-            name="MCP Server",
-            status="healthy",
-            message=f"Connected servers: {connected}, {tool_count} tools available",
-            response_time_ms=round(response_time, 2)
-        )
-    except Exception as e:
-        print(f"ERROR: " + str(f"MCP health check failed: {e}"))
-        return ServiceStatus(
-            name="MCP Server",
             status="unhealthy",
             message=f"Connection failed: {str(e)}"
         )
@@ -208,7 +170,6 @@ async def check_llm_health() -> ServiceStatus:
 async def health_check(
     redis_client=Depends(get_redis_client),
     mongo_client=Depends(get_mongo_client),
-    mcp_registry: MCPClientRegistry = Depends(get_mcp_registry)
 ):
     """
     Perform health check on all backend services.
@@ -216,11 +177,10 @@ async def health_check(
     Returns:
         HealthResponse with overall status and individual service statuses
     """
-    # Check all services in parallel
+    # Check all services
     service_checks = {
         "redis": await check_redis_health(redis_client),
         "mongodb": await check_mongodb_health(mongo_client),
-        "mcp": await check_mcp_health(mcp_registry),
         "llm": await check_llm_health()
     }
     

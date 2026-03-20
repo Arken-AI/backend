@@ -58,7 +58,7 @@ logging.config.dictConfig({
 })
 
 from app.api import stream, health, chat, test_stream, runs, reports, auth
-from app.dependencies import close_redis_client, close_mcp_clients, close_llm_provider, close_mongo_client
+from app.dependencies import close_redis_client, close_llm_provider, close_mongo_client
 from app.config import settings
 
 logger = logging.getLogger(__name__)
@@ -69,7 +69,7 @@ class CORSSafeErrorMiddleware(BaseHTTPMiddleware):
     Middleware that catches unhandled exceptions (e.g. dependency injection failures,
     connection drops) and returns a proper JSON error response.
     
-    Without this, when a dependency like Redis/MongoDB/MCP crashes, FastAPI generates 
+    Without this, when a dependency like Redis/MongoDB crashes, FastAPI generates 
     a raw 500 response during dependency resolution — BEFORE CORSMiddleware can add 
     CORS headers. The browser then reports a misleading "CORS error" instead of the 
     real connection error.
@@ -100,14 +100,13 @@ async def lifespan(app: FastAPI):
     
     Handles startup and shutdown events:
     - Startup: Initialize connections
-    - Shutdown: Close Redis, MongoDB, MCP clients, etc.
+    - Shutdown: Close Redis, MongoDB, LLM clients, etc.
     """
     # Startup
     yield
     
     # Shutdown
     await close_llm_provider()  # Close LLM httpx connection pool
-    await close_mcp_clients()  # Close both MCP server connections
     await close_mongo_client()  # Close MongoDB connection pool
     await close_redis_client()
 
@@ -120,8 +119,8 @@ def create_app() -> FastAPI:
         FastAPI: Configured FastAPI application instance
     """
     app = FastAPI(
-        title="MCP Chat Backend",
-        description="Production-grade chat backend for MCP Process Server",
+        title="ARKEN AI Backend",
+        description="AI-powered chat backend for process engineering",
         version="0.1.0",
         lifespan=lifespan
     )
@@ -139,7 +138,7 @@ def create_app() -> FastAPI:
     
     # 1. Add error-catching middleware FIRST (runs inside CORS)
     # This catches unhandled exceptions from dependency injection failures
-    # (Redis/MongoDB/MCP connection drops) and converts them to proper JSON 
+    # (Redis/MongoDB connection drops) and converts them to proper JSON 
     # responses that CORSMiddleware can then decorate with CORS headers.
     app.add_middleware(CORSSafeErrorMiddleware)
     
@@ -172,7 +171,7 @@ app = create_app()
 async def root():
     """Root endpoint - basic health check"""
     return {
-        "service": "MCP Chat Backend",
+        "service": "ARKEN AI Backend",
         "version": "0.1.0",
         "status": "online",
         "features": ["SSE Event Streaming"],

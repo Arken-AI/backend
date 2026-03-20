@@ -71,32 +71,6 @@ class Settings(BaseSettings):
     )
     
     # =============================================================================
-    # MCP Process Server Configuration (Sugar Industry, etc.)
-    # =============================================================================
-    # MCP Process Server Configuration (Sugar Industry, etc.) - SSE Transport
-    # =============================================================================
-    mcp_server_url: str = Field(
-        default="http://localhost:8080/sse",
-        description="MCP process server SSE endpoint URL"
-    )
-    mcp_process_server_enabled: bool = Field(
-        default=True,
-        description="Enable MCP process server connection"
-    )
-    
-    # =============================================================================
-    # MCP Calculation Engine Server Configuration (Dynamic Flowsheets) - SSE Transport
-    # =============================================================================
-    mcp_calc_engine_enabled: bool = Field(
-        default=True,
-        description="Enable MCP calculation engine server"
-    )
-    mcp_calc_engine_server_url: str = Field(
-        default="",
-        description="MCP calculation engine SSE endpoint URL"
-    )
-    
-    # =============================================================================
     # LLM Provider Configuration
     # =============================================================================
     anthropic_api_key: Optional[str] = Field(

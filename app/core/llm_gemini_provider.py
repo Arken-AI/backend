@@ -30,8 +30,6 @@ from typing import Any, AsyncGenerator, Dict, List, Optional, Union
 from google import genai
 from google.genai import types
 
-from .mcp_client import MCPTool
-
 
 
 # =============================================================================
@@ -47,34 +45,14 @@ DEFAULT_TEMPERATURE = 1.0
 # Tool Conversion
 # =============================================================================
 
-def convert_mcp_tools_to_gemini(mcp_tools: List[MCPTool]) -> List[Dict[str, Any]]:
+def convert_tools_to_gemini(tools: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """
-    Convert MCP tools to Gemini function declaration format.
+    Convert tool definitions to Gemini function declaration format.
     
-    MCP format:
-        MCPTool(
-            name="simulate_process",
-            description="Run a complete process simulation...",
-            input_schema={
-                "type": "object",
-                "properties": {...},
-                "required": [...]
-            }
-        )
-    
-    Gemini format:
-        {
-            "name": "simulate_process",
-            "description": "Run a complete process simulation...",
-            "parameters": {
-                "type": "object",
-                "properties": {...},
-                "required": [...]
-            }
-        }
+    Accepts dicts with 'name', 'description', 'input_schema' keys.
     
     Args:
-        mcp_tools: List of MCP tool objects
+        tools: List of tool definition dicts
         
     Returns:
         List of tools in Gemini function declaration format
@@ -84,23 +62,20 @@ def convert_mcp_tools_to_gemini(mcp_tools: List[MCPTool]) -> List[Dict[str, Any]
     def clean_schema(schema):
         """Recursively remove unsupported fields from schema."""
         if isinstance(schema, dict):
-            # Remove fields Gemini doesn't support
             cleaned = {k: v for k, v in schema.items() 
                       if k not in ('examples', 'additionalProperties', 'additional_properties')}
-            # Recursively clean nested objects
             return {k: clean_schema(v) for k, v in cleaned.items()}
         elif isinstance(schema, list):
             return [clean_schema(item) for item in schema]
         else:
             return schema
     
-    for tool in mcp_tools:
-        # Deep copy and clean the input schema
-        params = clean_schema(tool.input_schema)
+    for tool in tools:
+        params = clean_schema(tool.get("input_schema", {"type": "object", "properties": {}}))
         
         gemini_tools.append({
-            "name": tool.name,
-            "description": tool.description,
+            "name": tool["name"],
+            "description": tool.get("description", ""),
             "parameters": params
         })
     
@@ -183,22 +158,13 @@ class GeminiProvider:
     Usage:
         provider = GeminiProvider(api_key="...")
         
-        # Get tools from MCP
-        mcp_tools = await mcp_client.list_tools()
-        
         # Create message
         response = await provider.create_message(
-            messages=[{"role": "user", "content": "Simulate a sugar factory"}],
-            tools=mcp_tools
+            messages=[{"role": "user", "content": "Design a heat exchanger"}],
+            system="You are a process engineering assistant"
         )
         
-        # Check for function calls
-        if response.has_tool_calls:
-            for tool_call in response.tool_calls:
-                result = await mcp_client.call_tool(
-                    tool_call["name"],
-                    tool_call["input"]
-                )
+        print(response.text)  # Gemini's text response
     """
     
     def __init__(
@@ -343,7 +309,7 @@ class GeminiProvider:
     async def create_message(
         self,
         messages: List[Dict[str, str]],
-        tools: Optional[List[MCPTool]] = None,
+        tools: Optional[List[Dict[str, Any]]] = None,
         system: Optional[str] = None,
         **kwargs
     ) -> GeminiParsedResponse:
@@ -380,12 +346,11 @@ class GeminiProvider:
         # Convert messages to Gemini format
         gemini_messages = self._convert_messages(messages)
         
-        # Convert MCP tools to Gemini format
+        # Convert tools to Gemini format
         gemini_tools = None
         if tools:
-            function_declarations = convert_mcp_tools_to_gemini(tools)
+            function_declarations = convert_tools_to_gemini(tools)
             gemini_tools = types.Tool(function_declarations=function_declarations)
-            print(f"Converted {len(tools)} MCP tools to Gemini format")
         
         # Build generation config
         config = types.GenerateContentConfig(
@@ -428,7 +393,7 @@ class GeminiProvider:
     async def create_message_stream(
         self,
         messages: List[Dict[str, str]],
-        tools: Optional[List[MCPTool]] = None,
+        tools: Optional[List[Dict[str, Any]]] = None,
         system: Optional[str] = None,
         **kwargs
     ) -> AsyncGenerator[Any, None]:
@@ -462,12 +427,11 @@ class GeminiProvider:
         # Convert messages to Gemini format
         gemini_messages = self._convert_messages(messages)
         
-        # Convert MCP tools to Gemini format
+        # Convert tools to Gemini format
         gemini_tools = None
         if tools:
-            function_declarations = convert_mcp_tools_to_gemini(tools)
+            function_declarations = convert_tools_to_gemini(tools)
             gemini_tools = types.Tool(function_declarations=function_declarations)
-            print(f"Converted {len(tools)} MCP tools for streaming")
         
         # Build generation config
         config = types.GenerateContentConfig(
