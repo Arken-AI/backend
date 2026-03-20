@@ -27,8 +27,6 @@ from anthropic import Anthropic, AsyncAnthropic
 from anthropic.types import Message, MessageStreamEvent
 from anthropic.types.message_create_params import MessageCreateParamsNonStreaming
 
-from .mcp_client import MCPTool
-
 
 
 # =============================================================================
@@ -46,45 +44,25 @@ DEFAULT_TEMPERATURE = 1.0
 # Tool Conversion
 # =============================================================================
 
-def convert_mcp_tools_to_anthropic(mcp_tools: List[MCPTool]) -> List[Dict[str, Any]]:
+def convert_tools_to_anthropic(tools: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """
-    Convert MCP tools to Anthropic tool format.
+    Convert tool definitions to Anthropic tool format.
     
-    MCP format:
-        MCPTool(
-            name="simulate_process",
-            description="Run a complete process simulation...",
-            input_schema={
-                "type": "object",
-                "properties": {...},
-                "required": [...]
-            }
-        )
-    
-    Anthropic format:
-        {
-            "name": "simulate_process",
-            "description": "Run a complete process simulation...",
-            "input_schema": {
-                "type": "object",
-                "properties": {...},
-                "required": [...]
-            }
-        }
+    Accepts dicts with 'name', 'description', 'input_schema' keys.
     
     Args:
-        mcp_tools: List of MCP tool objects
+        tools: List of tool definition dicts
         
     Returns:
         List of tools in Anthropic format
     """
     return [
         {
-            "name": tool.name,
-            "description": tool.description,
-            "input_schema": tool.input_schema
+            "name": tool["name"],
+            "description": tool.get("description", ""),
+            "input_schema": tool.get("input_schema", {"type": "object", "properties": {}})
         }
-        for tool in mcp_tools
+        for tool in tools
     ]
 
 
@@ -317,22 +295,13 @@ class ClaudeProvider:
     Usage:
         provider = ClaudeProvider(api_key="sk-...")
         
-        # Get tools from MCP
-        mcp_tools = await mcp_client.list_tools()
-        
         # Create message
         response = await provider.create_message(
-            messages=[{"role": "user", "content": "Simulate a sugar factory"}],
-            tools=mcp_tools
+            messages=[{"role": "user", "content": "Design a heat exchanger"}],
+            system="You are a process engineering assistant"
         )
         
-        # Check for tool calls
-        if response.has_tool_calls:
-            for tool_call in response.tool_calls:
-                result = await mcp_client.call_tool(
-                    tool_call["name"],
-                    tool_call["input"]
-                )
+        print(response.text)  # Claude's text response
     """
     
     def __init__(
@@ -383,7 +352,7 @@ class ClaudeProvider:
     async def create_message(
         self,
         messages: List[Dict[str, str]],
-        tools: Optional[List[MCPTool]] = None,
+        tools: Optional[List[Dict[str, Any]]] = None,
         system: Optional[str] = None,
         **kwargs
     ) -> ParsedResponse:
@@ -417,10 +386,10 @@ class ClaudeProvider:
                 for call in response.tool_calls:
                     print(f"Tool: {call['name']}, Args: {call['input']}")
         """
-        # Convert MCP tools to Anthropic format
+        # Convert tools to Anthropic format
         anthropic_tools = None
         if tools:
-            anthropic_tools = convert_mcp_tools_to_anthropic(tools)
+            anthropic_tools = convert_tools_to_anthropic(tools)
         
         # Convert messages to Anthropic format (handles tool calls and results)
         anthropic_messages = convert_messages_to_anthropic(messages)
@@ -455,7 +424,7 @@ class ClaudeProvider:
     async def create_message_stream(
         self,
         messages: List[Dict[str, str]],
-        tools: Optional[List[MCPTool]] = None,
+        tools: Optional[List[Dict[str, Any]]] = None,
         system: Optional[str] = None,
         **kwargs
     ) -> AsyncGenerator[MessageStreamEvent, None]:
@@ -496,10 +465,10 @@ class ClaudeProvider:
                     if event.content_block.type == "tool_use":
                         print(f"\\n[Calling tool: {event.content_block.name}]")
         """
-        # Convert MCP tools to Anthropic format
+        # Convert tools to Anthropic format
         anthropic_tools = None
         if tools:
-            anthropic_tools = convert_mcp_tools_to_anthropic(tools)
+            anthropic_tools = convert_tools_to_anthropic(tools)
         
         # Convert messages to Anthropic format (handles tool calls and results)
         anthropic_messages = convert_messages_to_anthropic(messages)
