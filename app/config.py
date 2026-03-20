@@ -79,7 +79,7 @@ class Settings(BaseSettings):
     )
     
     llm_model: str = Field(
-        default="claude-haiku-4",
+        default="claude-haiku-4-5",
         description="Claude model to use"
     )
     
@@ -148,10 +148,6 @@ class Settings(BaseSettings):
     report_max_streams_per_table: int = Field(
         default=5,
         description="Maximum number of streams to display per table (splits if exceeded)"
-    )
-    report_llm_model: str = Field(
-        default="claude-haiku-4",
-        description="LLM model to use for report narrative generation"
     )
     report_llm_max_tokens: int = Field(
         default=1500,
@@ -240,6 +236,11 @@ class Settings(BaseSettings):
     def has_claude(self) -> bool:
         """Check if Claude API key is configured."""
         return self.anthropic_api_key is not None and len(self.anthropic_api_key) > 0
+    
+    @property
+    def report_llm_model(self) -> str:
+        """Report generation uses the same model as chat (single source of truth)."""
+        return self.llm_model
     
     @property
     def redis_url(self) -> str:
