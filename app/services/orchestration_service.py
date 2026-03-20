@@ -122,7 +122,6 @@ class OrchestrationService:
             # ── 4. Emit thinking start ───────────────────────────────────
             await self.event_emitter.emit_thinking_start(
                 request_id=request_id,
-                data={"message": "Thinking..."},
             )
 
             # ── 5. Stream Claude's response ──────────────────────────────
@@ -141,7 +140,8 @@ class OrchestrationService:
                         full_response += chunk
                         await self.event_emitter.emit_message_delta(
                             request_id=request_id,
-                            data={"content": chunk},
+                            delta=chunk,
+                            accumulated_length=len(full_response),
                         )
 
                 elif event.type == "message_start":
@@ -155,16 +155,18 @@ class OrchestrationService:
                         )
 
             # ── 6. Emit thinking end + final message ─────────────────────
+            elapsed_so_far = int(
+                (datetime.utcnow() - start_time).total_seconds() * 1000
+            )
             await self.event_emitter.emit_thinking_end(
                 request_id=request_id,
-                data={"message": "Done"},
+                duration_ms=elapsed_so_far,
             )
             await self.event_emitter.emit_message_final(
                 request_id=request_id,
-                data={
-                    "content": full_response,
-                    "conversation_id": conversation_id,
-                },
+                content=full_response,
+                role="assistant",
+                metadata={"conversation_id": conversation_id},
             )
 
             # ── 7. Save assistant message to history ─────────────────────
@@ -199,10 +201,10 @@ class OrchestrationService:
             # Emit error event
             await self.event_emitter.emit_app_error(
                 request_id=request_id,
-                data={
-                    "error": str(e),
-                    "error_type": type(e).__name__,
-                },
+                error_type="system_error",
+                error_message=str(e),
+                details={"exception_type": type(e).__name__},
+                recoverable=True,
             )
 
             return {
