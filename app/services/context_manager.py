@@ -317,6 +317,47 @@ class ContextManager:
         
         return context["messages"]
     
+    async def delete_messages_from_tail(
+        self,
+        conversation_id: str,
+        count: int = 2,
+    ) -> int:
+        """
+        Delete the last `count` messages from a conversation.
+
+        Used by the retry flow: remove the incomplete assistant response
+        (and optionally the preceding user message) so that the LLM does
+        not see stale history when regenerating.
+
+        Args:
+            conversation_id: Unique identifier for the conversation
+            count: Number of messages to remove from the end (default 2:
+                   the last assistant msg + the last user msg)
+
+        Returns:
+            The number of messages actually deleted (may be < count if the
+            conversation has fewer messages).
+        """
+        context = await self.get_context(conversation_id)
+
+        if not context or "messages" not in context:
+            return 0
+
+        messages = context["messages"]
+        to_delete = min(count, len(messages))
+
+        if to_delete == 0:
+            return 0
+
+        context["messages"] = messages[:-to_delete]
+        context["updated_at"] = datetime.utcnow().isoformat()
+
+        # Persist to both stores
+        await self._save_to_redis(conversation_id, context)
+        await self._save_to_mongo_async(conversation_id, context)
+
+        return to_delete
+
     async def clear_context(self, conversation_id: str) -> None:
         """
         Clear conversation context from both Redis and MongoDB.
