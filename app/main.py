@@ -57,7 +57,7 @@ logging.config.dictConfig({
     },
 })
 
-from app.api import stream, health, chat, test_stream, runs, reports, auth
+from app.api import stream, health, chat, auth
 from app.dependencies import close_redis_client, close_llm_provider, close_mongo_client
 from app.config import settings
 
@@ -157,9 +157,6 @@ def create_app() -> FastAPI:
     app.include_router(auth.router, prefix="/api/auth", tags=["authentication"])
     app.include_router(chat.router, prefix="/api", tags=["chat"])
     app.include_router(stream.router, prefix="/api", tags=["streaming"])
-    app.include_router(test_stream.router, prefix="/api", tags=["testing"])
-    app.include_router(runs.router, prefix="/api", tags=["runs"])
-    app.include_router(reports.router, prefix="/api/v1", tags=["reports"])
     
     return app
 
