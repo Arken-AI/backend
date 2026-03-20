@@ -318,6 +318,138 @@ async def send_message_with_files(
         )
 
 
+@router.post(
+    "/chat/{conversation_id}/retry",
+    response_model=ChatResponse,
+    summary="Retry Last Message",
+    description=(
+        "Delete the last assistant response (and optionally the preceding user "
+        "message) from the conversation history, then re-process the user "
+        "message through the LLM so Claude regenerates from scratch."
+    ),
+    responses={
+        200: {"description": "Retry processed successfully", "model": ChatResponse},
+        404: {"description": "Conversation or user message not found", "model": ErrorResponse},
+        500: {"description": "Internal server error", "model": ErrorResponse},
+    },
+)
+async def retry_last_message(
+    conversation_id: str,
+    orchestration: OrchestrationService = Depends(get_orchestration_service),
+    redis_client: redis.Redis = Depends(get_redis_client),
+    mongo_client: MongoClient = Depends(get_mongo_client),
+):
+    """
+    Retry the last user message in a conversation.
+
+    Steps:
+      1. Load conversation history and find the last user message.
+      2. Determine how many tail messages to remove (assistant + user, or just
+         the trailing user message if no assistant response was saved yet).
+      3. Delete those messages from Redis + MongoDB so the LLM never sees the
+         stale/incomplete response.
+      4. Re-run process_message which saves the user message, streams a fresh
+         Claude response, and saves the new assistant message.
+
+    The frontend should open the SSE stream BEFORE calling this endpoint
+    (same as the normal send_message flow).
+    """
+    try:
+        # Build a ContextManager for this request
+        context_manager = ContextManager(
+            redis_client=redis_client,
+            mongo_client=mongo_client._client,
+        )
+
+        # ── 1. Load history and locate the last user message ─────────
+        messages = await context_manager.get_messages(conversation_id)
+        if not messages:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"No messages in conversation {conversation_id}",
+            )
+
+        # Walk backwards to find the last user message
+        last_user_msg = None
+        last_user_index = None
+        for i in range(len(messages) - 1, -1, -1):
+            if messages[i].get("role") == "user":
+                last_user_msg = messages[i]
+                last_user_index = i
+                break
+
+        if not last_user_msg:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="No user message found to retry",
+            )
+
+        # ── 2. Determine how many messages to trim ───────────────────
+        # Possible tail shapes:
+        #   [..., user]                    → remove 1  (error before assistant saved)
+        #   [..., user, assistant]         → remove 2  (normal retry)
+        #   [..., user, assistant, ...]    → unusual, but count from last_user_index
+        messages_after_user = len(messages) - last_user_index  # includes the user msg itself
+        deleted = await context_manager.delete_messages_from_tail(
+            conversation_id, count=messages_after_user
+        )
+        logger.info(
+            f"Retry: deleted {deleted} tail messages from {conversation_id}"
+        )
+
+        # ── 3. Re-process the same user message ─────────────────────
+        user_text = last_user_msg.get("content", "")
+        user_id = "default_user"
+
+        request_id = f"req_{uuid.uuid4().hex[:16]}"
+
+        # NOTE: Do NOT pass request_id in metadata. The orchestration service
+        # falls back to conversation_id as the event key, which is what the
+        # SSE stream endpoint listens on. Passing a separate request_id would
+        # key events under "req_..." while SSE polls "conv_..." — no live streaming.
+        result = await orchestration.process_message(
+            conversation_id=conversation_id,
+            user_message=user_text,
+            user_id=user_id,
+            metadata={"is_retry": True},
+        )
+
+        logger.info(
+            f"Retry completed: conversation_id={conversation_id}, "
+            f"status={result.get('status', 'unknown')}"
+        )
+
+        # ── 4. Build response (same shape as send_message) ──────────
+        token_usage = None
+        if result.get("token_usage"):
+            token_usage = TokenUsage(
+                input_tokens=result["token_usage"].get("input_tokens", 0),
+                output_tokens=result["token_usage"].get("output_tokens", 0),
+                total_tokens=result["token_usage"].get("total_tokens", 0),
+            )
+
+        return ChatResponse(
+            conversation_id=conversation_id,
+            request_id=request_id,
+            status="completed" if result.get("status") == "success" else "error",
+            message=result.get("message", ""),
+            token_usage=token_usage,
+            run_ids=result.get("run_ids", []),
+            tool_executions=[],
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error retrying message: {e}", exc_info=True)
+        return ChatResponse(
+            conversation_id=conversation_id,
+            request_id=f"req_{uuid.uuid4().hex[:16]}",
+            status="error",
+            message=f"Retry failed: {str(e)}",
+        )
+
+
 @router.get(
     "/chat/{conversation_id}/context",
     response_model=ConversationContextResponse,
