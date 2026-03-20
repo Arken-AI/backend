@@ -220,21 +220,51 @@ class OrchestrationService:
     ) -> Any:
         """
         Build user content for Claude. Returns a string for text-only,
-        or a list of content blocks for multimodal (text + images).
+        or a list of content blocks for multimodal (text + images/docs).
+
+        Frontend sends: {media_type, data (base64), filename}
         """
         if not attachments:
             return text
 
-        # Build multimodal content blocks
+        DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+
         blocks = []
         for att in attachments:
-            if att.get("type") == "image" and "source" in att:
+            media_type = att.get("media_type", "")
+            data = att.get("data", "")
+            filename = att.get("filename", "file")
+
+            if media_type.startswith("image/"):
                 blocks.append({
                     "type": "image",
-                    "source": att["source"],
+                    "source": {"type": "base64", "media_type": media_type, "data": data},
                 })
+            elif media_type == "application/pdf":
+                blocks.append({
+                    "type": "document",
+                    "source": {"type": "base64", "media_type": "application/pdf", "data": data},
+                })
+            elif media_type == DOCX_MIME:
+                try:
+                    import base64
+                    import io
+                    from docx import Document as DocxDocument
+                    raw = base64.b64decode(data)
+                    doc = DocxDocument(io.BytesIO(raw))
+                    extracted = "\n".join(p.text for p in doc.paragraphs if p.text.strip())
+                    blocks.append({
+                        "type": "text",
+                        "text": f"[Document: {filename}]\n{extracted}",
+                    })
+                except Exception as e:
+                    logger.warning(f"Failed to extract text from docx {filename}: {e}")
+                    blocks.append({
+                        "type": "text",
+                        "text": f"[Document: {filename} — could not extract text: {e}]",
+                    })
 
-        # Always include the text
+        # Always include the user's text message
         if text:
             blocks.append({"type": "text", "text": text})
 
