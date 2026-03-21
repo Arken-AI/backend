@@ -450,6 +450,26 @@ async def retry_last_message(
         )
 
 
+@router.post(
+    "/chat/{conversation_id}/cancel",
+    summary="Cancel In-Flight Request",
+    description="Set a cancellation flag so the backend stops streaming the response for this conversation.",
+)
+async def cancel_request(
+    conversation_id: str,
+    orchestration: OrchestrationService = Depends(get_orchestration_service),
+):
+    """
+    Signal the backend to stop processing the current request for this conversation.
+
+    The orchestration service checks this flag on each streaming chunk and raises
+    CancelledError if it is set, stopping Claude's response mid-stream.
+    """
+    await orchestration.set_cancel_flag(conversation_id)
+    logger.info("Cancel flag set for conversation: %s", conversation_id)
+    return {"status": "cancelled", "conversation_id": conversation_id}
+
+
 @router.get(
     "/chat/{conversation_id}/context",
     response_model=ConversationContextResponse,

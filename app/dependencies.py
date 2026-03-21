@@ -223,6 +223,36 @@ async def get_orchestration_service(
         context_manager=context_manager,
         event_emitter=event_emitter,
         llm_provider=get_llm_provider(),  # Reuse singleton
+        redis_client=redis_client,
     )
     
     return orchestration
+
+
+# =============================================================================
+# HX Engine Client
+# =============================================================================
+
+_engine_client: "HXEngineClient | None" = None
+
+
+async def get_engine_client():
+    """
+    Singleton HXEngineClient.  Connects lazily on first call.
+    Returns the client even when the HX Engine is unreachable —
+    callers should call health_check() if they need to verify availability.
+    """
+    global _engine_client
+    if _engine_client is None:
+        from app.core.engine_client import HXEngineClient
+        _engine_client = HXEngineClient()
+        await _engine_client.connect()
+    return _engine_client
+
+
+async def close_engine_client():
+    """Close HX Engine client on application shutdown."""
+    global _engine_client
+    if _engine_client:
+        await _engine_client.close()
+        _engine_client = None

@@ -159,6 +159,18 @@ class Settings(BaseSettings):
     )
     
     # =============================================================================
+    # HX Engine Microservice
+    # =============================================================================
+    hx_engine_url: str = Field(
+        default="http://localhost:8100",
+        description="HX Engine microservice base URL"
+    )
+    hx_engine_secret: str = Field(
+        default="dev-secret-change-me",
+        description="Shared secret for HX Engine internal auth (X-Internal-Secret header)"
+    )
+
+    # =============================================================================
     # Application Settings
     # =============================================================================
     app_shared_password: str = Field(

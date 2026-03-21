@@ -15,6 +15,7 @@ import base64
 import io
 import logging
 import traceback
+from asyncio import CancelledError
 from typing import Dict, Any, List, Optional
 from datetime import datetime
 
@@ -50,10 +51,14 @@ let them know that simulation capabilities are coming soon and offer to help the
 engineering concepts, equations, or methodology in the meantime."""
 
 
+CANCEL_KEY_PREFIX = "cancel:"
+CANCEL_KEY_TTL = 60  # seconds
+
+
 class OrchestrationService:
     """
     Simple Claude chatbot orchestration.
-    
+
     Maintains conversation history via ContextManager and streams
     responses to the frontend via EventEmitter (Redis Streams → SSE).
     """
@@ -63,11 +68,25 @@ class OrchestrationService:
         context_manager: ContextManager,
         event_emitter: EventEmitter,
         llm_provider: ClaudeProvider,
+        redis_client=None,
         anthropic_api_key: str = None,  # kept for interface compat, unused
     ):
         self.context_manager = context_manager
         self.event_emitter = event_emitter
         self.llm_provider = llm_provider
+        self._redis = redis_client
+
+    async def set_cancel_flag(self, conversation_id: str):
+        """Set the cancellation flag for a conversation."""
+        if self._redis:
+            await self._redis.setex(
+                f"{CANCEL_KEY_PREFIX}{conversation_id}", CANCEL_KEY_TTL, "1"
+            )
+
+    async def _is_cancelled(self, conversation_id: str) -> bool:
+        if not self._redis:
+            return False
+        return bool(await self._redis.get(f"{CANCEL_KEY_PREFIX}{conversation_id}"))
 
     async def process_message(
         self,
@@ -139,6 +158,9 @@ class OrchestrationService:
             ) as stream:
                 # Simplified text streaming — SDK filters to just text chunks
                 async for text in stream.text_stream:
+                    if await self._is_cancelled(conversation_id):
+                        logger.info("Request cancelled by user: %s", conversation_id)
+                        raise CancelledError(f"Cancelled by user: {conversation_id}")
                     full_response += text
                     await self.event_emitter.emit_message_delta(
                         request_id=request_id,
