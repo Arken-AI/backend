@@ -1,0 +1,23 @@
+engines:
+  hx_engine:
+    name: "Heat Exchanger Design Engine"
+    base_url: "${HX_ENGINE_URL:-http://hx-engine:8100}"
+    enabled: true
+    health_endpoint: "/health"
+    tools_endpoint: "/api/v1/hx/tools"
+    tools:
+      - name: hx_design
+        description: "Run full 16-step heat exchanger design"
+        endpoint: "/api/v1/hx/design"
+        method: POST
+        streaming: true
+      - name: hx_get_fluid_properties
+        description: "Look up fluid properties at a temperature"
+        endpoint: "/api/v1/hx/properties"
+        method: POST
+        streaming: false
+      - name: hx_suggest_geometry
+        description: "Suggest initial TEMA type and geometry"
+        endpoint: "/api/v1/hx/geometry"
+        method: POST
+        streaming: false
