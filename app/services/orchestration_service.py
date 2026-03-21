@@ -276,6 +276,8 @@ class OrchestrationService:
         except Exception as e:
             logger.error(f"Orchestration error: {e}\n{traceback.format_exc()}")
 
+            error_message = f"Error: {str(e)}"
+
             # Emit error event
             await self.event_emitter.emit_app_error(
                 request_id=request_id,
@@ -285,9 +287,26 @@ class OrchestrationService:
                 recoverable=True,
             )
 
+            # Save error as an assistant message so it persists across reloads
+            try:
+                await self.context_manager.add_message(
+                    conversation_id,
+                    role="assistant",
+                    content=error_message,
+                    status="error",
+                    metadata={
+                        "error": True,
+                        "error_type": type(e).__name__,
+                    },
+                )
+            except Exception as save_err:
+                logger.warning(
+                    "Failed to save error message to DB: %s", save_err
+                )
+
             return {
                 "status": "error",
-                "message": f"Error: {str(e)}",
+                "message": error_message,
                 "tool_calls": [],
                 "iterations": 0,
                 "conversation_id": conversation_id,
