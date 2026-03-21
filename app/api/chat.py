@@ -457,15 +457,15 @@ async def retry_last_message(
 )
 async def cancel_request(
     conversation_id: str,
-    orchestration: OrchestrationService = Depends(get_orchestration_service),
+    redis_client: redis.Redis = Depends(get_redis_client),
 ):
     """
     Signal the backend to stop processing the current request for this conversation.
 
-    The orchestration service checks this flag on each streaming chunk and raises
-    CancelledError if it is set, stopping Claude's response mid-stream.
+    Sets a Redis key that the streaming orchestration loop checks on each chunk,
+    raising CancelledError when found.
     """
-    await orchestration.set_cancel_flag(conversation_id)
+    await redis_client.setex(f"cancel:{conversation_id}", 60, "1")
     logger.info("Cancel flag set for conversation: %s", conversation_id)
     return {"status": "cancelled", "conversation_id": conversation_id}
 
