@@ -58,6 +58,8 @@ class HXEngineClient:
         The caller should pass stream_url back to the frontend so it can
         open an EventSource and receive step events.
         """
+        if self._client is None:
+            raise RuntimeError("HXEngineClient not connected — call connect() first")
         resp = await self._client.post(
             "/api/v1/hx/design",
             json={

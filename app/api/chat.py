@@ -33,7 +33,7 @@ from app.models.requests import (
     ToolExecution,
     TokenUsage
 )
-from app.services.orchestration_service import OrchestrationService
+from app.services.orchestration_service import OrchestrationService, CANCEL_KEY_PREFIX, CANCEL_KEY_TTL
 from app.services.context_manager import ContextManager
 from app.dependencies import get_orchestration_service, get_redis_client, get_mongo_client, get_event_emitter
 from app.core.mongo_client import MongoClient
@@ -455,15 +455,14 @@ async def retry_last_message(
     summary="Cancel In-Flight Request",
     description=(
         "Set a cancellation flag so the backend stops streaming the response "
-        "for this conversation. Optionally accepts partial_message from the "
-        "frontend to persist as a cancelled assistant message."
+        "for this conversation. The orchestration layer handles persisting any "
+        "partial response."
     ),
 )
 async def cancel_request(
     conversation_id: str,
     body: Optional[Dict[str, Any]] = None,
     redis_client: redis.Redis = Depends(get_redis_client),
-    mongo_client: MongoClient = Depends(get_mongo_client),
 ):
     """
     Signal the backend to stop processing the current request for this conversation.
@@ -471,50 +470,13 @@ async def cancel_request(
     Sets a Redis key that the streaming orchestration loop checks on each chunk,
     raising CancelledError when found.
 
-    If the frontend sends a `partial_message` in the body, we persist it as a
-    cancelled assistant message so it survives page reloads.
+    Partial message persistence is handled exclusively by the orchestration
+    CancelledError handler — keeping a single writer avoids a race condition
+    where both paths simultaneously detect "not yet saved" and create duplicate
+    cancelled messages.
     """
-    await redis_client.setex(f"cancel:{conversation_id}", 60, "1")
+    await redis_client.setex(f"{CANCEL_KEY_PREFIX}{conversation_id}", CANCEL_KEY_TTL, "1")
     logger.info("Cancel flag set for conversation: %s", conversation_id)
-
-    # If the frontend sent partial streamed text, save it as a cancelled message.
-    # The orchestration CancelledError handler will also try to save, but there
-    # is a race — this is a safety net so the user's partial text is never lost.
-    partial_message = (body or {}).get("partial_message", "") if body else ""
-    if partial_message and partial_message.strip():
-        try:
-            context_manager = ContextManager(
-                redis_client=redis_client,
-                mongo_client=mongo_client._client,
-            )
-            # Check if the orchestration already saved a cancelled message
-            messages = await context_manager.get_messages(conversation_id)
-            last_msg = messages[-1] if messages else None
-            already_saved = (
-                last_msg
-                and last_msg.get("role") == "assistant"
-                and last_msg.get("status") == "cancelled"
-            )
-            if not already_saved:
-                await context_manager.add_message(
-                    conversation_id,
-                    role="assistant",
-                    content=partial_message.strip(),
-                    status="cancelled",
-                    metadata={"cancelled": True, "saved_by": "cancel_endpoint"},
-                )
-                logger.info(
-                    "Saved partial message via cancel endpoint: %s (len=%d)",
-                    conversation_id,
-                    len(partial_message),
-                )
-        except Exception as exc:
-            logger.warning(
-                "Failed to save partial message on cancel: %s — %s",
-                conversation_id,
-                exc,
-            )
-
     return {"status": "cancelled", "conversation_id": conversation_id}
 
 

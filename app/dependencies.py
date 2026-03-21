@@ -234,6 +234,14 @@ async def get_orchestration_service(
 # =============================================================================
 
 _engine_client: "HXEngineClient | None" = None
+_engine_client_lock: asyncio.Lock | None = None
+
+
+def _get_engine_lock() -> asyncio.Lock:
+    global _engine_client_lock
+    if _engine_client_lock is None:
+        _engine_client_lock = asyncio.Lock()
+    return _engine_client_lock
 
 
 async def get_engine_client():
@@ -243,10 +251,13 @@ async def get_engine_client():
     callers should call health_check() if they need to verify availability.
     """
     global _engine_client
-    if _engine_client is None:
-        from app.core.engine_client import HXEngineClient
-        _engine_client = HXEngineClient()
-        await _engine_client.connect()
+    if _engine_client is not None:
+        return _engine_client
+    async with _get_engine_lock():
+        if _engine_client is None:
+            from app.core.engine_client import HXEngineClient
+            _engine_client = HXEngineClient()
+            await _engine_client.connect()
     return _engine_client
 
 
