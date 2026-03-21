@@ -214,6 +214,65 @@ class OrchestrationService:
                 "elapsed_ms": round(elapsed_ms, 1),
             }
 
+        except CancelledError:
+            # ── User cancelled — save whatever was streamed so far ────
+            logger.info(
+                "Request cancelled by user: %s (partial_len=%d)",
+                conversation_id,
+                len(full_response),
+            )
+
+            # Emit thinking end so the frontend knows processing stopped
+            elapsed_so_far = int(
+                (datetime.utcnow() - start_time).total_seconds() * 1000
+            )
+            await self.event_emitter.emit_thinking_end(
+                request_id=request_id,
+                duration_ms=elapsed_so_far,
+            )
+
+            # Save partial assistant message to DB so it persists across reloads.
+            # The cancel endpoint may also try to save — check first to avoid dupes.
+            # If the cancel endpoint already saved, update with the longer version
+            # (backend may have accumulated more text than the frontend captured).
+            if full_response.strip():
+                existing_msgs = await self.context_manager.get_messages(conversation_id)
+                last = existing_msgs[-1] if existing_msgs else None
+                if (
+                    last
+                    and last.get("role") == "assistant"
+                    and last.get("status") == "cancelled"
+                ):
+                    # Cancel endpoint already saved — update if ours is longer
+                    if len(full_response) > len(last.get("content", "")):
+                        await self.context_manager.update_message(
+                            conversation_id,
+                            message_id=last["message_id"],
+                            content=full_response,
+                            metadata={"cancelled": True, "saved_by": "orchestration"},
+                        )
+                else:
+                    await self.context_manager.add_message(
+                        conversation_id,
+                        role="assistant",
+                        content=full_response,
+                        status="cancelled",
+                        metadata={"cancelled": True},
+                    )
+
+            # Clear the cancel flag so it doesn't interfere with future requests
+            if self._redis:
+                await self._redis.delete(f"{CANCEL_KEY_PREFIX}{conversation_id}")
+
+            return {
+                "status": "cancelled",
+                "message": full_response,
+                "tool_calls": [],
+                "iterations": 0,
+                "conversation_id": conversation_id,
+                "token_usage": {},
+            }
+
         except Exception as e:
             logger.error(f"Orchestration error: {e}\n{traceback.format_exc()}")
 
