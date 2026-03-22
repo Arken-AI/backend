@@ -401,6 +401,14 @@ async def retry_last_message(
         user_text = last_user_msg.get("content", "")
         user_id = "default_user"
 
+        # Recover original attachments (images, PDFs, docs) from the dedicated
+        # attachment store so the LLM sees the same content on retry.
+        last_msg_id = last_user_msg.get("message_id")
+        original_attachments = (
+            await context_manager.get_message_attachments(last_msg_id)
+            if last_msg_id else None
+        )
+
         request_id = f"req_{uuid.uuid4().hex[:16]}"
 
         # NOTE: Do NOT pass request_id in metadata. The orchestration service
@@ -412,6 +420,7 @@ async def retry_last_message(
             user_message=user_text,
             user_id=user_id,
             metadata={"is_retry": True},
+            attachments=original_attachments,
         )
 
         logger.info(

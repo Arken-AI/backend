@@ -130,12 +130,16 @@ class OrchestrationService:
             # ── 2. Save user message to history ──────────────────────────
             user_content = self._build_user_content(user_message, attachments)
 
-            await self.context_manager.add_message(
+            msg_id = await self.context_manager.add_message(
                 conversation_id,
                 role="user",
                 content=user_message,  # Store plain text for display
-                metadata={"attachments": bool(attachments)} if attachments else None,
             )
+
+            # Persist attachment data in a dedicated collection so retries can
+            # re-send files to the LLM without bloating the conversation document.
+            if attachments:
+                await self.context_manager.store_message_attachments(msg_id, attachments)
 
             # ── 3. Build messages for Claude ─────────────────────────────
             messages = await self._build_llm_messages(
