@@ -55,6 +55,7 @@ class ContextManager:
         self.mongo = mongo_client
         self.db = self.mongo[mongo_db_name]
         self.contexts_collection = self.db["conversations"]
+        self.attachments_collection = self.db["message_attachments"]
         self.redis_ttl = redis_ttl
     
     def _redis_key(self, conversation_id: str) -> str:
@@ -226,7 +227,42 @@ class ContextManager:
         await self._save_to_mongo_async(conversation_id, context)
         
         return message_id
-    
+
+    async def store_message_attachments(
+        self, message_id: str, attachments: List[Dict[str, Any]]
+    ) -> None:
+        """
+        Persist attachment data (base64 images/docs) in a dedicated MongoDB collection.
+
+        Stored separately from the conversation document to avoid hitting MongoDB's
+        16MB BSON limit when large files are attached. Returns immediately if MongoDB
+        is unavailable — attachment data is best-effort for retry purposes.
+        """
+        try:
+            await self.attachments_collection.replace_one(
+                {"message_id": message_id},
+                {"message_id": message_id, "attachments": attachments, "created_at": datetime.utcnow().isoformat()},
+                upsert=True,
+            )
+        except Exception as e:
+            print(f"Warning: Failed to store attachments for message {message_id}: {e}")
+
+    async def get_message_attachments(
+        self, message_id: str
+    ) -> Optional[List[Dict[str, Any]]]:
+        """
+        Retrieve attachment data stored for a given message_id.
+
+        Returns None if not found (e.g., message had no attachments, or data expired).
+        """
+        try:
+            doc = await self.attachments_collection.find_one({"message_id": message_id})
+            if doc:
+                return doc.get("attachments")
+        except Exception as e:
+            print(f"Warning: Failed to retrieve attachments for message {message_id}: {e}")
+        return None
+
     async def update_message(
         self,
         conversation_id: str,
