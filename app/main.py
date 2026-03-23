@@ -58,7 +58,7 @@ logging.config.dictConfig({
 })
 
 from app.api import stream, health, chat, auth
-from app.dependencies import close_redis_client, close_llm_provider, close_mongo_client
+from app.dependencies import close_redis_client, close_llm_provider, close_mongo_client, get_mongo_client
 from app.config import settings
 
 logger = logging.getLogger(__name__)
@@ -97,12 +97,25 @@ class CORSSafeErrorMiddleware(BaseHTTPMiddleware):
 async def lifespan(app: FastAPI):
     """
     Application lifespan manager.
-    
+
     Handles startup and shutdown events:
-    - Startup: Initialize connections
+    - Startup: Create MongoDB indexes
     - Shutdown: Close Redis, MongoDB, LLM clients, etc.
     """
-    # Startup
+    # Startup — ensure indexes exist
+    try:
+        mongo = get_mongo_client()
+        db = mongo._client[settings.mongodb_db_name]
+        # Sparse unique index on share_token: excludes absent fields, enforces
+        # uniqueness when the field is present. Use $unset (not $set null) on
+        # revoke so documents without a share_token are excluded from the index.
+        await db["conversations"].create_index(
+            "share_token", sparse=True, unique=True, background=True
+        )
+        logger.info("MongoDB indexes verified")
+    except Exception as e:
+        logger.warning(f"Could not create MongoDB indexes (non-fatal): {e}")
+
     yield
     
     # Shutdown

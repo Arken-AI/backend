@@ -13,11 +13,11 @@ but the final response is returned directly in the HTTP response.
 import base64
 import logging
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, Any, List, Optional
 
-from fastapi import APIRouter, File, Form, HTTPException, Depends, UploadFile, status
-from fastapi.responses import JSONResponse
+from fastapi import APIRouter, File, Form, Header, HTTPException, Depends, UploadFile, status
+from fastapi.responses import JSONResponse, Response
 
 from app.models.requests import (
     ChatRequest,
@@ -31,8 +31,12 @@ from app.models.requests import (
     MessageHistoryItem,
     ErrorResponse,
     ToolExecution,
-    TokenUsage
+    TokenUsage,
+    ShareResponse,
+    HXStep,
+    SharedDesignResponse,
 )
+from app.config import settings
 from app.services.orchestration_service import OrchestrationService, CANCEL_KEY_PREFIX, CANCEL_KEY_TTL
 from app.services.context_manager import ContextManager
 from app.dependencies import get_orchestration_service, get_redis_client, get_mongo_client, get_event_emitter
@@ -581,6 +585,11 @@ async def get_conversation_context(
             elif has_message_final:
                 conversation_status = "completed"
         
+        # Build share URL if shared
+        is_shared = context.get("is_shared", False)
+        share_token = context.get("share_token")
+        share_url = f"{settings.frontend_url}/share/{share_token}" if is_shared and share_token else None
+
         # Build response
         response = ConversationContextResponse(
             conversation_id=conversation_id,
@@ -592,7 +601,9 @@ async def get_conversation_context(
             current_process=context.get("current_process"),
             created_at=datetime.fromisoformat(context.get("created_at")) if context.get("created_at") else datetime.now(),
             updated_at=datetime.fromisoformat(context.get("updated_at")) if context.get("updated_at") else datetime.now(),
-            last_event_sequence=last_sequence
+            last_event_sequence=last_sequence,
+            is_shared=is_shared,
+            share_url=share_url,
         )
         
         return response
@@ -654,7 +665,7 @@ async def delete_conversation(
         logger.info(f"Conversation deleted: {conversation_id}")
         
         # Return 204 No Content
-        return JSONResponse(status_code=status.HTTP_204_NO_CONTENT, content=None)
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
         
     except Exception as e:
         logger.error(f"Error deleting conversation: {e}", exc_info=True)
@@ -730,11 +741,17 @@ async def list_conversations(
             # Check if has simulations
             run_ids = doc.get("run_ids", [])
             
+            is_shared = doc.get("is_shared", False)
+            share_token = doc.get("share_token")
+            share_url = f"{settings.frontend_url}/share/{share_token}" if is_shared and share_token else None
+
             conversations.append(ConversationListItem(
                 conversation_id=doc.get("conversation_id", str(doc.get("_id"))),
                 title=title,
                 message_count=len(messages),
                 has_simulations=len(run_ids) > 0,
+                is_shared=is_shared,
+                share_url=share_url,
                 created_at=datetime.fromisoformat(doc.get("created_at")) if doc.get("created_at") else datetime.now(),
                 updated_at=datetime.fromisoformat(doc.get("updated_at")) if doc.get("updated_at") else datetime.now()
             ))
@@ -750,4 +767,210 @@ async def list_conversations(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to list conversations: {str(e)}"
         )
+
+
+# =============================================================================
+# Share Endpoints
+# =============================================================================
+
+@router.post(
+    "/chat/{conversation_id}/share",
+    response_model=ShareResponse,
+    summary="Create Public Share Link",
+    description="Generate a public read-only share link for a conversation. Idempotent — returns the same URL if already shared.",
+    responses={
+        200: {"description": "Share link created or returned", "model": ShareResponse},
+        403: {"description": "Not authorized", "model": ErrorResponse},
+        404: {"description": "Conversation not found", "model": ErrorResponse},
+    },
+)
+async def share_conversation(
+    conversation_id: str,
+    x_username: Optional[str] = Header(None, alias="X-Username"),
+    redis_client: redis.Redis = Depends(get_redis_client),
+    mongo_client: MongoClient = Depends(get_mongo_client),
+) -> ShareResponse:
+    """
+    Create a public share link for a conversation.
+
+    Ownership check: if the conversation has a user_id, the X-Username header
+    must be present and match it. Reject requests with no header when a user_id
+    is stored (prevents auth bypass via omission).
+
+    Idempotent: if the conversation is already shared, returns the existing URL.
+    Race-safe: uses a conditional update so concurrent requests return the same token.
+    """
+    context_manager = ContextManager(
+        redis_client=redis_client,
+        mongo_client=mongo_client._client,
+    )
+    context = await context_manager.get_context(conversation_id)
+    if not context:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Conversation not found")
+
+    # Ownership check — reject if conv has a user_id and caller didn't provide one
+    conv_user_id = (context.get("user_id") or "").lower()
+    req_username = (x_username or "").lower()
+    if conv_user_id:
+        if not req_username:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized to share this conversation")
+        if conv_user_id != req_username:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized to share this conversation")
+
+    # Idempotent fast-path: return existing token if already shared (from cache)
+    if context.get("is_shared") and context.get("share_token"):
+        token = context["share_token"]
+        return ShareResponse(
+            share_url=f"{settings.frontend_url}/share/{token}",
+            token=token,
+        )
+
+    # Race-safe: only write if is_shared is not already True
+    # If another request won concurrently, modified_count == 0 and we re-read the winner
+    token = str(uuid.uuid4())
+    now = datetime.now(timezone.utc).isoformat()
+    db = mongo_client._client[settings.mongodb_db_name]
+    result = await db["conversations"].update_one(
+        {"conversation_id": conversation_id, "is_shared": {"$ne": True}},
+        {"$set": {"share_token": token, "is_shared": True, "shared_at": now, "updated_at": now}},
+    )
+    if result.modified_count == 0:
+        # Another concurrent request already set the token — re-read and return that one
+        doc = await db["conversations"].find_one(
+            {"conversation_id": conversation_id},
+            {"share_token": 1, "_id": 0},
+        )
+        token = (doc or {}).get("share_token", token)
+
+    # Invalidate Redis so next read gets fresh data from MongoDB
+    await redis_client.delete(f"context:{conversation_id}")
+
+    logger.info(f"Share link created: conversation_id={conversation_id}")
+    return ShareResponse(
+        share_url=f"{settings.frontend_url}/share/{token}",
+        token=token,
+    )
+
+
+@router.delete(
+    "/chat/{conversation_id}/share",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Revoke Share Link",
+    description="Revoke the public share link for a conversation. The old link is permanently invalidated. Idempotent.",
+    responses={
+        204: {"description": "Share link revoked"},
+        403: {"description": "Not authorized", "model": ErrorResponse},
+        404: {"description": "Conversation not found", "model": ErrorResponse},
+    },
+)
+async def revoke_share(
+    conversation_id: str,
+    x_username: Optional[str] = Header(None, alias="X-Username"),
+    redis_client: redis.Redis = Depends(get_redis_client),
+    mongo_client: MongoClient = Depends(get_mongo_client),
+):
+    """
+    Revoke the public share link for a conversation.
+
+    Uses $unset to remove share_token entirely (not set to null) so the
+    sparse unique MongoDB index works correctly. A subsequent POST /share
+    will generate a fresh UUID — the old link is permanently dead.
+    """
+    context_manager = ContextManager(
+        redis_client=redis_client,
+        mongo_client=mongo_client._client,
+    )
+    context = await context_manager.get_context(conversation_id)
+    if not context:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Conversation not found")
+
+    # Ownership check — reject if conv has a user_id and caller didn't provide one
+    conv_user_id = (context.get("user_id") or "").lower()
+    req_username = (x_username or "").lower()
+    if conv_user_id:
+        if not req_username:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized to modify this conversation")
+        if conv_user_id != req_username:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized to modify this conversation")
+
+    now = datetime.now(timezone.utc).isoformat()
+    db = mongo_client._client[settings.mongodb_db_name]
+    await db["conversations"].update_one(
+        {"conversation_id": conversation_id},
+        {
+            "$unset": {"share_token": ""},
+            "$set": {"is_shared": False, "shared_at": None, "updated_at": now},
+        },
+    )
+    # Invalidate Redis cache
+    await redis_client.delete(f"context:{conversation_id}")
+
+    logger.info(f"Share link revoked: conversation_id={conversation_id}")
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.get(
+    "/share/{token}",
+    response_model=SharedDesignResponse,
+    summary="Get Shared Design (Public)",
+    description="Retrieve a shared design by its token. No authentication required. Returns 404 if token is invalid or link has been revoked.",
+    responses={
+        200: {"description": "Shared design data", "model": SharedDesignResponse},
+        404: {"description": "Link not found or revoked", "model": ErrorResponse},
+    },
+)
+async def get_shared_design(
+    token: str,
+    mongo_client: MongoClient = Depends(get_mongo_client),
+) -> SharedDesignResponse:
+    """
+    Public endpoint — no auth required.
+
+    Looks up a conversation by its share_token WHERE is_shared=True.
+    Strips sensitive fields (user_id, internal metadata) before returning.
+    """
+    db = mongo_client._client[settings.mongodb_db_name]
+    doc = await db["conversations"].find_one({"share_token": token, "is_shared": True})
+    if not doc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Link not found or has been revoked",
+        )
+
+    # Build message list — strip metadata with user_id
+    messages = []
+    for msg in doc.get("messages", []):
+        messages.append(MessageHistoryItem(
+            role=msg.get("role", "user"),
+            content=msg.get("content", ""),
+            timestamp=datetime.fromisoformat(msg["timestamp"]) if msg.get("timestamp") else None,
+            status=msg.get("status", "complete"),
+            message_id=None,   # Don't expose internal IDs
+            metadata=None,     # Strip all metadata (may contain user_id)
+        ))
+
+    # Build hx_steps (empty until HX engine integration)
+    hx_steps = []
+    for step in doc.get("hx_steps", []):
+        hx_steps.append(HXStep(
+            step_id=step.get("step_id", ""),
+            step_number=step.get("step_number", 0),
+            status=step.get("status", ""),
+            result=step.get("result"),
+            timestamp=step.get("timestamp"),
+        ))
+
+    # Title: first user message, max 100 chars
+    title = None
+    for msg in doc.get("messages", []):
+        if msg.get("role") == "user":
+            title = (msg.get("content") or "")[:100]
+            break
+
+    return SharedDesignResponse(
+        title=title,
+        created_at=doc.get("created_at", datetime.now(timezone.utc).isoformat()),
+        messages=messages,
+        hx_steps=hx_steps,
+    )
 
