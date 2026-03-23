@@ -343,6 +343,14 @@ class ConversationContextResponse(BaseModel):
         default=0,
         description="Last event sequence number (for SSE reconnection)"
     )
+    is_shared: bool = Field(
+        default=False,
+        description="Whether the conversation has an active public share link"
+    )
+    share_url: Optional[str] = Field(
+        default=None,
+        description="Public share URL if is_shared is True"
+    )
     
     model_config = {
         "json_schema_extra": {
@@ -376,11 +384,13 @@ class ConversationContextResponse(BaseModel):
 
 class ConversationListItem(BaseModel):
     """Summary of a conversation for list view"""
-    
+
     conversation_id: str = Field(..., description="The conversation identifier")
     title: Optional[str] = Field(default=None, description="Conversation title (first user message)")
     message_count: int = Field(default=0, description="Number of messages in conversation")
     has_simulations: bool = Field(default=False, description="Whether any simulations were run")
+    is_shared: bool = Field(default=False, description="Whether the conversation has an active public share link")
+    share_url: Optional[str] = Field(default=None, description="Public share URL if is_shared is True")
     created_at: Optional[datetime] = Field(default=None, description="When the conversation was created")
     updated_at: Optional[datetime] = Field(default=None, description="When the conversation was last updated")
 
@@ -465,6 +475,38 @@ class HealthResponse(BaseModel):
             ]
         }
     }
+
+
+class ShareResponse(BaseModel):
+    """Response after creating a public share link"""
+
+    share_url: str = Field(..., description="Full public URL for the shared design")
+    token: str = Field(..., description="Share token (UUID4)")
+
+
+class HXStep(BaseModel):
+    """A single HX pipeline step result stored for sharing"""
+
+    step_id: str = Field(..., description="Step identifier, e.g. BAFFLE_DESIGN")
+    step_number: int = Field(..., description="Step number (1-16)")
+    status: str = Field(..., description="Step status: APPROVED, CORRECTED, WARNING, ERROR")
+    result: Optional[Dict[str, Any]] = Field(default=None, description="Step result payload")
+    timestamp: Optional[str] = Field(default=None, description="ISO timestamp when step completed")
+
+
+class SharedDesignResponse(BaseModel):
+    """Public read-only view of a shared design (no auth required)"""
+
+    title: Optional[str] = Field(default=None, description="Design title (first user message)")
+    created_at: str = Field(..., description="ISO timestamp when conversation was created")
+    messages: List[MessageHistoryItem] = Field(
+        default_factory=list,
+        description="Full conversation message history"
+    )
+    hx_steps: List[HXStep] = Field(
+        default_factory=list,
+        description="HX pipeline step results (empty until HX engine is integrated)"
+    )
 
 
 class ErrorResponse(BaseModel):
