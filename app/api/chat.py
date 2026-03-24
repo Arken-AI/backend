@@ -22,6 +22,7 @@ from fastapi.responses import JSONResponse, Response
 from app.models.requests import (
     ChatRequest,
     ChatResponse,
+    EditMessageRequest,
     ImageAttachment,
     ALLOWED_IMAGE_TYPES,
     MAX_ATTACHMENT_SIZE_BYTES,
@@ -460,6 +461,188 @@ async def retry_last_message(
             request_id=f"req_{uuid.uuid4().hex[:16]}",
             status="error",
             message=f"Retry failed: {str(e)}",
+        )
+
+
+@router.post(
+    "/chat/{conversation_id}/edit",
+    response_model=ChatResponse,
+    summary="Edit a User Message",
+    description=(
+        "Edit a previously sent user message. Truncates the conversation from "
+        "the specified message index onward and re-processes with the new content "
+        "through the LLM. This is equivalent to a retry with modified text."
+    ),
+    responses={
+        200: {"description": "Edited message processed successfully", "model": ChatResponse},
+        400: {"description": "Invalid request (index out of range or not a user message)", "model": ErrorResponse},
+        404: {"description": "Conversation not found", "model": ErrorResponse},
+        500: {"description": "Internal server error", "model": ErrorResponse},
+    },
+)
+async def edit_message(
+    conversation_id: str,
+    request: EditMessageRequest,
+    orchestration: OrchestrationService = Depends(get_orchestration_service),
+    redis_client: redis.Redis = Depends(get_redis_client),
+    mongo_client: MongoClient = Depends(get_mongo_client),
+):
+    """
+    Edit a user message and regenerate the assistant response.
+
+    Steps:
+      1. Load conversation history and validate the message_index.
+      2. Ensure the message at that index is a user message.
+      3. Delete all messages from message_index onward (the edited message
+         and everything after it).
+      4. Re-run process_message with the new_content so Claude responds
+         to the edited text in the context of the earlier conversation.
+
+    The frontend should open the SSE stream BEFORE calling this endpoint
+    (same pattern as send_message and retry).
+    """
+    try:
+        context_manager = ContextManager(
+            redis_client=redis_client,
+            mongo_client=mongo_client._client,
+        )
+
+        # ── 1. Load history ──────────────────────────────────────────
+        messages = await context_manager.get_messages(conversation_id)
+        if not messages:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"No messages in conversation {conversation_id}",
+            )
+
+        # ── 2. Validate index ────────────────────────────────────────
+        if request.message_index >= len(messages):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    f"message_index {request.message_index} is out of range. "
+                    f"Conversation has {len(messages)} messages (0-indexed)."
+                ),
+            )
+
+        target_msg = messages[request.message_index]
+        if target_msg.get("role") != "user":
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    f"Message at index {request.message_index} is a "
+                    f"'{target_msg.get('role')}' message, not a user message. "
+                    f"Only user messages can be edited."
+                ),
+            )
+
+        # ── 3. Truncate from the edited message onward ───────────────
+        # Load full context, truncate at the index to avoid race conditions,
+        # and save with all other context fields preserved.
+        context = await context_manager.get_context(conversation_id)
+        truncated_messages = messages[:request.message_index]
+        context["messages"] = truncated_messages
+        context["updated_at"] = datetime.utcnow().isoformat()
+        await context_manager._save_to_redis(conversation_id, context)
+        await context_manager._save_to_mongo_async(conversation_id, context)
+        logger.info(
+            f"Edit: truncated conversation at index {request.message_index} "
+            f"(kept {len(truncated_messages)} messages) in {conversation_id}"
+        )
+
+        # ── 4. Re-process with edited content ────────────────────────
+        # Extract user_id from request metadata if available, fallback to default
+        user_id = "default_user"
+        if hasattr(request, 'metadata') and request.metadata:
+            user_id = request.metadata.get("user_id", "default_user")
+        request_id = f"req_{uuid.uuid4().hex[:16]}"
+
+        # Convert attachments to dicts if provided and validate
+        attachments = None
+        if request.attachments:
+            for att in request.attachments:
+                if att.media_type not in ALLOWED_IMAGE_TYPES:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=f"Invalid attachment type: {att.media_type}. "
+                               f"Allowed types: {', '.join(ALLOWED_IMAGE_TYPES)}"
+                    )
+                if len(att.data) > MAX_ATTACHMENT_SIZE_BYTES:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=f"Attachment exceeds size limit: {len(att.data)} > {MAX_ATTACHMENT_SIZE_BYTES} bytes"
+                    )
+            attachments = [
+                {
+                    "media_type": att.media_type,
+                    "data": att.data,
+                    "filename": att.filename,
+                }
+                for att in request.attachments
+            ]
+
+        result = await orchestration.process_message(
+            conversation_id=conversation_id,
+            user_message=request.new_content,
+            user_id=user_id,
+            metadata={"is_edit": True, "edited_index": request.message_index},
+            attachments=attachments,
+        )
+
+        logger.info(
+            f"Edit completed: conversation_id={conversation_id}, "
+            f"status={result.get('status', 'unknown')}"
+        )
+
+        # ── 5. Build response ────────────────────────────────────────
+        token_usage = None
+        if result.get("token_usage"):
+            token_usage = TokenUsage(
+                input_tokens=result["token_usage"].get("input_tokens", 0),
+                output_tokens=result["token_usage"].get("output_tokens", 0),
+                total_tokens=result["token_usage"].get("total_tokens", 0),
+            )
+
+        tool_executions = []
+        for tool_call in result.get("tool_calls", []):
+            tool_result = tool_call.get("result") or {}
+            raw_summary = tool_call.get("summary")
+            if not isinstance(raw_summary, str):
+                raw_summary = None
+            if not raw_summary:
+                raw_summary = tool_result.get("message") if isinstance(tool_result.get("message"), str) else None
+            if not raw_summary:
+                raw_summary = tool_result.get("summary") if isinstance(tool_result.get("summary"), str) else None
+            if not raw_summary:
+                raw_summary = str(tool_result)[:200]
+            tool_executions.append(ToolExecution(
+                tool_name=tool_call.get("name") or tool_call.get("tool_name") or tool_call.get("tool", "unknown"),
+                status=tool_call.get("status", "success"),
+                duration_ms=tool_call.get("duration_ms"),
+                summary=raw_summary,
+                arguments=tool_call.get("arguments"),
+                result=tool_result if tool_result else None,
+            ))
+
+        return ChatResponse(
+            conversation_id=conversation_id,
+            request_id=request_id,
+            status="completed" if result.get("status") == "success" else "error",
+            message=result.get("message", ""),
+            token_usage=token_usage,
+            run_ids=result.get("run_ids", []),
+            tool_executions=tool_executions,
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error editing message: {e}", exc_info=True)
+        return ChatResponse(
+            conversation_id=conversation_id,
+            request_id=f"req_{uuid.uuid4().hex[:16]}",
+            status="error",
+            message=f"Edit failed: {str(e)}",
         )
 
 
