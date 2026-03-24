@@ -194,6 +194,52 @@ class ChatRequest(BaseModel):
     }
 
 
+class EditMessageRequest(BaseModel):
+    """Request model for editing a previously sent user message.
+    
+    Truncates the conversation from the specified message index onward
+    and re-processes with the new content.
+    """
+    
+    message_index: int = Field(
+        ...,
+        ge=0,
+        description="Zero-based index of the user message to edit in the conversation history"
+    )
+    new_content: str = Field(
+        ...,
+        min_length=1,
+        max_length=10000,
+        description="The edited message content to replace the original"
+    )
+    attachments: Optional[List[ImageAttachment]] = Field(
+        default=None,
+        description="Optional list of attachments to include with the edited message"
+    )
+    metadata: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="Optional metadata (e.g., user_id for tracking)"
+    )
+
+    @field_validator('new_content')
+    @classmethod
+    def validate_new_content(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("Edited message cannot be empty or whitespace only")
+        return v.strip()
+    
+    model_config = {
+        "json_schema_extra": {
+            "examples": [
+                {
+                    "message_index": 2,
+                    "new_content": "Design a shell and tube heat exchanger for 500 kW"
+                }
+            ]
+        }
+    }
+
+
 class ToolExecution(BaseModel):
     """Tool execution record for chat response"""
     
