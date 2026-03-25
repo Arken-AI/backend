@@ -79,7 +79,7 @@ class Settings(BaseSettings):
     )
     
     llm_model: str = Field(
-        default="claude-haiku-4-5",
+        default="claude-sonnet-4-6",
         description="Claude model to use"
     )
     
