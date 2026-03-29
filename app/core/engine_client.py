@@ -1,9 +1,5 @@
 """
 HTTP client for HX Engine microservice.
-
-Stub implementation — safe to instantiate even when the HX Engine is not
-running.  Full streaming integration will be wired in Week 6 when backend
-orchestration is connected.
 """
 
 import logging
@@ -47,27 +43,38 @@ class HXEngineClient:
         except Exception:
             return False
 
+    async def validate_requirements(self, user_id: str, **kwargs) -> dict:
+        """
+        POST /api/v1/hx/requirements → { valid, token?, errors?, warnings?, user_message? }
+
+        kwargs: hot_fluid_name, cold_fluid_name, T_hot_in_C, T_cold_in_C,
+                m_dot_hot_kg_s, and any optional HX fields.
+        """
+        if self._client is None:
+            raise RuntimeError("HXEngineClient not connected — call connect() first")
+        payload = {"user_id": user_id, **kwargs}
+        resp = await self._client.post("/api/v1/hx/requirements", json=payload)
+        resp.raise_for_status()
+        return resp.json()
+
     async def start_design(
         self,
-        raw_request: str,
         user_id: str,
         org_id: str | None = None,
+        **kwargs,
     ) -> dict:
         """
-        POST /api/v1/hx/design → returns { session_id, stream_url }.
+        POST /api/v1/hx/design → { session_id, stream_url }
+
+        kwargs: hot_fluid_name, cold_fluid_name, T_hot_in_C, T_cold_in_C,
+                m_dot_hot_kg_s, token, and any other optional HX fields.
         The caller should pass stream_url back to the frontend so it can
         open an EventSource and receive step events.
         """
         if self._client is None:
             raise RuntimeError("HXEngineClient not connected — call connect() first")
-        resp = await self._client.post(
-            "/api/v1/hx/design",
-            json={
-                "raw_request": raw_request,
-                "user_id": user_id,
-                "org_id": org_id,
-            },
-        )
+        payload = {"user_id": user_id, **({"org_id": org_id} if org_id else {}), **kwargs}
+        resp = await self._client.post("/api/v1/hx/design", json=payload)
         resp.raise_for_status()
         return resp.json()
 

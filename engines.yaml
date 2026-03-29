@@ -4,20 +4,49 @@ engines:
     base_url: "${HX_ENGINE_URL:-http://hx-engine:8100}"
     enabled: true
     health_endpoint: "/health"
-    tools_endpoint: "/api/v1/hx/tools"
     tools:
+      - name: hx_validate_requirements
+        description: >
+          Validate HX design requirements before starting the pipeline.
+          Returns valid=true + token when physically feasible, or field-level
+          errors with suggestions when not. ALWAYS call this before hx_design.
+        endpoint: "/api/v1/hx/requirements"
+        method: POST
+        streaming: false
+        required_fields:
+          - hot_fluid_name
+          - cold_fluid_name
+          - T_hot_in_C
+          - T_cold_in_C
+          - m_dot_hot_kg_s
+        optional_fields:
+          - T_hot_out_C
+          - T_cold_out_C
+          - m_dot_cold_kg_s
+          - P_hot_Pa
+          - P_cold_Pa
+          - tema_preference
+
       - name: hx_design
-        description: "Run full 16-step heat exchanger design"
+        description: >
+          Start a full heat exchanger design (Steps 1-16). Call AFTER
+          hx_validate_requirements succeeds, passing the token it returned.
+          Returns session_id and stream_url for live progress monitoring.
         endpoint: "/api/v1/hx/design"
         method: POST
         streaming: true
-      - name: hx_get_fluid_properties
-        description: "Look up fluid properties at a temperature"
-        endpoint: "/api/v1/hx/properties"
-        method: POST
-        streaming: false
-      - name: hx_suggest_geometry
-        description: "Suggest initial TEMA type and geometry"
-        endpoint: "/api/v1/hx/geometry"
-        method: POST
-        streaming: false
+        required_fields:
+          - hot_fluid_name
+          - cold_fluid_name
+          - T_hot_in_C
+          - T_cold_in_C
+          - m_dot_hot_kg_s
+        optional_fields:
+          - token
+          - raw_request
+          - T_hot_out_C
+          - T_cold_out_C
+          - m_dot_cold_kg_s
+          - P_hot_Pa
+          - P_cold_Pa
+          - tema_preference

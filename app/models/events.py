@@ -35,6 +35,7 @@ class EventType(str, Enum):
     MESSAGE_FINAL = "message_final"
     APP_ERROR = "app_error"
     AGENT_TEXT = "agent_text"
+    HX_DESIGN_STARTED = "hx_design_started"
 
 
 class ToolStatus(str, Enum):
@@ -355,6 +356,24 @@ class AgentTextEvent(BaseEvent):
     iteration: int = Field(..., description="Agentic loop iteration number (0-indexed)")
 
 
+class HXDesignStartedEvent(BaseEvent):
+    """
+    Emitted by the backend orchestration service immediately after the HX Engine
+    accepts a design request (i.e. hx_design tool call succeeds).
+
+    Frontend behavior:
+    - ChatContainer intercepts this event BEFORE the standard SSE whitelist
+    - Passes session_id and stream_url to useHXStream.connectStream()
+    - HXPanel opens its own EventSource to the HX Engine SSE stream
+
+    Note: to_redis_dict() is inherited from BaseEvent — model_dump_json()
+    already serializes all Pydantic fields including session_id and stream_url.
+    """
+    event_type: Literal[EventType.HX_DESIGN_STARTED] = EventType.HX_DESIGN_STARTED
+    session_id: str = Field(..., description="HX Engine session identifier")
+    stream_url: str = Field(..., description="Absolute URL for the HX Engine SSE stream")
+
+
 # Type union for type-safe event parsing
 Event = Union[
     ThinkingStartEvent,
@@ -365,10 +384,13 @@ Event = Union[
     MessageDeltaEvent,
     MessageFinalEvent,
     AppErrorEvent,
-    AgentTextEvent
+    AgentTextEvent,
+    HXDesignStartedEvent,
 ]
 
 # Mapping from event_type string to event class (for deserialization)
+# Every new event class MUST be added here — from_redis_dict() falls back
+# to BaseEvent (losing custom fields) if the type is missing from this map.
 EVENT_TYPE_MAP: Dict[str, Type[BaseEvent]] = {
     EventType.THINKING_START: ThinkingStartEvent,
     EventType.THINKING_END: ThinkingEndEvent,
@@ -379,6 +401,7 @@ EVENT_TYPE_MAP: Dict[str, Type[BaseEvent]] = {
     EventType.MESSAGE_FINAL: MessageFinalEvent,
     EventType.APP_ERROR: AppErrorEvent,
     EventType.AGENT_TEXT: AgentTextEvent,
+    EventType.HX_DESIGN_STARTED: HXDesignStartedEvent,
 }
 
 

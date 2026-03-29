@@ -15,6 +15,7 @@ from app.services.event_emitter import EventEmitter
 from app.core.mongo_client import MongoClient
 from app.services.context_manager import ContextManager
 from app.services.orchestration_service import OrchestrationService
+from app.services.tool_registry import ToolRegistry
 from app.core.llm_provider import ClaudeProvider
 
 logger = logging.getLogger(__name__)
@@ -199,6 +200,17 @@ async def close_mongo_client():
 # Orchestration Service
 # =============================================================================
 
+_tool_registry: ToolRegistry | None = None
+
+
+def get_tool_registry() -> ToolRegistry:
+    """Singleton ToolRegistry — reads engines.yaml once at startup."""
+    global _tool_registry
+    if _tool_registry is None:
+        _tool_registry = ToolRegistry()
+    return _tool_registry
+
+
 async def get_orchestration_service(
     redis_client: redis.Redis = Depends(get_redis_client),
     mongo_client: MongoClient = Depends(get_mongo_client),
@@ -206,27 +218,26 @@ async def get_orchestration_service(
 ) -> OrchestrationService:
     """
     Dependency to get OrchestrationService instance.
-    
-    Creates a new instance per request with all required dependencies.
-    
-    Returns:
-        OrchestrationService: Orchestration service instance
+
+    Creates a new instance per request with all required dependencies,
+    including the HX Engine client and tool registry for browser-based
+    HX design (Path 2).
     """
-    # ContextManager expects raw Motor client, not our wrapper
     context_manager = ContextManager(
-        redis_client=redis_client, 
-        mongo_client=mongo_client._client  # Pass underlying Motor client
+        redis_client=redis_client,
+        mongo_client=mongo_client._client,  # Pass underlying Motor client
     )
-    
-    # Create orchestration service (simple chatbot, no tools)
-    orchestration = OrchestrationService(
+
+    engine_client = await get_engine_client()
+
+    return OrchestrationService(
         context_manager=context_manager,
         event_emitter=event_emitter,
-        llm_provider=get_llm_provider(),  # Reuse singleton
+        llm_provider=get_llm_provider(),
         redis_client=redis_client,
+        engine_client=engine_client,
+        tool_registry=get_tool_registry(),
     )
-    
-    return orchestration
 
 
 # =============================================================================
