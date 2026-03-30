@@ -78,6 +78,17 @@ class HXEngineClient:
         resp.raise_for_status()
         return resp.json()
 
+    async def get_design_status(self, session_id: str) -> dict:
+        """
+        GET /api/v1/hx/design/{session_id}/status
+        → { session_id, current_step, waiting_for_user, step_records, warnings, notes }
+        """
+        if self._client is None:
+            raise RuntimeError("HXEngineClient not connected — call connect() first")
+        resp = await self._client.get(f"/api/v1/hx/design/{session_id}/status")
+        resp.raise_for_status()
+        return resp.json()
+
     async def close(self):
         if self._client:
             await self._client.aclose()

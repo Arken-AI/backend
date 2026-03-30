@@ -787,6 +787,10 @@ async def get_conversation_context(
             last_event_sequence=last_sequence,
             is_shared=is_shared,
             share_url=share_url,
+            # HX Engine design data — persisted by _persist_hx_steps after pipeline completes.
+            # Used by the frontend to restore the HX step panel on page refresh.
+            hx_session_id=context.get("hx_session_id"),
+            hx_steps=context.get("hx_steps", []),
         )
         
         return response

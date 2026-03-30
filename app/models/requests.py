@@ -397,7 +397,15 @@ class ConversationContextResponse(BaseModel):
         default=None,
         description="Public share URL if is_shared is True"
     )
-    
+    hx_session_id: Optional[str] = Field(
+        default=None,
+        description="HX Engine session ID for the most recent design run"
+    )
+    hx_steps: List[Dict[str, Any]] = Field(
+        default_factory=list,
+        description="Raw StepRecord list persisted after design completes (used to restore HX panel on refresh)"
+    )
+
     model_config = {
         "json_schema_extra": {
             "examples": [
