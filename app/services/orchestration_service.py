@@ -15,6 +15,7 @@ Tool dispatch loop:
   - On engine down: emit app_error, stop loop gracefully
 """
 
+import asyncio
 import base64
 import io
 import logging
@@ -412,6 +413,15 @@ class OrchestrationService:
                     stream_url=stream_url,
                 )
 
+                # Persist step records to MongoDB once the pipeline finishes.
+                # Runs in the background so it never blocks the chat response.
+                asyncio.create_task(
+                    self._persist_hx_steps(
+                        conversation_id=request_id,
+                        session_id=session_id,
+                    )
+                )
+
                 return (
                     f"Design started. Session ID: {session_id}. "
                     f"The frontend is now streaming progress from the HX Engine."
@@ -437,6 +447,61 @@ class OrchestrationService:
                 recoverable=True,
             )
             return f"Tool error: {err_str}", is_connect_error
+
+    async def _persist_hx_steps(
+        self,
+        conversation_id: str,
+        session_id: str,
+        poll_interval_s: float = 3.0,
+        max_polls: int = 200,  # 10 minutes at 3s intervals
+    ) -> None:
+        """
+        Background task: poll the HX Engine status endpoint until the pipeline
+        sets is_complete=True, then upsert all step_records into MongoDB.
+        This makes step data survive Redis TTL expiry (Issue 9).
+        """
+        if not self._engine_client:
+            return
+
+        for _ in range(max_polls):
+            await asyncio.sleep(poll_interval_s)
+            try:
+                status = await self._engine_client.get_design_status(session_id)
+            except Exception as exc:
+                logger.warning(
+                    "_persist_hx_steps: status fetch for %s failed: %s — retrying",
+                    session_id, exc,
+                )
+                continue
+
+            if not status.get("is_complete", False):
+                continue  # pipeline still running
+
+            step_records = status.get("step_records", [])
+            try:
+                await self.context_manager.update_context(
+                    conversation_id,
+                    {
+                        "hx_session_id": session_id,
+                        "hx_steps": step_records,
+                    },
+                )
+                logger.info(
+                    "_persist_hx_steps: persisted %d step records "
+                    "for session %s → conversation %s",
+                    len(step_records), session_id, conversation_id,
+                )
+            except Exception as exc:
+                logger.error(
+                    "_persist_hx_steps: failed to persist for conversation %s: %s",
+                    conversation_id, exc,
+                )
+            return
+
+        logger.warning(
+            "_persist_hx_steps: timed out waiting for session %s to complete",
+            session_id,
+        )
 
     @staticmethod
     def _format_validate_result(data: dict) -> str:
