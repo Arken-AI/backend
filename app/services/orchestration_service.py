@@ -72,16 +72,54 @@ Required minimum parameters (do NOT call any tool until you have all of these):
     m_dot_cold, you MUST ask for one of them before calling any tool.
 
 After hx_design starts:
-  - Say something brief like "Design started — watch the progress panel on the right."
+  - Say something brief like "Design started — I'll share a summary when it's done."
   - Do NOT list the pipeline steps, do NOT describe what each step does,
     do NOT generate tables of steps. The frontend shows live step cards.
   - Keep the confirmation to 1–2 sentences max.
+  - A design report will be automatically generated and added to the chat
+    after the pipeline completes. Do NOT try to generate one yourself.
+
+When answering follow-up questions about a completed design:
+  - Use the step summaries injected into the system prompt (if present).
+  - Explain the engineering reasoning, don't just repeat raw numbers.
+  - Reference specific steps when relevant (e.g. "In Step 4, ...").
 
 Be concise and engineering-focused. Use proper units (°C, kg/s, Pa, W/m²K).
 """
 
 CANCEL_KEY_PREFIX = "cancel:"
 CANCEL_KEY_TTL = 60  # seconds
+
+# Design report generation
+REPORT_LLM_TIMEOUT = 30.0  # seconds — fallback to template if LLM hangs
+REPORT_MAX_TOKENS = 1024   # keep report concise
+
+DESIGN_REPORT_PROMPT = """You are a senior heat exchanger engineer writing a brief design completion report.
+
+Given the step-by-step design results below, write a concise narrative summary (~150 words max).
+
+Rules:
+- Start with "### Design Complete ✓" heading
+- State key results in ONE line: duty, TEMA type, area, tube count × length, TEMA class
+- List items needing attention (warnings, corrections) as numbered bullet points with ⚠
+- State overall confidence percentage with brief explanation
+- End with: "Expand any step in the panel for full calculation details."
+- Do NOT repeat raw numbers that the user can see in the step cards
+- Focus on WHY decisions were made and what risks exist
+- Be engineering-focused, use proper units
+
+Step results:
+{step_data}
+"""
+
+# Fields to extract per step for the report prompt and follow-up Q&A
+REPORT_KEY_FIELDS = [
+    "Q_W", "U_W_m2K", "A_m2", "LMTD_K", "tema_type", "tema_class",
+    "N_tubes", "tube_length_m", "tube_od_m", "shell_id_m",
+    "overdesign_pct", "dP_shell", "dP_tube", "dP_shell_limit", "dP_tube_limit",
+    "cost_usd", "vibration_safe", "flow_regime", "baffle_cut_pct",
+    "confidence", "fouling_factor_tube", "fouling_factor_shell",
+]
 
 
 class OrchestrationService:
@@ -165,8 +203,11 @@ class OrchestrationService:
             if attachments:
                 await self.context_manager.store_message_attachments(msg_id, attachments)
 
-            # ── 3. Build Claude message list ─────────────────────────────
+            # ── 3. Build Claude message list ─────────────────────────
             messages = await self._build_llm_messages(conversation_id, user_content)
+
+            # ── 3b. Build system prompt (enriched with step data if present)
+            system_prompt = await self._build_system_prompt(conversation_id)
 
             # ── 4. Emit thinking start ───────────────────────────────────
             await self.event_emitter.emit_thinking_start(request_id=request_id)
@@ -191,7 +232,7 @@ class OrchestrationService:
                 # Call Claude (streaming to capture tool use + text)
                 async with self.llm_provider.create_message_stream(
                     messages=messages,
-                    system=SYSTEM_PROMPT,
+                    system=system_prompt,
                     tools=active_tools,
                 ) as stream:
                     # Collect text deltas (may be empty when Claude only calls tools)
@@ -249,6 +290,7 @@ class OrchestrationService:
                 for tc in tool_calls:
                     tool_result_str, engine_down = await self._dispatch_tool(
                         request_id=request_id,
+                        conversation_id=conversation_id,
                         tool_name=tc.name,
                         tool_input=tc.input,
                         user_id=user_id or "browser",
@@ -374,6 +416,7 @@ class OrchestrationService:
     async def _dispatch_tool(
         self,
         request_id: str,
+        conversation_id: str,
         tool_name: str,
         tool_input: dict,
         user_id: str,
@@ -415,9 +458,12 @@ class OrchestrationService:
 
                 # Persist step records to MongoDB once the pipeline finishes.
                 # Runs in the background so it never blocks the chat response.
+                # NOTE: conversation_id (not request_id) is used for MongoDB
+                # persistence. request_id is ephemeral (per-request SSE stream);
+                # conversation_id is the persistent key for context + messages.
                 asyncio.create_task(
                     self._persist_hx_steps(
-                        conversation_id=request_id,
+                        conversation_id=conversation_id,
                         session_id=session_id,
                     )
                 )
@@ -457,8 +503,12 @@ class OrchestrationService:
     ) -> None:
         """
         Background task: poll the HX Engine status endpoint until the pipeline
-        sets is_complete=True, then upsert all step_records into MongoDB.
-        This makes step data survive Redis TTL expiry (Issue 9).
+        sets is_complete=True, then:
+        1. Persist step_records to MongoDB (survives Redis TTL expiry)
+        2. Generate a design report (LLM narrative with template fallback)
+        3. Save report to MongoDB context + add as assistant message
+
+        The frontend picks up the report via context re-fetch after DESIGN_COMPLETE.
         """
         if not self._engine_client:
             return
@@ -478,6 +528,8 @@ class OrchestrationService:
                 continue  # pipeline still running
 
             step_records = status.get("step_records", [])
+
+            # ── 1. Persist step records ──────────────────────────────────
             try:
                 await self.context_manager.update_context(
                     conversation_id,
@@ -493,15 +545,271 @@ class OrchestrationService:
                 )
             except Exception as exc:
                 logger.error(
-                    "_persist_hx_steps: failed to persist for conversation %s: %s",
+                    "_persist_hx_steps: failed to persist steps for %s: %s",
+                    conversation_id, exc,
+                )
+                return  # can't generate report without saved steps
+
+            # ── 2. Generate design report ────────────────────────────────
+            try:
+                report = await self._generate_design_report(step_records)
+            except Exception as exc:
+                logger.error(
+                    "_persist_hx_steps: report generation crashed for %s: %s",
+                    conversation_id, exc,
+                )
+                report = self._build_fallback_report(step_records)
+
+            # ── 3. Save report to context + as assistant message ─────────
+            try:
+                await self.context_manager.update_context(
+                    conversation_id,
+                    {"hx_design_report": report},
+                )
+                await self.context_manager.add_message(
+                    conversation_id,
+                    role="assistant",
+                    content=report,
+                    metadata={"type": "design_report", "session_id": session_id},
+                )
+                logger.info(
+                    "_persist_hx_steps: saved design report for %s (%d chars)",
+                    conversation_id, len(report),
+                )
+            except Exception as exc:
+                logger.error(
+                    "_persist_hx_steps: failed to save report for %s: %s",
                     conversation_id, exc,
                 )
             return
 
+        # ── Timeout — pipeline never completed ───────────────────────────
         logger.warning(
             "_persist_hx_steps: timed out waiting for session %s to complete",
             session_id,
         )
+        timeout_report = (
+            "### Design Status\n\n"
+            "The design pipeline did not complete within the expected time. "
+            "Check the progress panel for the last known state.\n\n"
+            "You can try running the design again if the issue persists."
+        )
+        try:
+            await self.context_manager.update_context(
+                conversation_id,
+                {"hx_design_report": timeout_report},
+            )
+            await self.context_manager.add_message(
+                conversation_id,
+                role="assistant",
+                content=timeout_report,
+                metadata={"type": "design_report", "is_timeout": True, "session_id": session_id},
+            )
+        except Exception as exc:
+            logger.error(
+                "_persist_hx_steps: failed to save timeout report for %s: %s",
+                conversation_id, exc,
+            )
+
+    # ─────────────────────────────────────────────────────────────────────
+    # Design report generation
+    # ─────────────────────────────────────────────────────────────────────
+
+    async def _generate_design_report(self, step_records: List[Dict[str, Any]]) -> str:
+        """
+        Generate a narrative design report from step records.
+
+        Uses the LLM with a 30s timeout. Falls back to a deterministic
+        template if the LLM call fails or times out.
+        """
+        step_data = self._format_steps_for_report(step_records)
+        prompt = DESIGN_REPORT_PROMPT.format(step_data=step_data)
+
+        try:
+            response = await asyncio.wait_for(
+                self.llm_provider.create_message(
+                    messages=[{"role": "user", "content": prompt}],
+                    system="You are a senior heat exchanger design engineer.",
+                    max_tokens=REPORT_MAX_TOKENS,
+                    temperature=0.3,
+                ),
+                timeout=REPORT_LLM_TIMEOUT,
+            )
+            report = response.text.strip()
+            if report:
+                return report
+            # Empty response — fall through to template
+            logger.warning("_generate_design_report: LLM returned empty response")
+        except asyncio.TimeoutError:
+            logger.warning(
+                "_generate_design_report: LLM timed out after %.0fs — using fallback",
+                REPORT_LLM_TIMEOUT,
+            )
+        except Exception as exc:
+            logger.error(
+                "_generate_design_report: LLM call failed: %s — using fallback", exc
+            )
+
+        return self._build_fallback_report(step_records)
+
+    @staticmethod
+    def _format_steps_for_report(step_records: List[Dict[str, Any]]) -> str:
+        """
+        Format step records into a compact text block for the LLM report prompt.
+        Includes step name, AI decision, key outputs, and warnings.
+        """
+        lines = []
+        for rec in step_records:
+            step_id = rec.get("step_id", "?")
+            step_name = rec.get("step_name", f"Step {step_id}")
+            ai_decision = rec.get("ai_decision") or "PROCEED"
+            duration = rec.get("duration_s") or 0
+
+            lines.append(f"\n--- Step {step_id}: {step_name} [{ai_decision}] ({duration:.1f}s) ---")
+
+            # Key outputs
+            outputs = rec.get("outputs") or {}
+            key_vals = [
+                f"  {k}: {outputs[k]}"
+                for k in REPORT_KEY_FIELDS
+                if k in outputs and outputs[k] is not None
+            ]
+            if key_vals:
+                lines.extend(key_vals)
+
+            # AI review
+            ai_review = rec.get("ai_review") or {}
+            if ai_review.get("reasoning"):
+                lines.append(f"  AI reasoning: {ai_review['reasoning'][:200]}")
+            if ai_review.get("observation"):
+                lines.append(f"  AI observation: {ai_review['observation'][:200]}")
+
+            # Corrections
+            corrections = ai_review.get("corrections") or []
+            for corr in corrections[:3]:  # cap at 3
+                lines.append(
+                    f"  Correction: {corr.get('field', '?')} "
+                    f"{corr.get('old_value', '?')} → {corr.get('new_value', '?')} "
+                    f"({corr.get('reason', '')})"
+                )
+
+            # Warnings
+            warnings = rec.get("warnings") or []
+            for w in warnings[:3]:
+                lines.append(f"  ⚠ {w}")
+
+        return "\n".join(lines) if lines else "No step data available."
+
+    @staticmethod
+    def _build_fallback_report(step_records: List[Dict[str, Any]]) -> str:
+        """
+        Deterministic template-based report when LLM is unavailable.
+        Extracts key values from step outputs and formats them directly.
+        """
+        # Merge all outputs (later steps overwrite earlier)
+        all_outputs = {}
+        all_warnings = []
+        for rec in step_records:
+            all_outputs.update(rec.get("outputs") or {})
+            all_warnings.extend(rec.get("warnings") or [])
+            ai_review = rec.get("ai_review") or {}
+            if ai_review.get("observation"):
+                all_warnings.append(ai_review["observation"])
+
+        # Extract key results
+        duty = all_outputs.get("Q_W")
+        tema_type = all_outputs.get("tema_type", "N/A")
+        area = all_outputs.get("A_m2")
+        n_tubes = all_outputs.get("N_tubes")
+        tube_length = all_outputs.get("tube_length_m")
+        overdesign = all_outputs.get("overdesign_pct")
+
+        lines = ["### Design Complete ✓\n"]
+
+        # Key results line
+        result_parts = []
+        if duty is not None:
+            result_parts.append(f"{duty:,.0f} W duty")
+        result_parts.append(f"{tema_type} shell-and-tube")
+        if area is not None:
+            result_parts.append(f"{area:.1f} m² area")
+        if n_tubes is not None and tube_length is not None:
+            result_parts.append(f"{n_tubes} tubes × {tube_length:.2f} m")
+        if result_parts:
+            lines.append(f"**Key results:** {', '.join(result_parts)}.\n")
+
+        if overdesign is not None:
+            lines.append(f"**Overdesign:** {overdesign:.1f}%\n")
+
+        # Warnings
+        # Deduplicate while preserving order
+        seen = set()
+        unique_warnings = []
+        for w in all_warnings:
+            w_stripped = w.strip()
+            if w_stripped and w_stripped not in seen:
+                seen.add(w_stripped)
+                unique_warnings.append(w_stripped)
+
+        if unique_warnings:
+            lines.append(f"**⚠ {len(unique_warnings)} item(s) need attention:**")
+            for i, w in enumerate(unique_warnings[:5], 1):  # cap at 5
+                lines.append(f"{i}. {w}")
+            lines.append("")
+
+        lines.append("Expand any step in the panel for full calculation details.")
+        lines.append("Ask me anything about the design — I have all step data available.")
+
+        return "\n".join(lines)
+
+    @staticmethod
+    def _build_step_digest(step_records: List[Dict[str, Any]]) -> str:
+        """
+        Build a compact step digest for system prompt injection.
+        Only includes steps with non-PROCEED decisions to save tokens.
+        PROCEED steps are omitted (nothing interesting happened).
+        """
+        lines = []
+        for rec in step_records:
+            decision = rec.get("ai_decision") or "PROCEED"
+            # Skip routine PROCEED steps to keep token budget low
+            if decision in ("PROCEED", "APPROVED", None):
+                continue
+
+            step_name = rec.get("step_name", f"Step {rec.get('step_id', '?')}")
+            lines.append(f"- {step_name} [{decision}]")
+
+            # Key outputs (3 max)
+            outputs = rec.get("outputs") or {}
+            key_vals = [
+                f"    {k}: {outputs[k]}"
+                for k in REPORT_KEY_FIELDS
+                if k in outputs and outputs[k] is not None
+            ][:3]
+            lines.extend(key_vals)
+
+            # AI observation/reasoning
+            ai_review = rec.get("ai_review") or {}
+            observation = ai_review.get("observation") or ai_review.get("reasoning", "")
+            if observation:
+                lines.append(f"    Note: {observation[:150]}")
+
+            # Warnings
+            for w in (rec.get("warnings") or [])[:2]:
+                lines.append(f"    ⚠ {w[:100]}")
+
+        if not lines:
+            # All steps were PROCEED — include a summary of final outputs
+            if step_records:
+                last = step_records[-1]
+                outputs = last.get("outputs") or {}
+                summary_fields = ["Q_W", "A_m2", "tema_type", "overdesign_pct"]
+                for k in summary_fields:
+                    if k in outputs and outputs[k] is not None:
+                        lines.append(f"- {k}: {outputs[k]}")
+            return "All steps passed without issues.\n" + "\n".join(lines)
+
+        return "\n".join(lines)
 
     @staticmethod
     def _format_validate_result(data: dict) -> str:
@@ -603,3 +911,35 @@ class OrchestrationService:
 
         messages.append({"role": "user", "content": current_user_content})
         return messages
+
+    async def _build_system_prompt(self, conversation_id: str) -> str:
+        """
+        Build the system prompt, enriched with step data when a design exists.
+
+        When hx_steps are present in the conversation context, appends a
+        compact step digest so Claude can answer follow-up questions about
+        the design without the user having to re-state results.
+        """
+        context = await self.context_manager.get_context(conversation_id)
+        if not context:
+            return SYSTEM_PROMPT
+
+        hx_steps = context.get("hx_steps", [])
+        if not hx_steps:
+            return SYSTEM_PROMPT
+
+        hx_session_id = context.get("hx_session_id", "unknown")
+        step_digest = self._build_step_digest(hx_steps)
+
+        return SYSTEM_PROMPT + f"""
+
+## Most recent design results
+Session: {hx_session_id}
+Completed steps: {len(hx_steps)}
+
+Step summaries (non-routine steps only):
+{step_digest}
+
+Use this data to answer follow-up questions about the design.
+Do not repeat raw numbers — explain the engineering reasoning.
+"""
