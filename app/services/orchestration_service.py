@@ -524,10 +524,44 @@ class OrchestrationService:
                 )
                 continue
 
-            if not status.get("is_complete", False):
-                continue  # pipeline still running
+            is_complete = status.get("is_complete", False)
+            waiting_for_user = status.get("waiting_for_user", False)
+
+            # Safety net: if the status endpoint didn't set waiting_for_user but
+            # the last step record has ai_decision=ESCALATE, treat it as waiting.
+            if not waiting_for_user and not is_complete:
+                step_records_check = status.get("step_records", [])
+                if step_records_check and step_records_check[-1].get("ai_decision") == "ESCALATE":
+                    waiting_for_user = True
+
+            if not is_complete and not waiting_for_user:
+                continue  # pipeline still running, nothing to persist yet
 
             step_records = status.get("step_records", [])
+
+            # Persist partial state mid-pipeline when waiting for user input so that
+            # a page refresh can restore the escalation card with options intact.
+            if waiting_for_user and not is_complete:
+                try:
+                    await self.context_manager.update_context(
+                        conversation_id,
+                        {
+                            "hx_session_id": session_id,
+                            "hx_steps": step_records,
+                            "hx_waiting_for_user": True,
+                        },
+                    )
+                    logger.info(
+                        "_persist_hx_steps: persisted %d step records (waiting_for_user) "
+                        "for session %s → conversation %s",
+                        len(step_records), session_id, conversation_id,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "_persist_hx_steps: failed to persist mid-pipeline steps for %s: %s",
+                        conversation_id, exc,
+                    )
+                continue  # keep polling until is_complete
 
             # ── 1. Persist step records ──────────────────────────────────
             try:
@@ -536,6 +570,7 @@ class OrchestrationService:
                     {
                         "hx_session_id": session_id,
                         "hx_steps": step_records,
+                        "hx_waiting_for_user": False,  # pipeline complete, clear the flag
                     },
                 )
                 logger.info(

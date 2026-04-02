@@ -405,6 +405,10 @@ class ConversationContextResponse(BaseModel):
         default_factory=list,
         description="Raw StepRecord list persisted after design completes (used to restore HX panel on refresh)"
     )
+    hx_waiting_for_user: bool = Field(
+        default=False,
+        description="True when the pipeline is paused waiting for user input (escalation/warning). Used to restore interactive state on page refresh."
+    )
 
     model_config = {
         "json_schema_extra": {
