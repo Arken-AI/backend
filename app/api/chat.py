@@ -791,6 +791,7 @@ async def get_conversation_context(
             # Used by the frontend to restore the HX step panel on page refresh.
             hx_session_id=context.get("hx_session_id"),
             hx_steps=context.get("hx_steps", []),
+            hx_waiting_for_user=context.get("hx_waiting_for_user", False),
         )
         
         return response
