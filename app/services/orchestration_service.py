@@ -112,6 +112,30 @@ Step results:
 {step_data}
 """
 
+DESIGN_FAILURE_PROMPT = """You are a senior heat exchanger engineer explaining why a design pipeline failed.
+
+The pipeline halted at a step that could not be resolved after multiple escalation attempts.
+You have access to ALL step data from the pipeline run, including the failed step and all
+preceding steps that completed successfully.
+
+Rules:
+- Start with "### ⚠️ Design Pipeline Failed" heading
+- State WHICH step failed and WHY in clear engineering terms
+- Explain the root cause — what physical inconsistency or data error caused the failure
+- Summarise the escalation attempts: what options were presented, what the user chose, and why it didn’t help
+- List the steps that DID complete successfully and their key results (so the user knows what worked)
+- Provide concrete recommendations for what to change before re-running
+- Be specific about parameter values (include units) — the user is an engineer
+- Keep it under 300 words
+- End with: "You can modify the inputs and re-run the design from chat."
+
+Step results (all steps including the failed one):
+{step_data}
+
+Escalation history for the failed step:
+{escalation_data}
+"""
+
 # Fields to extract per step for the report prompt and follow-up Q&A
 REPORT_KEY_FIELDS = [
     "Q_W", "U_W_m2K", "A_m2", "LMTD_K", "tema_type", "tema_class",
@@ -525,19 +549,77 @@ class OrchestrationService:
                 continue
 
             is_complete = status.get("is_complete", False)
+            pipeline_status = status.get("pipeline_status", "running")
             waiting_for_user = status.get("waiting_for_user", False)
+            is_error = pipeline_status == "error"
 
             # Safety net: if the status endpoint didn't set waiting_for_user but
             # the last step record has ai_decision=ESCALATE, treat it as waiting.
-            if not waiting_for_user and not is_complete:
+            if not waiting_for_user and not is_complete and not is_error:
                 step_records_check = status.get("step_records", [])
                 if step_records_check and step_records_check[-1].get("ai_decision") == "ESCALATE":
                     waiting_for_user = True
 
-            if not is_complete and not waiting_for_user:
+            if not is_complete and not waiting_for_user and not is_error:
                 continue  # pipeline still running, nothing to persist yet
 
             step_records = status.get("step_records", [])
+
+            # ── Pipeline failed with error — generate failure report ────
+            if is_error:
+                step_records = status.get("step_records", [])
+                escalation_history = status.get("escalation_history", {})
+                # Persist step records so they survive Redis TTL
+                try:
+                    await self.context_manager.update_context(
+                        conversation_id,
+                        {
+                            "hx_session_id": session_id,
+                            "hx_steps": step_records,
+                            "hx_waiting_for_user": False,
+                            "hx_pipeline_status": "error",
+                        },
+                    )
+                except Exception as exc:
+                    logger.error(
+                        "_persist_hx_steps: failed to persist error steps for %s: %s",
+                        conversation_id, exc,
+                    )
+
+                # Generate a detailed failure report via LLM
+                try:
+                    report = await self._generate_failure_report(
+                        step_records, escalation_history
+                    )
+                except Exception as exc:
+                    logger.error(
+                        "_persist_hx_steps: failure report generation crashed for %s: %s",
+                        conversation_id, exc,
+                    )
+                    report = self._build_fallback_failure_report(step_records, escalation_history)
+
+                # Save failure report as assistant message in chat
+                try:
+                    await self.context_manager.update_context(
+                        conversation_id,
+                        {"hx_design_report": report},
+                    )
+                    await self.context_manager.add_message(
+                        conversation_id,
+                        role="assistant",
+                        content=report,
+                        metadata={"type": "design_failure_report", "session_id": session_id},
+                    )
+                    logger.info(
+                        "_persist_hx_steps: saved failure report for %s (%d chars)",
+                        conversation_id, len(report),
+                    )
+                except Exception as exc:
+                    logger.error(
+                        "_persist_hx_steps: failed to save failure report for %s: %s",
+                        conversation_id, exc,
+                    )
+                return
 
             # Persist partial state mid-pipeline when waiting for user input so that
             # a page refresh can restore the escalation card with options intact.
@@ -794,6 +876,137 @@ class OrchestrationService:
 
         lines.append("Expand any step in the panel for full calculation details.")
         lines.append("Ask me anything about the design — I have all step data available.")
+
+        return "\n".join(lines)
+
+    # ─────────────────────────────────────────────────────────────────────
+    # Failure report generation (pipeline halted with unresolved error)
+    # ─────────────────────────────────────────────────────────────────────
+
+    async def _generate_failure_report(
+        self,
+        step_records: List[Dict[str, Any]],
+        escalation_history: Dict[str, List[Dict[str, Any]]],
+    ) -> str:
+        """
+        Generate a narrative failure report from step records + escalation history.
+        Uses the LLM with a 30s timeout. Falls back to a deterministic template
+        if the LLM call fails or times out.
+        """
+        step_data = self._format_steps_for_report(step_records)
+        escalation_data = self._format_escalation_history(escalation_history)
+        prompt = DESIGN_FAILURE_PROMPT.format(
+            step_data=step_data, escalation_data=escalation_data,
+        )
+
+        try:
+            response = await asyncio.wait_for(
+                self.llm_provider.create_message(
+                    messages=[{"role": "user", "content": prompt}],
+                    system="You are a senior heat exchanger design engineer diagnosing a pipeline failure.",
+                    max_tokens=1500,
+                    temperature=0.3,
+                ),
+                timeout=REPORT_LLM_TIMEOUT,
+            )
+            report = response.text.strip()
+            if report:
+                return report
+            logger.warning("_generate_failure_report: LLM returned empty response")
+        except asyncio.TimeoutError:
+            logger.warning(
+                "_generate_failure_report: LLM timed out after %.0fs — using fallback",
+                REPORT_LLM_TIMEOUT,
+            )
+        except Exception as exc:
+            logger.error(
+                "_generate_failure_report: LLM call failed: %s — using fallback", exc
+            )
+
+        return self._build_fallback_failure_report(step_records, escalation_history)
+
+    @staticmethod
+    def _format_escalation_history(
+        escalation_history: Dict[str, List[Dict[str, Any]]],
+    ) -> str:
+        """Format escalation history into a readable text block for the LLM prompt."""
+        if not escalation_history:
+            return "No escalation attempts recorded."
+
+        lines = []
+        for step_key, attempts in escalation_history.items():
+            lines.append(f"\nStep {step_key}:")
+            for entry in attempts:
+                attempt_num = entry.get("attempt", "?")
+                options = entry.get("options", [])
+                recommendation = entry.get("recommendation", "")
+                user_chose = entry.get("user_chose", "")
+                lines.append(f"  Attempt {attempt_num}:")
+                if options:
+                    for i, opt in enumerate(options):
+                        lines.append(f"    Option {chr(65+i)}: {opt[:150]}")
+                if recommendation:
+                    lines.append(f"    AI recommendation: {recommendation[:150]}")
+                lines.append(f"    User chose: {user_chose[:150]}")
+        return "\n".join(lines)
+
+    @staticmethod
+    def _build_fallback_failure_report(
+        step_records: List[Dict[str, Any]],
+        escalation_history: Dict[str, List[Dict[str, Any]]],
+    ) -> str:
+        """Deterministic failure report when LLM is unavailable."""
+        # Find the failed step
+        failed_step = None
+        completed_steps = []
+        for rec in step_records:
+            decision = rec.get("ai_decision", "PROCEED")
+            if decision in ("ESCALATE",):
+                failed_step = rec
+            else:
+                completed_steps.append(rec)
+
+        lines = ["### ⚠️ Design Pipeline Failed\n"]
+
+        if failed_step:
+            step_id = failed_step.get("step_id", "?")
+            step_name = failed_step.get("step_name", f"Step {step_id}")
+            lines.append(f"**Failed at:** Step {step_id} — {step_name}\n")
+
+            ai_review = failed_step.get("ai_review") or {}
+            reasoning = ai_review.get("reasoning", "")
+            if reasoning:
+                lines.append(f"**Root cause:** {reasoning}\n")
+
+            # Escalation attempts
+            step_key = str(step_id)
+            attempts = escalation_history.get(step_key, [])
+            if attempts:
+                lines.append(f"**Escalation attempts ({len(attempts)}):**")
+                for entry in attempts:
+                    user_chose = entry.get("user_chose", "N/A")
+                    lines.append(f"- Attempt {entry.get('attempt', '?')}: user chose \"{user_chose}\"")
+                lines.append("")
+
+            # Key outputs from failed step
+            outputs = failed_step.get("outputs") or {}
+            notable = {k: v for k, v in outputs.items()
+                       if k in ("h_shell_W_m2K", "Re_shell", "G_s_kg_m2s", "mu_wall_Pa_s",
+                                "kern_divergence_pct", "visc_correction") and v is not None}
+            if notable:
+                lines.append("**Failed step outputs:**")
+                for k, v in notable.items():
+                    lines.append(f"- {k}: {v}")
+                lines.append("")
+
+        if completed_steps:
+            lines.append(f"**Completed steps ({len(completed_steps)}):** "
+                         + ", ".join(f"Step {r.get('step_id', '?')}" for r in completed_steps))
+            lines.append("")
+
+        lines.append("**Recommendation:** Review the input parameters (fluid assignments, "
+                     "fluid properties, geometry) and re-run the design.\n")
+        lines.append("You can modify the inputs and re-run the design from chat.")
 
         return "\n".join(lines)
 
