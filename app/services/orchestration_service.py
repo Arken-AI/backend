@@ -567,7 +567,6 @@ class OrchestrationService:
 
             # ── Pipeline failed with error — generate failure report ────
             if is_error:
-                step_records = status.get("step_records", [])
                 escalation_history = status.get("escalation_history", {})
                 # Persist step records so they survive Redis TTL
                 try:
