@@ -34,6 +34,7 @@ from app.models.events import (
     MessageFinalEvent,
     AppErrorEvent,
     AgentTextEvent,
+    HXDesignStartedEvent,
     ToolStatus,
     ErrorType,
 )
@@ -403,7 +404,35 @@ class EventEmitter:
         )
         print(f"ERROR: APP_ERROR - {error_type}: {error_message}")
         return await self._emit_event(request_id, event)
-    
+
+    async def emit_hx_design_started(
+        self,
+        request_id: str,
+        session_id: str,
+        stream_url: str,
+    ) -> int:
+        """
+        Emit hx_design_started event after the HX Engine accepts a design request.
+
+        The frontend ChatContainer intercepts this event (before the standard
+        SSE whitelist) and passes session_id + stream_url to useHXStream so
+        HXPanel can open its own EventSource to the HX Engine.
+
+        Args:
+            request_id: Backend conversation/request identifier
+            session_id: HX Engine session identifier
+            stream_url: Absolute URL for the HX Engine SSE stream
+
+        Returns:
+            Sequence number
+        """
+        event = HXDesignStartedEvent(
+            request_id=request_id,
+            session_id=session_id,
+            stream_url=stream_url,
+        )
+        return await self._emit_event(request_id, event)
+
     # ========== Event Retrieval ==========
     
     async def get_events(

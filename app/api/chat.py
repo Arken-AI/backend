@@ -13,15 +13,16 @@ but the final response is returned directly in the HTTP response.
 import base64
 import logging
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, Any, List, Optional
 
-from fastapi import APIRouter, File, Form, HTTPException, Depends, UploadFile, status
-from fastapi.responses import JSONResponse
+from fastapi import APIRouter, File, Form, Header, HTTPException, Depends, UploadFile, status
+from fastapi.responses import JSONResponse, Response
 
 from app.models.requests import (
     ChatRequest,
     ChatResponse,
+    EditMessageRequest,
     ImageAttachment,
     ALLOWED_IMAGE_TYPES,
     MAX_ATTACHMENT_SIZE_BYTES,
@@ -31,9 +32,13 @@ from app.models.requests import (
     MessageHistoryItem,
     ErrorResponse,
     ToolExecution,
-    TokenUsage
+    TokenUsage,
+    ShareResponse,
+    HXStep,
+    SharedDesignResponse,
 )
-from app.services.orchestration_service import OrchestrationService
+from app.config import settings
+from app.services.orchestration_service import OrchestrationService, CANCEL_KEY_PREFIX, CANCEL_KEY_TTL
 from app.services.context_manager import ContextManager
 from app.dependencies import get_orchestration_service, get_redis_client, get_mongo_client, get_event_emitter
 from app.core.mongo_client import MongoClient
@@ -401,6 +406,14 @@ async def retry_last_message(
         user_text = last_user_msg.get("content", "")
         user_id = "default_user"
 
+        # Recover original attachments (images, PDFs, docs) from the dedicated
+        # attachment store so the LLM sees the same content on retry.
+        last_msg_id = last_user_msg.get("message_id")
+        original_attachments = (
+            await context_manager.get_message_attachments(last_msg_id)
+            if last_msg_id else None
+        )
+
         request_id = f"req_{uuid.uuid4().hex[:16]}"
 
         # NOTE: Do NOT pass request_id in metadata. The orchestration service
@@ -412,6 +425,7 @@ async def retry_last_message(
             user_message=user_text,
             user_id=user_id,
             metadata={"is_retry": True},
+            attachments=original_attachments,
         )
 
         logger.info(
@@ -448,6 +462,218 @@ async def retry_last_message(
             status="error",
             message=f"Retry failed: {str(e)}",
         )
+
+
+@router.post(
+    "/chat/{conversation_id}/edit",
+    response_model=ChatResponse,
+    summary="Edit a User Message",
+    description=(
+        "Edit a previously sent user message. Truncates the conversation from "
+        "the specified message index onward and re-processes with the new content "
+        "through the LLM. This is equivalent to a retry with modified text."
+    ),
+    responses={
+        200: {"description": "Edited message processed successfully", "model": ChatResponse},
+        400: {"description": "Invalid request (index out of range or not a user message)", "model": ErrorResponse},
+        404: {"description": "Conversation not found", "model": ErrorResponse},
+        500: {"description": "Internal server error", "model": ErrorResponse},
+    },
+)
+async def edit_message(
+    conversation_id: str,
+    request: EditMessageRequest,
+    orchestration: OrchestrationService = Depends(get_orchestration_service),
+    redis_client: redis.Redis = Depends(get_redis_client),
+    mongo_client: MongoClient = Depends(get_mongo_client),
+):
+    """
+    Edit a user message and regenerate the assistant response.
+
+    Steps:
+      1. Load conversation history and validate the message_index.
+      2. Ensure the message at that index is a user message.
+      3. Delete all messages from message_index onward (the edited message
+         and everything after it).
+      4. Re-run process_message with the new_content so Claude responds
+         to the edited text in the context of the earlier conversation.
+
+    The frontend should open the SSE stream BEFORE calling this endpoint
+    (same pattern as send_message and retry).
+    """
+    try:
+        context_manager = ContextManager(
+            redis_client=redis_client,
+            mongo_client=mongo_client._client,
+        )
+
+        # ── 1. Load history ──────────────────────────────────────────
+        messages = await context_manager.get_messages(conversation_id)
+        if not messages:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"No messages in conversation {conversation_id}",
+            )
+
+        # ── 2. Validate index ────────────────────────────────────────
+        if request.message_index >= len(messages):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    f"message_index {request.message_index} is out of range. "
+                    f"Conversation has {len(messages)} messages (0-indexed)."
+                ),
+            )
+
+        target_msg = messages[request.message_index]
+        if target_msg.get("role") != "user":
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    f"Message at index {request.message_index} is a "
+                    f"'{target_msg.get('role')}' message, not a user message. "
+                    f"Only user messages can be edited."
+                ),
+            )
+
+        # ── 3. Truncate from the edited message onward ───────────────
+        # Load full context, truncate at the index to avoid race conditions,
+        # and save with all other context fields preserved.
+        context = await context_manager.get_context(conversation_id)
+        truncated_messages = messages[:request.message_index]
+        context["messages"] = truncated_messages
+        context["updated_at"] = datetime.utcnow().isoformat()
+        await context_manager._save_to_redis(conversation_id, context)
+        await context_manager._save_to_mongo_async(conversation_id, context)
+        logger.info(
+            f"Edit: truncated conversation at index {request.message_index} "
+            f"(kept {len(truncated_messages)} messages) in {conversation_id}"
+        )
+
+        # ── 4. Re-process with edited content ────────────────────────
+        # Extract user_id from request metadata if available, fallback to default
+        user_id = "default_user"
+        if hasattr(request, 'metadata') and request.metadata:
+            user_id = request.metadata.get("user_id", "default_user")
+        request_id = f"req_{uuid.uuid4().hex[:16]}"
+
+        # Convert attachments to dicts if provided and validate
+        attachments = None
+        if request.attachments:
+            for att in request.attachments:
+                if att.media_type not in ALLOWED_IMAGE_TYPES:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=f"Invalid attachment type: {att.media_type}. "
+                               f"Allowed types: {', '.join(ALLOWED_IMAGE_TYPES)}"
+                    )
+                if len(att.data) > MAX_ATTACHMENT_SIZE_BYTES:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=f"Attachment exceeds size limit: {len(att.data)} > {MAX_ATTACHMENT_SIZE_BYTES} bytes"
+                    )
+            attachments = [
+                {
+                    "media_type": att.media_type,
+                    "data": att.data,
+                    "filename": att.filename,
+                }
+                for att in request.attachments
+            ]
+
+        result = await orchestration.process_message(
+            conversation_id=conversation_id,
+            user_message=request.new_content,
+            user_id=user_id,
+            metadata={"is_edit": True, "edited_index": request.message_index},
+            attachments=attachments,
+        )
+
+        logger.info(
+            f"Edit completed: conversation_id={conversation_id}, "
+            f"status={result.get('status', 'unknown')}"
+        )
+
+        # ── 5. Build response ────────────────────────────────────────
+        token_usage = None
+        if result.get("token_usage"):
+            token_usage = TokenUsage(
+                input_tokens=result["token_usage"].get("input_tokens", 0),
+                output_tokens=result["token_usage"].get("output_tokens", 0),
+                total_tokens=result["token_usage"].get("total_tokens", 0),
+            )
+
+        tool_executions = []
+        for tool_call in result.get("tool_calls", []):
+            tool_result = tool_call.get("result") or {}
+            raw_summary = tool_call.get("summary")
+            if not isinstance(raw_summary, str):
+                raw_summary = None
+            if not raw_summary:
+                raw_summary = tool_result.get("message") if isinstance(tool_result.get("message"), str) else None
+            if not raw_summary:
+                raw_summary = tool_result.get("summary") if isinstance(tool_result.get("summary"), str) else None
+            if not raw_summary:
+                raw_summary = str(tool_result)[:200]
+            tool_executions.append(ToolExecution(
+                tool_name=tool_call.get("name") or tool_call.get("tool_name") or tool_call.get("tool", "unknown"),
+                status=tool_call.get("status", "success"),
+                duration_ms=tool_call.get("duration_ms"),
+                summary=raw_summary,
+                arguments=tool_call.get("arguments"),
+                result=tool_result if tool_result else None,
+            ))
+
+        return ChatResponse(
+            conversation_id=conversation_id,
+            request_id=request_id,
+            status="completed" if result.get("status") == "success" else "error",
+            message=result.get("message", ""),
+            token_usage=token_usage,
+            run_ids=result.get("run_ids", []),
+            tool_executions=tool_executions,
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error editing message: {e}", exc_info=True)
+        return ChatResponse(
+            conversation_id=conversation_id,
+            request_id=f"req_{uuid.uuid4().hex[:16]}",
+            status="error",
+            message=f"Edit failed: {str(e)}",
+        )
+
+
+@router.post(
+    "/chat/{conversation_id}/cancel",
+    summary="Cancel In-Flight Request",
+    description=(
+        "Set a cancellation flag so the backend stops streaming the response "
+        "for this conversation. The orchestration layer handles persisting any "
+        "partial response."
+    ),
+)
+async def cancel_request(
+    conversation_id: str,
+    body: Optional[Dict[str, Any]] = None,
+    redis_client: redis.Redis = Depends(get_redis_client),
+):
+    """
+    Signal the backend to stop processing the current request for this conversation.
+
+    Sets a Redis key that the streaming orchestration loop checks on each chunk,
+    raising CancelledError when found.
+
+    Partial message persistence is handled exclusively by the orchestration
+    CancelledError handler — keeping a single writer avoids a race condition
+    where both paths simultaneously detect "not yet saved" and create duplicate
+    cancelled messages.
+    """
+    await redis_client.setex(f"{CANCEL_KEY_PREFIX}{conversation_id}", CANCEL_KEY_TTL, "1")
+    logger.info("Cancel flag set for conversation: %s", conversation_id)
+    return {"status": "cancelled", "conversation_id": conversation_id}
 
 
 @router.get(
@@ -542,6 +768,11 @@ async def get_conversation_context(
             elif has_message_final:
                 conversation_status = "completed"
         
+        # Build share URL if shared
+        is_shared = context.get("is_shared", False)
+        share_token = context.get("share_token")
+        share_url = f"{settings.frontend_url}/share/{share_token}" if is_shared and share_token else None
+
         # Build response
         response = ConversationContextResponse(
             conversation_id=conversation_id,
@@ -553,7 +784,14 @@ async def get_conversation_context(
             current_process=context.get("current_process"),
             created_at=datetime.fromisoformat(context.get("created_at")) if context.get("created_at") else datetime.now(),
             updated_at=datetime.fromisoformat(context.get("updated_at")) if context.get("updated_at") else datetime.now(),
-            last_event_sequence=last_sequence
+            last_event_sequence=last_sequence,
+            is_shared=is_shared,
+            share_url=share_url,
+            # HX Engine design data — persisted by _persist_hx_steps after pipeline completes.
+            # Used by the frontend to restore the HX step panel on page refresh.
+            hx_session_id=context.get("hx_session_id"),
+            hx_steps=context.get("hx_steps", []),
+            hx_waiting_for_user=context.get("hx_waiting_for_user", False),
         )
         
         return response
@@ -615,7 +853,7 @@ async def delete_conversation(
         logger.info(f"Conversation deleted: {conversation_id}")
         
         # Return 204 No Content
-        return JSONResponse(status_code=status.HTTP_204_NO_CONTENT, content=None)
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
         
     except Exception as e:
         logger.error(f"Error deleting conversation: {e}", exc_info=True)
@@ -691,11 +929,17 @@ async def list_conversations(
             # Check if has simulations
             run_ids = doc.get("run_ids", [])
             
+            is_shared = doc.get("is_shared", False)
+            share_token = doc.get("share_token")
+            share_url = f"{settings.frontend_url}/share/{share_token}" if is_shared and share_token else None
+
             conversations.append(ConversationListItem(
                 conversation_id=doc.get("conversation_id", str(doc.get("_id"))),
                 title=title,
                 message_count=len(messages),
                 has_simulations=len(run_ids) > 0,
+                is_shared=is_shared,
+                share_url=share_url,
                 created_at=datetime.fromisoformat(doc.get("created_at")) if doc.get("created_at") else datetime.now(),
                 updated_at=datetime.fromisoformat(doc.get("updated_at")) if doc.get("updated_at") else datetime.now()
             ))
@@ -711,4 +955,210 @@ async def list_conversations(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to list conversations: {str(e)}"
         )
+
+
+# =============================================================================
+# Share Endpoints
+# =============================================================================
+
+@router.post(
+    "/chat/{conversation_id}/share",
+    response_model=ShareResponse,
+    summary="Create Public Share Link",
+    description="Generate a public read-only share link for a conversation. Idempotent — returns the same URL if already shared.",
+    responses={
+        200: {"description": "Share link created or returned", "model": ShareResponse},
+        403: {"description": "Not authorized", "model": ErrorResponse},
+        404: {"description": "Conversation not found", "model": ErrorResponse},
+    },
+)
+async def share_conversation(
+    conversation_id: str,
+    x_username: Optional[str] = Header(None, alias="X-Username"),
+    redis_client: redis.Redis = Depends(get_redis_client),
+    mongo_client: MongoClient = Depends(get_mongo_client),
+) -> ShareResponse:
+    """
+    Create a public share link for a conversation.
+
+    Ownership check: if the conversation has a user_id, the X-Username header
+    must be present and match it. Reject requests with no header when a user_id
+    is stored (prevents auth bypass via omission).
+
+    Idempotent: if the conversation is already shared, returns the existing URL.
+    Race-safe: uses a conditional update so concurrent requests return the same token.
+    """
+    context_manager = ContextManager(
+        redis_client=redis_client,
+        mongo_client=mongo_client._client,
+    )
+    context = await context_manager.get_context(conversation_id)
+    if not context:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Conversation not found")
+
+    # Ownership check — reject if conv has a user_id and caller didn't provide one
+    conv_user_id = (context.get("user_id") or "").lower()
+    req_username = (x_username or "").lower()
+    if conv_user_id:
+        if not req_username:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized to share this conversation")
+        if conv_user_id != req_username:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized to share this conversation")
+
+    # Idempotent fast-path: return existing token if already shared (from cache)
+    if context.get("is_shared") and context.get("share_token"):
+        token = context["share_token"]
+        return ShareResponse(
+            share_url=f"{settings.frontend_url}/share/{token}",
+            token=token,
+        )
+
+    # Race-safe: only write if is_shared is not already True
+    # If another request won concurrently, modified_count == 0 and we re-read the winner
+    token = str(uuid.uuid4())
+    now = datetime.now(timezone.utc).isoformat()
+    db = mongo_client._client[settings.mongodb_db_name]
+    result = await db["conversations"].update_one(
+        {"conversation_id": conversation_id, "is_shared": {"$ne": True}},
+        {"$set": {"share_token": token, "is_shared": True, "shared_at": now, "updated_at": now}},
+    )
+    if result.modified_count == 0:
+        # Another concurrent request already set the token — re-read and return that one
+        doc = await db["conversations"].find_one(
+            {"conversation_id": conversation_id},
+            {"share_token": 1, "_id": 0},
+        )
+        token = (doc or {}).get("share_token", token)
+
+    # Invalidate Redis so next read gets fresh data from MongoDB
+    await redis_client.delete(f"context:{conversation_id}")
+
+    logger.info(f"Share link created: conversation_id={conversation_id}")
+    return ShareResponse(
+        share_url=f"{settings.frontend_url}/share/{token}",
+        token=token,
+    )
+
+
+@router.delete(
+    "/chat/{conversation_id}/share",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Revoke Share Link",
+    description="Revoke the public share link for a conversation. The old link is permanently invalidated. Idempotent.",
+    responses={
+        204: {"description": "Share link revoked"},
+        403: {"description": "Not authorized", "model": ErrorResponse},
+        404: {"description": "Conversation not found", "model": ErrorResponse},
+    },
+)
+async def revoke_share(
+    conversation_id: str,
+    x_username: Optional[str] = Header(None, alias="X-Username"),
+    redis_client: redis.Redis = Depends(get_redis_client),
+    mongo_client: MongoClient = Depends(get_mongo_client),
+):
+    """
+    Revoke the public share link for a conversation.
+
+    Uses $unset to remove share_token entirely (not set to null) so the
+    sparse unique MongoDB index works correctly. A subsequent POST /share
+    will generate a fresh UUID — the old link is permanently dead.
+    """
+    context_manager = ContextManager(
+        redis_client=redis_client,
+        mongo_client=mongo_client._client,
+    )
+    context = await context_manager.get_context(conversation_id)
+    if not context:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Conversation not found")
+
+    # Ownership check — reject if conv has a user_id and caller didn't provide one
+    conv_user_id = (context.get("user_id") or "").lower()
+    req_username = (x_username or "").lower()
+    if conv_user_id:
+        if not req_username:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized to modify this conversation")
+        if conv_user_id != req_username:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized to modify this conversation")
+
+    now = datetime.now(timezone.utc).isoformat()
+    db = mongo_client._client[settings.mongodb_db_name]
+    await db["conversations"].update_one(
+        {"conversation_id": conversation_id},
+        {
+            "$unset": {"share_token": ""},
+            "$set": {"is_shared": False, "shared_at": None, "updated_at": now},
+        },
+    )
+    # Invalidate Redis cache
+    await redis_client.delete(f"context:{conversation_id}")
+
+    logger.info(f"Share link revoked: conversation_id={conversation_id}")
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.get(
+    "/share/{token}",
+    response_model=SharedDesignResponse,
+    summary="Get Shared Design (Public)",
+    description="Retrieve a shared design by its token. No authentication required. Returns 404 if token is invalid or link has been revoked.",
+    responses={
+        200: {"description": "Shared design data", "model": SharedDesignResponse},
+        404: {"description": "Link not found or revoked", "model": ErrorResponse},
+    },
+)
+async def get_shared_design(
+    token: str,
+    mongo_client: MongoClient = Depends(get_mongo_client),
+) -> SharedDesignResponse:
+    """
+    Public endpoint — no auth required.
+
+    Looks up a conversation by its share_token WHERE is_shared=True.
+    Strips sensitive fields (user_id, internal metadata) before returning.
+    """
+    db = mongo_client._client[settings.mongodb_db_name]
+    doc = await db["conversations"].find_one({"share_token": token, "is_shared": True})
+    if not doc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Link not found or has been revoked",
+        )
+
+    # Build message list — strip metadata with user_id
+    messages = []
+    for msg in doc.get("messages", []):
+        messages.append(MessageHistoryItem(
+            role=msg.get("role", "user"),
+            content=msg.get("content", ""),
+            timestamp=datetime.fromisoformat(msg["timestamp"]) if msg.get("timestamp") else None,
+            status=msg.get("status", "complete"),
+            message_id=None,   # Don't expose internal IDs
+            metadata=None,     # Strip all metadata (may contain user_id)
+        ))
+
+    # Build hx_steps (empty until HX engine integration)
+    hx_steps = []
+    for step in doc.get("hx_steps", []):
+        hx_steps.append(HXStep(
+            step_id=step.get("step_id", ""),
+            step_number=step.get("step_number", 0),
+            status=step.get("status", ""),
+            result=step.get("result"),
+            timestamp=step.get("timestamp"),
+        ))
+
+    # Title: first user message, max 100 chars
+    title = None
+    for msg in doc.get("messages", []):
+        if msg.get("role") == "user":
+            title = (msg.get("content") or "")[:100]
+            break
+
+    return SharedDesignResponse(
+        title=title,
+        created_at=doc.get("created_at", datetime.now(timezone.utc).isoformat()),
+        messages=messages,
+        hx_steps=hx_steps,
+    )
 

@@ -15,6 +15,7 @@ from app.services.event_emitter import EventEmitter
 from app.core.mongo_client import MongoClient
 from app.services.context_manager import ContextManager
 from app.services.orchestration_service import OrchestrationService
+from app.services.tool_registry import ToolRegistry
 from app.core.llm_provider import ClaudeProvider
 
 logger = logging.getLogger(__name__)
@@ -199,6 +200,17 @@ async def close_mongo_client():
 # Orchestration Service
 # =============================================================================
 
+_tool_registry: ToolRegistry | None = None
+
+
+def get_tool_registry() -> ToolRegistry:
+    """Singleton ToolRegistry — reads engines.yaml once at startup."""
+    global _tool_registry
+    if _tool_registry is None:
+        _tool_registry = ToolRegistry()
+    return _tool_registry
+
+
 async def get_orchestration_service(
     redis_client: redis.Redis = Depends(get_redis_client),
     mongo_client: MongoClient = Depends(get_mongo_client),
@@ -206,23 +218,63 @@ async def get_orchestration_service(
 ) -> OrchestrationService:
     """
     Dependency to get OrchestrationService instance.
-    
-    Creates a new instance per request with all required dependencies.
-    
-    Returns:
-        OrchestrationService: Orchestration service instance
+
+    Creates a new instance per request with all required dependencies,
+    including the HX Engine client and tool registry for browser-based
+    HX design (Path 2).
     """
-    # ContextManager expects raw Motor client, not our wrapper
     context_manager = ContextManager(
-        redis_client=redis_client, 
-        mongo_client=mongo_client._client  # Pass underlying Motor client
+        redis_client=redis_client,
+        mongo_client=mongo_client._client,  # Pass underlying Motor client
     )
-    
-    # Create orchestration service (simple chatbot, no tools)
-    orchestration = OrchestrationService(
+
+    engine_client = await get_engine_client()
+
+    return OrchestrationService(
         context_manager=context_manager,
         event_emitter=event_emitter,
-        llm_provider=get_llm_provider(),  # Reuse singleton
+        llm_provider=get_llm_provider(),
+        redis_client=redis_client,
+        engine_client=engine_client,
+        tool_registry=get_tool_registry(),
     )
-    
-    return orchestration
+
+
+# =============================================================================
+# HX Engine Client
+# =============================================================================
+
+_engine_client: "HXEngineClient | None" = None
+_engine_client_lock: asyncio.Lock | None = None
+
+
+def _get_engine_lock() -> asyncio.Lock:
+    global _engine_client_lock
+    if _engine_client_lock is None:
+        _engine_client_lock = asyncio.Lock()
+    return _engine_client_lock
+
+
+async def get_engine_client():
+    """
+    Singleton HXEngineClient.  Connects lazily on first call.
+    Returns the client even when the HX Engine is unreachable —
+    callers should call health_check() if they need to verify availability.
+    """
+    global _engine_client
+    if _engine_client is not None:
+        return _engine_client
+    async with _get_engine_lock():
+        if _engine_client is None:
+            from app.core.engine_client import HXEngineClient
+            _engine_client = HXEngineClient()
+            await _engine_client.connect()
+    return _engine_client
+
+
+async def close_engine_client():
+    """Close HX Engine client on application shutdown."""
+    global _engine_client
+    if _engine_client:
+        await _engine_client.close()
+        _engine_client = None
