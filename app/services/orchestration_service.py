@@ -35,6 +35,38 @@ from app.core.llm_provider import ClaudeProvider
 
 logger = logging.getLogger(__name__)
 
+# ─────────────────────────────────────────────────────────────────────
+# User-friendly error messages
+# ─────────────────────────────────────────────────────────────────────
+
+_CONNECTION_ERROR_MESSAGE = (
+    "Unable to reach the AI service. "
+    "Please check your internet connection and try again."
+)
+
+_RATE_LIMIT_ERROR_MESSAGE = (
+    "The AI service is temporarily overloaded. "
+    "Please wait a moment and try again."
+)
+
+_GENERIC_ERROR_MESSAGE = (
+    "Something went wrong while processing your request. "
+    "Please try again. If the problem persists, contact support."
+)
+
+
+def _user_friendly_error(exc: Exception) -> str:
+    """Map raw exceptions to concise, user-facing messages."""
+    type_name = type(exc).__name__
+    if type_name in ("APIConnectionError", "ConnectError", "ConnectionError"):
+        return _CONNECTION_ERROR_MESSAGE
+    if type_name in ("RateLimitError",):
+        return _RATE_LIMIT_ERROR_MESSAGE
+    if type_name in ("AuthenticationError",):
+        return "AI service authentication failed. Please contact support."
+    return _GENERIC_ERROR_MESSAGE
+
+
 # Maximum number of recent messages to include in LLM context
 MAX_RECENT_MESSAGES = 20
 
@@ -410,23 +442,24 @@ class OrchestrationService:
 
         except Exception as e:
             logger.error("Orchestration error: %s\n%s", e, traceback.format_exc())
+            user_message = _user_friendly_error(e)
             await self.event_emitter.emit_app_error(
                 request_id=request_id,
                 error_type="system_error",
-                error_message=str(e),
+                error_message=user_message,
                 details={"exception_type": type(e).__name__},
                 recoverable=True,
             )
             try:
                 await self.context_manager.add_message(
-                    conversation_id, role="assistant", content=f"Error: {e}",
+                    conversation_id, role="assistant", content=user_message,
                     status="error", metadata={"error": True, "error_type": type(e).__name__},
                 )
             except Exception as save_err:
                 logger.warning("Failed to save error message: %s", save_err)
             return {
                 "status": "error",
-                "message": f"Error: {e}",
+                "message": user_message,
                 "tool_calls": [],
                 "iterations": 0,
                 "conversation_id": conversation_id,
