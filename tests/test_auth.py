@@ -23,7 +23,7 @@ os.environ.setdefault("MCP_SERVER_ARGS", "/path/to/server.py")
 os.environ.setdefault("MCP_SERVER_ENV_MONGODB_URI", "mongodb://localhost:27017/test_db")
 os.environ.setdefault("ANTHROPIC_API_KEY", "test-key")
 os.environ.setdefault("GOOGLE_API_KEY", "test-key")
-os.environ.setdefault("APP_SHARED_PASSWORD", "arkenai123")
+os.environ.setdefault("APP_SHARED_PASSWORD", "test-password-only")
 
 import pytest
 from fastapi.testclient import TestClient
@@ -39,21 +39,21 @@ class TestLoginRequestModel:
     """Test LoginRequest Pydantic model validation."""
 
     def test_valid_login_request(self):
-        req = LoginRequest(username="TestUser", password="arkenai123")
+        req = LoginRequest(username="TestUser", password="test-password-only")
         assert req.username == "TestUser"
-        assert req.password == "arkenai123"
+        assert req.password == "test-password-only"
 
     def test_username_trimmed(self):
-        req = LoginRequest(username="  TestUser  ", password="arkenai123")
+        req = LoginRequest(username="  TestUser  ", password="test-password-only")
         assert req.username == "TestUser"
 
     def test_empty_username_rejected(self):
         with pytest.raises(Exception):
-            LoginRequest(username="", password="arkenai123")
+            LoginRequest(username="", password="test-password-only")
 
     def test_whitespace_only_username_rejected(self):
         with pytest.raises(Exception):
-            LoginRequest(username="   ", password="arkenai123")
+            LoginRequest(username="   ", password="test-password-only")
 
     def test_single_char_username_allowed(self):
         req = LoginRequest(username="A", password="pwd")
@@ -126,7 +126,7 @@ class TestAuthEndpoint:
         async with AsyncClient(transport=transport, base_url="http://test") as ac:
             response = await ac.post(
                 "/api/auth/login",
-                json={"username": "TestUser", "password": "arkenai123"},
+                json={"username": "TestUser", "password": "test-password-only"},
             )
 
         assert response.status_code == 200
@@ -162,7 +162,7 @@ class TestAuthEndpoint:
         async with AsyncClient(transport=transport, base_url="http://test") as ac:
             response = await ac.post(
                 "/api/auth/login",
-                json={"username": "", "password": "arkenai123"},
+                json={"username": "", "password": "test-password-only"},
             )
 
         assert response.status_code == 422  # Pydantic validation error
@@ -174,7 +174,7 @@ class TestAuthEndpoint:
         async with AsyncClient(transport=transport, base_url="http://test") as ac:
             response = await ac.post(
                 "/api/auth/login",
-                json={"username": "   ", "password": "arkenai123"},
+                json={"username": "   ", "password": "test-password-only"},
             )
 
         assert response.status_code == 422  # Pydantic validation error
@@ -186,7 +186,7 @@ class TestAuthEndpoint:
         async with AsyncClient(transport=transport, base_url="http://test") as ac:
             response = await ac.post(
                 "/api/auth/login",
-                json={"username": "JohnDoe", "password": "arkenai123"},
+                json={"username": "JohnDoe", "password": "test-password-only"},
             )
 
         assert response.status_code == 200
@@ -202,7 +202,7 @@ class TestAuthEndpoint:
         async with AsyncClient(transport=transport, base_url="http://test") as ac:
             response = await ac.post(
                 "/api/auth/login",
-                json={"username": "MyUser123", "password": "arkenai123"},
+                json={"username": "MyUser123", "password": "test-password-only"},
             )
 
         assert response.status_code == 200
@@ -218,7 +218,7 @@ class TestAuthEndpoint:
         async with AsyncClient(transport=transport, base_url="http://test") as ac:
             response = await ac.post(
                 "/api/auth/login",
-                json={"username": "TestUser", "password": "arkenai123"},
+                json={"username": "TestUser", "password": "test-password-only"},
             )
 
         assert response.status_code == 500
@@ -244,7 +244,7 @@ class TestAuthEndpoint:
         async with AsyncClient(transport=transport, base_url="http://test") as ac:
             response = await ac.post(
                 "/api/auth/login",
-                json={"password": "arkenai123"},
+                json={"password": "test-password-only"},
             )
 
         assert response.status_code == 422
