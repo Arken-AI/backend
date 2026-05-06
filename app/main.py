@@ -104,7 +104,7 @@ async def lifespan(app: FastAPI):
     """
     # Startup — ensure indexes exist
     try:
-        mongo = get_mongo_client()
+        mongo = await get_mongo_client()
         db = mongo._client[settings.mongodb_db_name]
         # Sparse unique index on share_token: excludes absent fields, enforces
         # uniqueness when the field is present. Use $unset (not $set null) on

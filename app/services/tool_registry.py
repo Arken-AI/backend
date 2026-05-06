@@ -36,6 +36,8 @@ def _load_engines_yaml() -> dict:
 _FIELD_TYPES: dict[str, str] = {
     "hot_fluid_name":    "string",
     "cold_fluid_name":   "string",
+    "hot_phase":         "string",
+    "cold_phase":        "string",
     "tema_preference":   "string",
     "raw_request":       "string",
     "token":             "string",
@@ -52,6 +54,19 @@ _FIELD_TYPES: dict[str, str] = {
 _FIELD_DESCRIPTIONS: dict[str, str] = {
     "hot_fluid_name":    "Name of the hot-side fluid (e.g. 'steam', 'water', 'oil')",
     "cold_fluid_name":   "Name of the cold-side fluid (e.g. 'water', 'glycol')",
+    "hot_phase":         (
+        "Phase state of the hot-side fluid. "
+        "Set to 'vapor', 'gas', or 'condensing' when the hot stream enters as a vapor "
+        "(e.g. steam, solvent vapor) and will condense; "
+        "set to 'liquid' for a sensible-heat liquid stream. "
+        "Omit when not known — the engine will infer it from the saturation temperature."
+    ),
+    "cold_phase":        (
+        "Phase state of the cold-side fluid. "
+        "Set to 'vapor'/'gas' for a gaseous stream, 'evaporating' for a boiling stream, "
+        "or 'liquid' for a sensible-heat liquid stream. "
+        "Omit when not known."
+    ),
     "T_hot_in_C":        "Hot-side inlet temperature (°C)",
     "T_cold_in_C":       "Cold-side inlet temperature (°C)",
     "T_hot_out_C":       "Hot-side outlet temperature (°C) — optional target",
