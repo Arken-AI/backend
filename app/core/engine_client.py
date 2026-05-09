@@ -54,6 +54,11 @@ class HXEngineClient:
             raise RuntimeError("HXEngineClient not connected — call connect() first")
         payload = {"user_id": user_id, **kwargs}
         resp = await self._client.post("/api/v1/hx/requirements", json=payload)
+        # 422 carries a structured body: { valid: false, errors: [...] }
+        # Return it directly so the orchestration layer can relay the errors
+        # back to the LLM for self-correction — no exception, no app_error.
+        if resp.status_code == 422:
+            return resp.json()
         resp.raise_for_status()
         return resp.json()
 
