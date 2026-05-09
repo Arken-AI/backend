@@ -25,6 +25,8 @@ engines:
           - m_dot_cold_kg_s
           - P_hot_Pa
           - P_cold_Pa
+          - hot_phase
+          - cold_phase
           - tema_preference
 
       - name: hx_design
@@ -49,4 +51,6 @@ engines:
           - m_dot_cold_kg_s
           - P_hot_Pa
           - P_cold_Pa
+          - hot_phase
+          - cold_phase
           - tema_preference
