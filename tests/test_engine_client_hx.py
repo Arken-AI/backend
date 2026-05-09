@@ -59,12 +59,29 @@ class TestValidateRequirements:
         assert result == expected
 
     async def test_raises_on_http_error(self, client):
-        resp = _make_response(422, {"detail": "validation error"})
+        # Non-422 HTTP errors (e.g. 500) should still raise
+        resp = _make_response(500, {"detail": "internal server error"})
         client._client.post = AsyncMock(return_value=resp)
         with pytest.raises(httpx.HTTPStatusError):
             await client.validate_requirements(user_id="test", hot_fluid_name="steam",
                                                 cold_fluid_name="water", T_hot_in_C=180.0,
                                                 T_cold_in_C=25.0, m_dot_hot_kg_s=10.0)
+
+    async def test_422_returns_structured_body(self, client):
+        # 422 with a structured body should be returned (not raised) so the
+        # LLM can self-correct without triggering an app_error event.
+        body = {
+            "valid": False,
+            "errors": [{"field": "m_dot_hot_kg_s", "message": "Field required",
+                        "suggestion": "Provide m_dot_hot_kg_s", "valid_range": None}],
+        }
+        resp = _make_response(422, body)
+        client._client.post = AsyncMock(return_value=resp)
+        result = await client.validate_requirements(user_id="test", hot_fluid_name="steam",
+                                                     cold_fluid_name="water", T_hot_in_C=180.0,
+                                                     T_cold_in_C=25.0)
+        assert result["valid"] is False
+        assert result["errors"][0]["field"] == "m_dot_hot_kg_s"
 
     async def test_not_connected_raises_runtime_error(self):
         ec = HXEngineClient.__new__(HXEngineClient)
