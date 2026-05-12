@@ -41,6 +41,7 @@ _FIELD_TYPES: dict[str, str] = {
     "tema_preference":   "string",
     "raw_request":       "string",
     "token":             "string",
+    "tube_material":     "string",
     "T_hot_in_C":        "number",
     "T_cold_in_C":       "number",
     "T_hot_out_C":       "number",
@@ -49,6 +50,16 @@ _FIELD_TYPES: dict[str, str] = {
     "m_dot_cold_kg_s":   "number",
     "P_hot_Pa":          "number",
     "P_cold_Pa":         "number",
+    "dP_hot_max_Pa":     "number",
+    "dP_cold_max_Pa":    "number",
+    "P_hot_design_Pa":   "number",
+    "P_cold_design_Pa":  "number",
+    "fouling_hot_m2K_W": "number",
+    "fouling_cold_m2K_W":"number",
+    "baffle_cut":        "number",
+    "shell_diameter_m":  "number",
+    "tube_od_m":         "number",
+    "n_passes":          "number",
 }
 
 _FIELD_DESCRIPTIONS: dict[str, str] = {
@@ -78,6 +89,51 @@ _FIELD_DESCRIPTIONS: dict[str, str] = {
     "tema_preference":   "Preferred TEMA type (e.g. 'BEM', 'AES') — optional",
     "raw_request":       "Original user request text — optional, for traceability",
     "token":             "Validation token from hx_validate_requirements",
+    "dP_hot_max_Pa":     (
+        "Maximum allowable pressure drop on the hot side (Pa) — optional override. "
+        "Ask when user mentions piping pressure budget or pump limitations. "
+        "Directly prevents Step 10 failures."
+    ),
+    "dP_cold_max_Pa":    (
+        "Maximum allowable pressure drop on the cold side (Pa) — optional override. "
+        "Ask when user mentions piping pressure budget or pump limitations."
+    ),
+    "P_hot_design_Pa":   (
+        "Design pressure for the hot side (Pa, typically 1.1× operating) — optional. "
+        "Needed for Step 14 ASME wall thickness. Ask for high-pressure service (>10 bar)."
+    ),
+    "P_cold_design_Pa":  (
+        "Design pressure for the cold side (Pa) — optional. "
+        "Needed for Step 14 ASME wall thickness."
+    ),
+    "tube_material":     (
+        "Tube metallurgy — optional override (e.g. 'carbon_steel', 'stainless_steel', "
+        "'titanium', 'admiralty_brass'). Ask when corrosive fluids are mentioned."
+    ),
+    "fouling_hot_m2K_W": (
+        "Hot-side fouling resistance override (m²·K/W) — optional. "
+        "Only provide if site-specific fouling data is available; engine uses TEMA tables by default."
+    ),
+    "fouling_cold_m2K_W":(
+        "Cold-side fouling resistance override (m²·K/W) — optional. "
+        "Only provide if site-specific fouling data is available."
+    ),
+    "baffle_cut":        (
+        "Fractional baffle cut (0.15–0.45) — optional. "
+        "Only ask if user has a plant standard. Engine selects 0.25 by default."
+    ),
+    "shell_diameter_m":  (
+        "Preferred shell diameter (m) — optional. "
+        "Only ask if user has physical size constraints."
+    ),
+    "tube_od_m":         (
+        "Preferred tube outer diameter (m, e.g. 0.01905 = 3/4\") — optional. "
+        "Only ask if user specifies a tube standard."
+    ),
+    "n_passes":          (
+        "Number of tube passes (1, 2, 4, 6, or 8) — optional. "
+        "Only ask if user has a preference."
+    ),
 }
 
 
