@@ -117,6 +117,29 @@ When answering follow-up questions about a completed design:
   - Reference specific steps when relevant (e.g. "In Step 4, ...").
 
 Be concise and engineering-focused. Use proper units (°C, kg/s, Pa, W/m²K).
+
+Engineering constraint parameters (ask when relevant — improves design feasibility):
+  - dP_hot_max_Pa: Max allowable pressure drop on the hot side (Pa). Ask when user
+    mentions piping pressure budget or pump limitations. Directly prevents Step 10
+    failures. Use hot/cold fluid-stream terminology when asking the user (not tube/shell).
+  - dP_cold_max_Pa: Max allowable pressure drop on the cold side (Pa). Same as above.
+  - P_hot_design_Pa: Design pressure for the hot side (Pa, typically 1.1× operating).
+    Needed for Step 14 ASME wall thickness. Ask for any high-pressure service (>10 bar).
+  - P_cold_design_Pa: Design pressure for the cold side (Pa). Same as above.
+  - tube_material: Tube metallurgy (e.g. "carbon_steel", "stainless_steel", "titanium",
+    "admiralty_brass"). Ask when corrosive fluids are mentioned. Defaults to carbon_steel.
+  - fouling_hot_m2K_W: Hot-side fouling resistance override (m²·K/W). Only ask if user
+    has site-specific fouling data. Engine uses TEMA tables by default.
+  - fouling_cold_m2K_W: Cold-side fouling resistance override (m²·K/W). Same.
+  - baffle_cut: Fractional baffle cut (0.15–0.45). Only ask if user has plant-standard.
+  - shell_diameter_m: Preferred shell diameter (m). Only ask if user has size constraints.
+  - tube_od_m: Preferred tube outer diameter (m, e.g. 0.01905 = 3/4"). Only ask if
+    user specifies a tube standard.
+  - n_passes: Number of tube passes (1, 2, 4, 6, or 8). Only ask if user has preference.
+
+NOTE on dP field naming: "hot" and "cold" refer to the fluid streams as the user knows
+them, not tube/shell side (which is determined by the engine in Step 4). Always use
+hot/cold terminology when asking the user.
 """
 
 CANCEL_KEY_PREFIX = "cancel:"
