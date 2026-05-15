@@ -49,6 +49,11 @@ _RATE_LIMIT_ERROR_MESSAGE = (
     "Please wait a moment and try again."
 )
 
+_BILLING_ERROR_MESSAGE = (
+    "The AI service is unavailable: the provider account is out of credits. "
+    "Please contact your administrator to top up the Anthropic API balance."
+)
+
 _GENERIC_ERROR_MESSAGE = (
     "Something went wrong while processing your request. "
     "Please try again. If the problem persists, contact support."
@@ -62,8 +67,15 @@ def _user_friendly_error(exc: Exception) -> str:
         return _CONNECTION_ERROR_MESSAGE
     if type_name in ("RateLimitError",):
         return _RATE_LIMIT_ERROR_MESSAGE
-    if type_name in ("AuthenticationError",):
+    if type_name in ("AuthenticationError", "PermissionDeniedError"):
         return "AI service authentication failed. Please contact support."
+    # Anthropic returns HTTP 400 BadRequestError when the workspace credit
+    # balance is exhausted. Detect by message content since the SDK does not
+    # expose a dedicated billing exception type.
+    if type_name in ("BadRequestError",):
+        msg = str(exc).lower()
+        if "credit balance" in msg or "billing" in msg or "plans & billing" in msg:
+            return _BILLING_ERROR_MESSAGE
     return _GENERIC_ERROR_MESSAGE
 
 
