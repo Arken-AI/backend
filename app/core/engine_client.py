@@ -94,6 +94,24 @@ class HXEngineClient:
         resp.raise_for_status()
         return resp.json()
 
+    async def respond_to_design(self, session_id: str, payload: dict) -> dict:
+        """
+        POST /api/v1/hx/design/{session_id}/respond
+        → engine response JSON
+
+        Forwards a user response (option selection or manual property override)
+        to the HX Engine respond endpoint.  Raises httpx.HTTPStatusError on
+        non-2xx or RuntimeError when not connected.
+        """
+        if self._client is None:
+            raise RuntimeError("HXEngineClient not connected — call connect() first")
+        resp = await self._client.post(
+            f"/api/v1/hx/design/{session_id}/respond",
+            json=payload,
+        )
+        resp.raise_for_status()
+        return resp.json()
+
     async def close(self):
         if self._client:
             await self._client.aclose()
