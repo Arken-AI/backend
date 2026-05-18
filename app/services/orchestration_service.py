@@ -632,6 +632,7 @@ class OrchestrationService:
                 continue  # pipeline still running, nothing to persist yet
 
             step_records = status.get("step_records", [])
+            property_provenance = status.get("property_provenance")
 
             # ── Pipeline failed with error — generate failure report ────
             if is_error:
@@ -714,19 +715,27 @@ class OrchestrationService:
 
             # ── 1. Persist step records ──────────────────────────────────
             try:
+                context_update = {
+                    "hx_session_id": session_id,
+                    "hx_steps": step_records,
+                    "hx_waiting_for_user": False,  # pipeline complete, clear the flag
+                }
+                if property_provenance is not None:
+                    context_update["hx_fluid_property_sources"] = property_provenance
                 await self.context_manager.update_context(
                     conversation_id,
-                    {
-                        "hx_session_id": session_id,
-                        "hx_steps": step_records,
-                        "hx_waiting_for_user": False,  # pipeline complete, clear the flag
-                    },
+                    context_update,
                 )
                 logger.info(
                     "_persist_hx_steps: persisted %d step records "
                     "for session %s → conversation %s",
                     len(step_records), session_id, conversation_id,
                 )
+                if property_provenance is not None:
+                    logger.info(
+                        "_persist_hx_steps: persisted fluid_property_sources for session %s",
+                        session_id,
+                    )
             except Exception as exc:
                 logger.error(
                     "_persist_hx_steps: failed to persist steps for %s: %s",
