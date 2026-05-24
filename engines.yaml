@@ -28,6 +28,17 @@ engines:
           - hot_phase
           - cold_phase
           - tema_preference
+          - dP_hot_max_Pa
+          - dP_cold_max_Pa
+          - P_hot_design_Pa
+          - P_cold_design_Pa
+          - tube_material
+          - fouling_hot_m2K_W
+          - fouling_cold_m2K_W
+          - baffle_cut
+          - shell_diameter_m
+          - tube_od_m
+          - n_passes
 
       - name: hx_design
         description: >
@@ -54,3 +65,14 @@ engines:
           - hot_phase
           - cold_phase
           - tema_preference
+          - dP_hot_max_Pa
+          - dP_cold_max_Pa
+          - P_hot_design_Pa
+          - P_cold_design_Pa
+          - tube_material
+          - fouling_hot_m2K_W
+          - fouling_cold_m2K_W
+          - baffle_cut
+          - shell_diameter_m
+          - tube_od_m
+          - n_passes
