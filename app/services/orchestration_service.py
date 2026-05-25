@@ -83,6 +83,10 @@ def _user_friendly_error(exc: Exception) -> str:
 # Maximum number of recent messages to include in LLM context
 MAX_RECENT_MESSAGES = 20
 
+# Long histories are compacted before sending to the LLM. Raw messages stay in
+# ContextManager storage; this only changes the prompt payload.
+CONTEXT_COMPACTION_TRIGGER_MESSAGES = MAX_RECENT_MESSAGES
+
 # Maximum tool call iterations per user turn (validate + design = 2; guard against loops)
 MAX_TOOL_TURNS = 5
 
@@ -1170,8 +1174,20 @@ class OrchestrationService:
         history = await self.context_manager.get_messages(conversation_id)
         prior = history[:-1] if history else []
         recent = prior[-MAX_RECENT_MESSAGES:]
+        compacted = prior[:-MAX_RECENT_MESSAGES]
 
         messages = []
+        if len(prior) > CONTEXT_COMPACTION_TRIGGER_MESSAGES and compacted:
+            context = await self.context_manager.get_context(conversation_id) or {}
+            messages.append({
+                "role": "user",
+                "content": self._build_context_compaction_summary(
+                    context=context,
+                    compacted_messages=compacted,
+                    total_prior_messages=len(prior),
+                ),
+            })
+
         for msg in recent:
             role = msg.get("role")
             content = msg.get("content", "")
@@ -1180,6 +1196,84 @@ class OrchestrationService:
 
         messages.append({"role": "user", "content": current_user_content})
         return messages
+
+    @staticmethod
+    def _build_context_compaction_summary(
+        context: Dict[str, Any],
+        compacted_messages: List[Dict[str, Any]],
+        total_prior_messages: int,
+    ) -> str:
+        """Build deterministic context for older turns omitted from raw history."""
+        compacted_count = len(compacted_messages)
+        first = compacted_messages[0] if compacted_messages else {}
+        last = compacted_messages[-1] if compacted_messages else {}
+
+        return "\n".join([
+            "[Compacted prior conversation context]",
+            f"session_summary: {compacted_count} older messages were compacted out of {total_prior_messages} prior messages. Raw audit history remains stored in the conversation record.",
+            f"active_design_intent: {OrchestrationService._infer_active_design_intent(compacted_messages)}",
+            "confirmed_user_decisions:",
+            OrchestrationService._format_confirmed_user_decisions(context),
+            "open_engineering_risks:",
+            OrchestrationService._format_open_engineering_risks(context),
+            f"latest_step_status: {OrchestrationService._format_latest_step_status(context)}",
+            "discarded_detail_refs:",
+            f"- first_message_id={first.get('message_id', 'unknown')} timestamp={first.get('timestamp', 'unknown')}",
+            f"- last_message_id={last.get('message_id', 'unknown')} timestamp={last.get('timestamp', 'unknown')}",
+        ])
+
+    @staticmethod
+    def _infer_active_design_intent(messages: List[Dict[str, Any]]) -> str:
+        for msg in reversed(messages):
+            if msg.get("role") == "user" and msg.get("content"):
+                return str(msg["content"])[:300]
+        return "No earlier user design intent found in compacted messages."
+
+    @staticmethod
+    def _format_confirmed_user_decisions(context: Dict[str, Any]) -> str:
+        lines = []
+        escalation_history = context.get("escalation_history") or {}
+        for step_key, attempts in escalation_history.items():
+            for entry in attempts or []:
+                user_chose = entry.get("user_chose")
+                if user_chose:
+                    attempt = entry.get("attempt", "?")
+                    lines.append(f"- Step {step_key} attempt {attempt}: {user_chose}")
+
+        if not lines:
+            return "- None recorded."
+        return "\n".join(lines[:10])
+
+    @staticmethod
+    def _format_open_engineering_risks(context: Dict[str, Any]) -> str:
+        lines = []
+        for rec in context.get("hx_steps") or []:
+            decision = rec.get("ai_decision") or "PROCEED"
+            warnings = rec.get("warnings") or []
+            if decision in ("PROCEED", "APPROVED", None) and not warnings:
+                continue
+
+            step_name = rec.get("step_name", f"Step {rec.get('step_id', '?')}")
+            lines.append(f"- {step_name} [{decision}]")
+            for warning in warnings[:2]:
+                lines.append(f"  warning: {str(warning)[:160]}")
+
+        if not lines:
+            return "- None recorded."
+        return "\n".join(lines[:12])
+
+    @staticmethod
+    def _format_latest_step_status(context: Dict[str, Any]) -> str:
+        hx_steps = context.get("hx_steps") or []
+        if not hx_steps:
+            return "No HX step records available."
+
+        latest = hx_steps[-1]
+        step_id = latest.get("step_id", "?")
+        step_name = latest.get("step_name", f"Step {step_id}")
+        status = latest.get("status", "unknown")
+        decision = latest.get("ai_decision") or "PROCEED"
+        return f"Step {step_id} - {step_name}; status={status}; ai_decision={decision}"
 
     async def _build_system_prompt(self, conversation_id: str) -> str:
         """
