@@ -94,6 +94,29 @@ class HXEngineClient:
         resp.raise_for_status()
         return resp.json()
 
+    async def respond_to_escalation(
+        self, session_id: str, payload: dict
+    ) -> tuple[int, dict]:
+        """
+        POST /api/v1/hx/design/{session_id}/respond → (status_code, json_body)
+
+        Relays the user's response to an ESCALATED pipeline step. Returns the
+        engine's status code + JSON body as a tuple WITHOUT raising on the
+        business-level error codes the engine surfaces (404 session not found,
+        410 response window expired, 422 schema validation). Network errors
+        and 5xx HTTP errors propagate as httpx exceptions so the caller can
+        normalize them (see backend/app/api/hx.py).
+        """
+        if self._client is None:
+            raise RuntimeError("HXEngineClient not connected — call connect() first")
+        resp = await self._client.post(
+            f"/api/v1/hx/design/{session_id}/respond", json=payload
+        )
+        if resp.status_code >= 500:
+            resp.raise_for_status()
+        body = resp.json() if resp.content else {}
+        return resp.status_code, body
+
     async def close(self):
         if self._client:
             await self._client.aclose()

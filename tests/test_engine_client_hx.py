@@ -137,3 +137,56 @@ class TestStartDesign:
                                             T_cold_in_C=25.0, m_dot_hot_kg_s=10.0)
         assert result["session_id"] == "sess_xyz"
         assert result["stream_url"] == "/api/v1/hx/design/sess_xyz/stream"
+
+
+# ---------------------------------------------------------------------------
+# respond_to_escalation
+# ---------------------------------------------------------------------------
+
+class TestRespondToEscalation:
+    async def test_posts_to_correct_url_with_payload(self, client):
+        client._client.post = AsyncMock(
+            return_value=_make_response(200, {"status": "received"})
+        )
+        payload = {"type": "override", "values": {"user_input": "A", "option_index": 0}}
+        status, body = await client.respond_to_escalation("sess_abc", payload)
+        assert status == 200
+        assert body == {"status": "received"}
+        call_args = client._client.post.call_args
+        assert call_args[0][0] == "/api/v1/hx/design/sess_abc/respond"
+        assert call_args[1]["json"] == payload
+
+    async def test_410_relayed_as_tuple_without_raising(self, client):
+        body = {"detail": "Response window has expired."}
+        client._client.post = AsyncMock(return_value=_make_response(410, body))
+        status, returned = await client.respond_to_escalation("sess_xyz", {"type": "accept"})
+        assert status == 410
+        assert returned == body
+
+    async def test_404_relayed_as_tuple_without_raising(self, client):
+        body = {"detail": "Session not found"}
+        client._client.post = AsyncMock(return_value=_make_response(404, body))
+        status, returned = await client.respond_to_escalation("missing", {"type": "skip"})
+        assert status == 404
+        assert returned == body
+
+    async def test_422_relayed_as_tuple_without_raising(self, client):
+        body = {"detail": [{"loc": ["body", "type"], "msg": "Field required"}]}
+        client._client.post = AsyncMock(return_value=_make_response(422, body))
+        status, returned = await client.respond_to_escalation("sess_abc", {})
+        assert status == 422
+        assert returned == body
+
+    async def test_5xx_raises(self, client):
+        client._client.post = AsyncMock(
+            return_value=_make_response(500, {"detail": "boom"})
+        )
+        with pytest.raises(httpx.HTTPStatusError):
+            await client.respond_to_escalation("sess_abc", {"type": "accept"})
+
+    async def test_not_connected_raises_runtime_error(self):
+        ec = HXEngineClient.__new__(HXEngineClient)
+        ec.base_url = "http://hx-engine:8100"
+        ec._client = None
+        with pytest.raises(RuntimeError, match="not connected"):
+            await ec.respond_to_escalation("sess_abc", {"type": "accept"})
